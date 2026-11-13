@@ -3,3 +3,7 @@ logs/
 *.log
 .env
 .DS_Store
+
+# hasil scl-import
+/*.[0-9]*.sql
+/*.[0-9]*.csv

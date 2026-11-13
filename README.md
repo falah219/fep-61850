@@ -304,3 +304,27 @@ Uji (simulator: semua `SPCSO` = direct-with-normal-security; seed: IOA 3001..300
 ```
 → `RTU_COMMAND` status `active`, lalu `RTU_DATAS` IOA 1001 (`SPCSO1` status) `DATA_CHANGE` value 1.
 Ulangi dengan `"value":0` → value 0. IOA yang bukan titik kontrol (mis. 1001) → status `inactive`.
+
+## Fase 10 — Import SCL → mapping + IOA otomatis
+
+[src/scl.rs](src/scl.rs) + binary [src/bin/scl_import.rs](src/bin/scl_import.rs). Hasilnya **usulan untuk direview**, tidak langsung dipakai FEP.
+
+- Baca `IED` → `LDevice` → `LN0`/`LN` → `DO` (lewat `DataTypeTemplates`). Nama LD = `ldName` atau `IED + inst`, nama LN = `prefix + lnClass + inst`.
+- CDC didukung: status `SPS DPS INS ENS` (+ status dari `SPC DPC INC BSC`) → FC `ST`; `BCR` → `ST`;
+  measurement `MV CMV APC` → FC `MX`; CDC komposit (`WYE`, `DEL`, ...) diturunkan ke SDO (`PhV.phsA` = CMV).
+- Titik kontrol (FC `CO`) dibuat untuk `SPC DPC INC APC BSC` yang punya `Oper` dan `ctlModel` ≠ `status-only`
+  (ctlModel dari `DOI/DAI` menimpa default `DOType`).
+- IOA: status **1001..**, measurement **2001..**, kontrol **3001..** (maks 999 per jenis, lebih dari itu error).
+- Tag usulan: reference dengan `/` `.` → `_`, kontrol diberi akhiran `_CO` (mis. `BAY1LD0_XCBR1_Pos_CO`).
+- RCB dari `ReportControl` (instance pertama, `name01` jika indexed) ditulis sebagai **komentar** di SQL; aktifkan yang dipakai.
+- SCD berisi banyak IED → sebutkan nama IED.
+
+```powershell
+# image dev perlu di-build ulang sekali (file CID simulator disalin ke image)
+docker compose -f docker-compose.dev.yml up -d --build dev
+docker compose -f docker-compose.dev.yml exec dev cargo test scl
+docker compose -f docker-compose.dev.yml exec dev cargo run --bin scl_import -- /usr/local/share/libiec61850/simpleIO_direct_control.cid 9001
+```
+
+Hasil yang diharapkan untuk simulator: **22 titik** (14 status, 4 measurement, 4 kontrol `SPCSO1..4`), 6 RCB,
+file `simpleIO_direct_control.9001.sql` dan `.csv` muncul di root repo (keduanya di-ignore git).

@@ -8,3 +8,4 @@ pub mod manager;
 pub mod publisher;
 pub mod repository;
 pub mod resolver;
+pub mod scl;

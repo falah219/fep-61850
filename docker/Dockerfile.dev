@@ -26,6 +26,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=libiec61850 /usr/local/lib/ /usr/local/lib/
 COPY --from=libiec61850 /usr/local/include/libiec61850 /usr/local/include/libiec61850
 COPY --from=libiec61850 /usr/local/bin/mms_utility /usr/local/bin/
+# Contoh file SCL simulator (untuk uji scl-import, fase 10)
+COPY --from=libiec61850 /src/examples/server_example_basic_io/simpleIO_direct_control.cid /usr/local/share/libiec61850/
 WORKDIR /work
 
 FROM debian:bookworm-slim AS ied-sim
