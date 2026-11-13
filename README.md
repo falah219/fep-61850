@@ -40,3 +40,29 @@ Matikan:
 ```powershell
 docker compose -f docker-compose.dev.yml down
 ```
+
+## Fase 2 — `iec61850-hello`: konek + baca satu nilai
+
+Proyek kecil di [iec61850-hello/](iec61850-hello/):
+- `build.rs` — link statis `libiec61850.a` + `libhal.a` dari `/usr/local/lib` (di image `dev`),
+  lalu bindgen dari `wrapper.h` → `bindings.rs` (pola sama dengan FEP IEC 104).
+- `src/ffi.rs` — include hasil bindgen.
+- `src/main.rs` — `IedConnection_connect` → `IedConnection_readFloatValue` (FC `MX`) → close.
+
+Image `dev` harus di-build ulang karena Dockerfile diperbaiki (build semua target libIEC61850):
+
+```powershell
+docker compose -f docker-compose.dev.yml up -d --build
+docker compose -f docker-compose.dev.yml exec -w /work/iec61850-hello dev cargo run
+# argumen opsional: host port object_reference
+docker compose -f docker-compose.dev.yml exec -w /work/iec61850-hello dev cargo run -- ied-sim-2 102 simpleIOGenericIO/GGIO1.AnIn2.mag.f
+```
+
+Hasil yang diharapkan:
+
+```
+terkoneksi ke ied-sim-1:102
+simpleIOGenericIO/GGIO1.AnIn1.mag.f [MX] = 0.84147096
+```
+
+Jalankan beberapa kali: nilainya berubah karena simulator mengisi gelombang sinus.

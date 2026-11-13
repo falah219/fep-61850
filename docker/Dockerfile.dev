@@ -12,8 +12,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 # Pin ke tag rilis stabil (setara pin commit lib60870 di FEP IEC 104)
 RUN git clone --depth 1 -b ${LIBIEC61850_TAG} https://github.com/mz-automation/libiec61850.git /src \
-    && cmake -S /src -B /src/build -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=ON -DCMAKE_INSTALL_PREFIX=/usr/local \
-    && cmake --build /src/build -j"$(nproc)" --target iec61850 server_example_basic_io mms_utility \
+    && cmake -S /src -B /src/build -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=ON -DBUILD_TESTS=OFF -DCMAKE_INSTALL_PREFIX=/usr/local \
+    && cmake --build /src/build -j"$(nproc)" \
     && cmake --install /src/build \
     && cp /src/build/examples/server_example_basic_io/server_example_basic_io /usr/local/bin/ied-sim \
     && cp /src/build/examples/mms_utility/mms_utility /usr/local/bin/mms_utility
