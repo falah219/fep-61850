@@ -1,0 +1,74 @@
+# Pola sama dengan kubernetes/232/statefulset.yaml FEP IEC 104.
+# StatefulSet 1 replika: menjamin tidak pernah ada 2 pod FEP yang konek ke IED yang sama
+# (data dobel / RCB rebutan) saat rollout.
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: fep-iec61850
+  namespace: fep-iec61850
+  labels:
+    app: fep-iec61850
+spec:
+  serviceName: fep-iec61850-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fep-iec61850
+  template:
+    metadata:
+      labels:
+        app: fep-iec61850
+    spec:
+      tolerations:
+        - key: "node.kubernetes.io/not-ready"
+          operator: "Exists"
+          effect: "NoExecute"
+          tolerationSeconds: 5
+        - key: "node.kubernetes.io/unreachable"
+          operator: "Exists"
+          effect: "NoExecute"
+          tolerationSeconds: 5
+      imagePullSecrets:
+        - name: harbor-secret
+      # Sama dengan FEP IEC 104: root + NET_RAW untuk ping ICMP status jaringan.
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+      containers:
+        - name: fep-iec61850
+          image: 10.14.152.233:8080/scada/iconics-fep-iec61850:latest
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              add:
+                - NET_RAW
+          envFrom:
+            - configMapRef:
+                name: fep-iec61850-env
+            - secretRef:
+                name: fep-iec61850-secret
+          env:
+            - name: TZ
+              value: Asia/Jakarta
+          resources:
+            # ponytail: angka awal, sesuaikan setelah uji beban 100 IED (fase 11)
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              memory: "1Gi"
+      # FEP mengirim status sistem 0 + flush Kafka saat SIGTERM
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fep-iec61850-headless
+  namespace: fep-iec61850
+  labels:
+    app: fep-iec61850
+spec:
+  clusterIP: None
+  selector:
+    app: fep-iec61850

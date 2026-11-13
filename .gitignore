@@ -7,3 +7,6 @@ logs/
 # hasil scl-import
 /*.[0-9]*.sql
 /*.[0-9]*.csv
+
+# secret asli Kubernetes
+kubernetes/secret.yaml

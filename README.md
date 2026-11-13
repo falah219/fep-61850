@@ -328,3 +328,25 @@ docker compose -f docker-compose.dev.yml exec dev cargo run --bin scl_import -- 
 
 Hasil yang diharapkan untuk simulator: **22 titik** (14 status, 4 measurement, 4 kontrol `SPCSO1..4`), 6 RCB,
 file `simpleIO_direct_control.9001.sql` dan `.csv` muncul di root repo (keduanya di-ignore git).
+
+## Deploy — Dockerfile produksi + Kubernetes
+
+> Uji beban 100 IED (fase 11) **ditunda** sampai service simulator siap.
+
+- [Dockerfile](Dockerfile): build libIEC61850 v1.6.2.1 (statis, tanpa examples) + `cargo build --release`,
+  runtime `debian:bookworm-slim`, user non-root dengan `cap_net_raw` (ping).
+- [kubernetes/](kubernetes/) — pola `kubernetes/232` FEP IEC 104:
+  - `statefulset.yaml`: **1 replika** (tidak boleh 2 pod konek ke IED yang sama), root + `NET_RAW` seperti IEC 104,
+    headless service (FEP tidak punya API port).
+  - `configmap.yaml`: isi `<...>` sesuai lingkungan. `GROUP_ID` = `IEC61850_FEP_GROUP` (beda dengan IEC 104).
+  - `secret.example.yaml` → salin ke `secret.yaml` (di-ignore git), isi `DB_PASSWORD` & `SASL_PASSWORD`.
+  - `install.sh [tag]`: build → push → apply → rollout.
+
+```bash
+# di server yang punya akses registry + kubectl
+cp kubernetes/secret.example.yaml kubernetes/secret.yaml   # lalu isi
+kubernetes/install.sh v0.1.0
+kubectl logs -f -l app=fep-iec61850 -n fep-iec61850
+```
+
+Cek build image di Windows (tanpa deploy): `docker build -t fep-iec61850:dev .`

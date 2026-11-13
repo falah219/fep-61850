@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fep-iec61850-env
+  namespace: fep-iec61850
+data:
+  # ISI sesuai lingkungan tujuan (lihat kubernetes/232/configmap.yaml di FEP IEC 104).
+  POSTGRE_HOST: "<isi-host-postgres>"
+  POSTGRE_PORT: "5432"
+  DB_USERNAME: "postgres"
+  DB_DATABASE: "<isi-nama-db>"
+
+  BOOTSTRAP_SERVER: "<isi-host1:port,host2:port>"
+  SECURITY_PROTOCOL: "SASL_PLAINTEXT"
+  SASL_MECANISM: "PLAIN"
+  SASL_USERNAME: "<isi-user-kafka>"
+  # HARUS beda dengan FEP IEC 104 (IEC104_FEP_GROUP) supaya kedua FEP menerima semua pesan
+  GROUP_ID: "IEC61850_FEP_GROUP"
+  CLIENT_ID: "iec61850_fep_client"
+  SUBSCRIBE_TOPICS: "RTU_EVENTS,RTU_COMMAND_CONFIG_REQUEST,MASTER_DATAPOINT_EVENT,MASTER_DATA_OBJECT_EVENT,CAPTURE_DATA_CHANGE,MASTER_RTU_EVENTS,MANUAL_SET_EVENT"
+  AUTO_OFFSET_RESET: "latest"
+
+  # Kirim ulang semua nilai polling tiap periode ini (ms)
+  INTEGRITY_PERIOD_MS: "60000"
+
+  STATUS_HEARTBEAT_INTERVAL_SECS: "10"
+  MAX_CONCURRENT_CONNECTS: "200"
+
+  PING_INTERVAL_MS: "5000"
+  PING_TIMEOUT_MS: "2000"
+  PING_ATTEMPTS: "3"
+  PING_RETRY_DELAY_MS: "200"
+  PING_RESEND_EVERY: "6"
+  PING_CONCURRENCY: "500"
+
+  RUST_LOG: "info"
+  RUST_BACKTRACE: "0"

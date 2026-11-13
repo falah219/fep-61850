@@ -1,0 +1,12 @@
+target/
+logs/
+*.log
+.env
+.DS_Store
+.git/
+iec61850-hello/
+docs/
+migrations/
+kubernetes/
+*.sql
+*.csv
