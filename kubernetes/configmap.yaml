@@ -22,6 +22,18 @@ data:
 
   # Kirim ulang semua nilai polling tiap periode ini (ms)
   INTEGRITY_PERIOD_MS: "60000"
+  # Coba ulang RCB yang gagal di-setup (detik)
+  RCB_RETRY_SECS: "30"
+  # Gabungkan reload per id_rtu dari MASTER_DATAPOINT_EVENT / CDC (ms)
+  RELOAD_DEBOUNCE_MS: "2000"
+  # ResvTms BRCB (detik): RCB tetap dipesan untuk FEP selama koneksi putus
+  BRCB_RESV_TMS_SECS: "60"
+  # Default tunggu CommandTermination (ms) kalau kolom oper_timeout_ms NULL
+  OPER_TIMEOUT_MS: "10000"
+  # Tunggu thread IED berhenti saat shutdown (detik); harus < terminationGracePeriodSeconds
+  SHUTDOWN_WAIT_SECS: "5"
+  # none | local | remote. BELUM dikonfirmasi tim (docs/CATATAN_TERBUKA.md)
+  OSI_PARAMS_SIDE: "none"
 
   STATUS_HEARTBEAT_INTERVAL_SECS: "10"
   MAX_CONCURRENT_CONNECTS: "200"

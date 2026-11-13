@@ -13,9 +13,12 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
-use super::client::{control_model_from_str, fc_from_str, ConnectParams, Control, Ied, OwnedValue, Rcb, RcbSettings, Spec};
+use super::client::{
+    control_model_from_str, fc_from_str, octet_bytes, osi_params, ConnectParams, Control, Ied, OsiParams, OwnedValue, Rcb,
+    RcbSettings, Spec,
+};
 use crate::command::{ctl_value, CommandAction, CommandJob, CommandReq, CtlVal};
 use super::mapper::{action_rank, mms_quality, mms_time, mms_to_json, reason_action};
 use super::mapping::{split_fc, Point};
@@ -91,6 +94,29 @@ pub fn next_deadline(deadline: Instant, now: Instant, interval: Duration) -> (In
     (next, skipped)
 }
 
+/// Batas tunggu CommandTermination: kolom oper_timeout_ms titik, NULL = env OPER_TIMEOUT_MS.
+pub fn oper_wait(point_ms: Option<i32>, default_ms: u64) -> Duration {
+    Duration::from_millis(point_ms.filter(|&v| v > 0).map_or(default_ms, |v| v as u64))
+}
+
+/// Interval GI berkala. 0 = hanya GI awal setelah konek.
+pub fn gi_every(secs: u64) -> Option<Duration> {
+    (secs > 0).then(|| Duration::from_secs(secs))
+}
+
+/// Coba setiap item `pending`; yang berhasil dikeluarkan dan dikembalikan, yang gagal tetap tinggal.
+pub fn retry_pending<T: Copy, R>(pending: &mut Vec<T>, mut f: impl FnMut(T) -> Option<R>) -> Vec<R> {
+    let mut ok = Vec::new();
+    pending.retain(|&t| match f(t) {
+        Some(r) => {
+            ok.push(r);
+            false
+        }
+        None => true,
+    });
+    ok
+}
+
 fn build_plan(ied: &Ied, points: &[Point], member_ref: &str, fc: &str) -> Result<MemberPlan, String> {
     let mut picks = Vec::new();
     for (i, p) in points.iter().enumerate().filter(|(_, p)| p.fc == fc) {
@@ -150,7 +176,14 @@ pub struct RtuCtx {
     pub gate: Arc<ConnectGate>,
     /// true selama sesi MMS aktif (dipakai heartbeat RTU_STATUS)
     pub connected: AtomicBool,
+    /// Di-set Manager saat stop: thread yang masih antre di ConnectGate tidak jadi konek.
+    pub stopping: AtomicBool,
+    /// Parameter OSI tervalidasi (None = default libIEC61850, OSI_PARAMS_SIDE=none)
+    pub osi: Option<OsiParams>,
     state: Mutex<Vec<PointState>>,
+    /// EntryID report terakhir per RCB (BRCB). Hidup selama RtuCtx, jadi bertahan saat reconnect.
+    // ponytail: hilang saat reload/restart FEP; simpan di DB kalau event selama restart FEP juga perlu
+    entry_ids: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 impl RtuCtx {
@@ -162,16 +195,49 @@ impl RtuCtx {
         gate: Arc<ConnectGate>,
     ) -> Self {
         let state = Mutex::new(vec![PointState::default(); points.len()]);
-        Self { rtu, rcbs, points, publisher, gate, connected: AtomicBool::new(false), state }
+        let (osi, errors) = osi_params(rtu.osi_side, &rtu.ap_title, rtu.ae_qualifier, &rtu.p_selector, &rtu.s_selector, &rtu.t_selector);
+        for e in &errors {
+            error!(id_rtu = rtu.id_rtu, "parameter OSI: {e}");
+            publisher.producer.send_log(&rtu.ip_address, rtu.id_rtu, "ERROR", &format!("parameter OSI: {e}"));
+        }
+        Self {
+            rtu,
+            rcbs,
+            points,
+            publisher,
+            gate,
+            connected: AtomicBool::new(false),
+            stopping: AtomicBool::new(false),
+            osi,
+            state,
+            entry_ids: Mutex::default(),
+        }
     }
 
-    fn publish(&self, i: usize, s: &PointState, action: &str) {
-        self.publisher.publish(&self.rtu.ip_address, &self.points[i], s, action);
+    fn publish(&self, i: usize, s: &PointState, action: &str, entry_time: Option<i64>) {
+        self.publisher.publish(&self.rtu.ip_address, &self.points[i], s, action, entry_time);
+    }
+
+    fn entry_id(&self, rcb_ref: &str) -> Option<Vec<u8>> {
+        self.entry_ids.lock().ok()?.get(rcb_ref).cloned()
+    }
+
+    fn set_entry_id(&self, rcb_ref: &str, id: Vec<u8>) {
+        if let Ok(mut m) = self.entry_ids.lock() {
+            m.insert(rcb_ref.to_string(), id);
+        }
+    }
+
+    fn forget_entry_id(&self, rcb_ref: &str) {
+        if let Ok(mut m) = self.entry_ids.lock() {
+            m.remove(rcb_ref);
+        }
     }
 }
 
 struct ReportCtx {
     rtu: Arc<RtuCtx>,
+    rcb_ref: String,
     members: Vec<MemberPlan>,
 }
 
@@ -208,8 +274,19 @@ unsafe extern "C" fn on_report(param: *mut c_void, report: ffi::ClientReport) {
                 }
             }
         }
+        // Waktu entri report: dipakai untuk titik yang tidak punya atribut `t`.
+        // SAFETY: report valid selama callback
+        let entry_time = unsafe { ffi::ClientReport_hasTimestamp(report) }
+            .then(|| unsafe { ffi::ClientReport_getTimestamp(report) } as i64)
+            .filter(|&ms| ms > 0);
         for (p, action) in actions {
-            rtu.publish(p, &state[p], action);
+            rtu.publish(p, &state[p], action, entry_time);
+        }
+        drop(state);
+        // EntryID dicatat SETELAH report diproses: saat reconnect IED melanjutkan dari entri berikutnya.
+        // SAFETY: nilai milik report, langsung disalin
+        if let Some(id) = unsafe { octet_bytes(ffi::ClientReport_getEntryId(report)) } {
+            rtu.set_entry_id(&ctx.rcb_ref, id);
         }
     }));
     if res.is_err() {
@@ -332,12 +409,16 @@ fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End, String> {
     let mut report_ctxs: Vec<Box<ReportCtx>> = Vec::new();
     let ied = {
         let _permit = ctx.gate.acquire();
+        if ctx.stopping.load(Ordering::SeqCst) {
+            return Ok(End::Stopped);
+        }
         Ied::connect(&ConnectParams {
             host: &r.ip_address,
             port: r.port,
             local_ip: Some(r.local_ip_address.as_str()),
             connect_timeout_ms: r.connect_timeout_ms,
             request_timeout_ms: r.request_timeout_ms,
+            osi: ctx.osi.as_ref(),
         })?
     };
     ctx.connected.store(true, Ordering::SeqCst);
@@ -349,18 +430,11 @@ fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End, String> {
     let use_report = matches!(r.acquisition_mode.as_str(), "REPORT" | "HYBRID");
     let use_poll = matches!(r.acquisition_mode.as_str(), "POLLING" | "HYBRID");
 
-    let mut rcbs = Vec::new();
-    if use_report {
-        for (rcb_ref, settings) in &ctx.rcbs {
-            match setup_rcb(&ied, ctx, rcb_ref, settings, &mut report_ctxs) {
-                Ok(rcb) => rcbs.push(rcb),
-                Err(e) => {
-                    warn!(id_rtu = r.id_rtu, "RCB {rcb_ref} dilewati: {e}");
-                    producer.send_log(&r.ip_address, r.id_rtu, "WARN", &format!("RCB {rcb_ref} gagal: {e}"));
-                }
-            }
-        }
-    }
+    // RCB yang gagal (mis. masih di-reserve sesi lama / IED belum siap) dicoba ulang tiap RCB_RETRY_SECS.
+    let rcb_retry = Duration::from_secs(r.rcb_retry_secs);
+    let mut pending: Vec<usize> = if use_report { (0..ctx.rcbs.len()).collect() } else { Vec::new() };
+    let mut rcbs = retry_pending(&mut pending, |i| try_setup_rcb(&ied, ctx, i, &mut report_ctxs, false));
+    let mut next_rcb_retry = Instant::now() + rcb_retry;
 
     let mut groups = Vec::new();
     if use_poll {
@@ -385,8 +459,7 @@ fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End, String> {
         }
     }
 
-    // 0 = hanya GI awal (tanpa GI berkala)
-    let gi_every = (r.general_interrogation_interval > 0).then(|| Duration::from_secs(r.general_interrogation_interval));
+    let gi_every = gi_every(r.general_interrogation_interval);
     let interval = Duration::from_millis(r.poll_interval_ms);
     let integrity = Duration::from_millis(r.integrity_period_ms);
     let mut last_gi: Option<Instant> = None;
@@ -404,6 +477,19 @@ fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End, String> {
                 }
             }
             last_gi = Some(Instant::now());
+        }
+
+        if !pending.is_empty() && Instant::now() >= next_rcb_retry {
+            let recovered = retry_pending(&mut pending, |i| try_setup_rcb(&ied, ctx, i, &mut report_ctxs, true));
+            // GI supaya nilai terkini langsung terkirim, tidak menunggu GI berkala.
+            // last_gi None = GI awal belum jalan, nanti otomatis mencakup RCB ini.
+            for rcb in recovered.iter().filter(|_| last_gi.is_some()) {
+                if let Err(e) = rcb.gi(&ied) {
+                    warn!(id_rtu = r.id_rtu, "GI {} gagal: {e}", rcb.reference);
+                }
+            }
+            rcbs.extend(recovered);
+            next_rcb_retry = Instant::now() + rcb_retry;
         }
 
         if !groups.is_empty() && Instant::now() >= next_poll {
@@ -480,12 +566,58 @@ fn execute_command(ied: &Ied, ctx: &RtuCtx, controls: &mut HashMap<i32, Control>
     match req.action {
         CommandAction::Select => ctl.select(&value()?),
         CommandAction::Operate => {
-            // Tunggu CommandTermination maks sbo_timeout_ms (default 10 detik)
-            let wait = Duration::from_millis(p.sbo_timeout_ms.map_or(10_000, |v| v.max(0) as u64));
-            ctl.operate(&value()?, wait)
+            ctl.operate(&value()?, oper_wait(p.oper_timeout_ms, ctx.rtu.oper_timeout_ms))
         }
         CommandAction::Cancel => ctl.cancel(),
     }
+}
+
+/// Setup RCB ke-`i` + log. Gagal pertama: WARN ke RTU_LOGGING. Percobaan ulang yang gagal hanya
+/// di log lokal (supaya RTU_LOGGING tidak banjir); yang berhasil: INFO ke RTU_LOGGING.
+#[allow(clippy::vec_box)] // lihat setup_rcb
+fn try_setup_rcb(ied: &Ied, ctx: &Arc<RtuCtx>, i: usize, out: &mut Vec<Box<ReportCtx>>, retry: bool) -> Option<Rcb> {
+    let r = &ctx.rtu;
+    let (rcb_ref, settings) = &ctx.rcbs[i];
+    let producer = &ctx.publisher.producer;
+    match setup_rcb(ied, ctx, rcb_ref, settings, out) {
+        Ok(rcb) => {
+            if retry {
+                info!(id_rtu = r.id_rtu, "RCB {rcb_ref} aktif setelah dicoba ulang");
+                producer.send_log(&r.ip_address, r.id_rtu, "INFO", &format!("RCB {rcb_ref} aktif setelah dicoba ulang"));
+            }
+            Some(rcb)
+        }
+        Err(e) if retry => {
+            warn!(id_rtu = r.id_rtu, "RCB {rcb_ref} masih gagal: {e}");
+            None
+        }
+        Err(e) => {
+            let msg = format!("RCB {rcb_ref} gagal: {e}; dicoba ulang tiap {} detik", r.rcb_retry_secs);
+            warn!(id_rtu = r.id_rtu, "{msg}");
+            producer.send_log(&r.ip_address, r.id_rtu, "WARN", &msg);
+            None
+        }
+    }
+}
+
+/// BRCB setelah reconnect: tulis EntryID terakhir supaya IED mengirim entri buffer SESUDAHNYA
+/// (event selama putus, tanpa dobel). Ditolak -> lupakan EntryID, enable biasa, WARN ke RTU_LOGGING.
+fn resume_from_entry_id(ied: &Ied, ctx: &RtuCtx, rcb: &Rcb) {
+    let r = &ctx.rtu;
+    let Some(id) = ctx.entry_id(&rcb.reference) else { return };
+    match rcb.write_entry_id(ied, &id) {
+        Ok(()) => info!(id_rtu = r.id_rtu, "RCB {}: lanjut dari EntryID {}", rcb.reference, hex(&id)),
+        Err(e) => {
+            ctx.forget_entry_id(&rcb.reference);
+            let msg = format!("RCB {}: EntryID {} ditolak IED ({e}), enable tanpa EntryID; event selama putus bisa hilang", rcb.reference, hex(&id));
+            warn!(id_rtu = r.id_rtu, "{msg}");
+            ctx.publisher.producer.send_log(&r.ip_address, r.id_rtu, "WARN", &msg);
+        }
+    }
+}
+
+pub fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02X}")).collect()
 }
 
 // Box WAJIB: callback C memegang pointer mentah ke ReportCtx. Tanpa Box, Vec memindahkan
@@ -502,12 +634,21 @@ fn setup_rcb(ied: &Ied, ctx: &Arc<RtuCtx>, rcb_ref: &str, settings: &RcbSettings
     let mapped = members.iter().filter(|m| !m.picks.is_empty()).count();
     info!(id_rtu = ctx.rtu.id_rtu, "RCB {rcb_ref}: dataset {ds}, {} anggota, {mapped} termapping", members.len());
 
-    let rc = Box::new(ReportCtx { rtu: Arc::clone(ctx), members });
+    let rc = Box::new(ReportCtx { rtu: Arc::clone(ctx), rcb_ref: rcb_ref.to_string(), members });
     let param = &*rc as *const ReportCtx as *mut c_void;
     out.push(rc);
     // SAFETY: ReportCtx di heap, hidup sampai setelah `ied` di-drop (lihat session()).
     unsafe { rcb.install_handler(ied, Some(on_report), param) };
-    rcb.enable(ied, settings)?;
+    if rcb.is_buffered() {
+        resume_from_entry_id(ied, ctx, &rcb);
+    }
+    if let Err(e) = rcb.enable(ied, settings, ctx.rtu.brcb_resv_tms_secs) {
+        // Lepas handler dulu, baru buang ReportCtx-nya: setelah uninstall tidak ada callback
+        // yang memegang pointer ini. Tanpa ini tiap percobaan ulang menumpuk satu ReportCtx.
+        rcb.uninstall_handler(ied);
+        out.pop();
+        return Err(e);
+    }
     Ok(rcb)
 }
 
@@ -540,7 +681,7 @@ fn poll_cycle(ied: &Ied, ctx: &RtuCtx, groups: &[PollGroup], sent: &mut [Option<
             Some(prev) if state_changed(prev, cur, deadband) => "POLLING",
             Some(_) => continue,
         };
-        ctx.publish(i, cur, action);
+        ctx.publish(i, cur, action, None);
         sent[i] = Some(cur.clone());
     }
 }
@@ -600,6 +741,64 @@ mod tests {
             t.join().unwrap();
         }
         assert_eq!(peak.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn rcb_gagal_dicoba_ulang_sampai_berhasil() {
+        let mut pending = vec![0, 1, 2];
+        let mut attempts = [0; 3];
+        // RCB 1 baru berhasil di percobaan ke-2 (mis. reservasi sesi lama sudah lepas), RCB 2 tidak pernah.
+        let mut setup = |i: usize| {
+            attempts[i] += 1;
+            (i == 0 || (i == 1 && attempts[1] >= 2)).then_some(i)
+        };
+        assert_eq!(retry_pending(&mut pending, &mut setup), vec![0]);
+        assert_eq!(pending, vec![1, 2]);
+        assert_eq!(retry_pending(&mut pending, &mut setup), vec![1]);
+        assert_eq!(pending, vec![2]);
+        assert!(retry_pending(&mut pending, &mut setup).is_empty());
+        assert_eq!(attempts, [1, 2, 3]);
+    }
+
+    #[test]
+    fn tunggu_command_termination() {
+        assert_eq!(oper_wait(Some(3000), 10_000), Duration::from_millis(3000));
+        assert_eq!(oper_wait(None, 10_000), Duration::from_millis(10_000)); // NULL -> env
+        assert_eq!(oper_wait(Some(0), 7000), Duration::from_millis(7000));
+    }
+
+    #[tokio::test]
+    async fn entry_id_dan_osi_di_ctx() {
+        use crate::iec61850::client::{OsiSide, DEFAULT_T_SELECTOR};
+        let mgr = crate::manager::testing::manager();
+        let mut rtu = crate::manager::testing::rtu(1);
+        rtu.osi_side = OsiSide::Remote;
+        rtu.t_selector = "zz".into(); // tidak valid -> default + log ERROR
+        let ctx = RtuCtx::new(rtu, vec![], vec![], Arc::clone(&mgr.publisher), Arc::new(ConnectGate::new(1)));
+        let osi = ctx.osi.as_ref().unwrap();
+        assert_eq!((osi.side, osi.t_selector.clone()), (OsiSide::Remote, DEFAULT_T_SELECTOR.to_vec()));
+        assert_eq!(osi.ap_title.as_deref(), Some("1.1.999.1"));
+
+        // EntryID disimpan di RtuCtx (hidup lintas sesi/reconnect), per RCB
+        let brcb = "LD/LLN0.BR.brcb01";
+        assert_eq!(ctx.entry_id(brcb), None);
+        ctx.set_entry_id(brcb, vec![1; 8]);
+        ctx.set_entry_id(brcb, vec![2; 8]); // entri terbaru menimpa
+        assert_eq!(ctx.entry_id(brcb), Some(vec![2; 8]));
+        assert_eq!(ctx.entry_id("LD/LLN0.BR.brcb02"), None);
+        ctx.forget_entry_id(brcb); // ditolak IED
+        assert_eq!(ctx.entry_id(brcb), None);
+    }
+
+    #[test]
+    fn entry_id_hex() {
+        assert_eq!(hex(&[0, 1, 0xab, 0xff]), "0001ABFF");
+    }
+
+    #[test]
+    fn interval_gi() {
+        assert_eq!(gi_every(0), None); // hanya GI awal
+        assert_eq!(gi_every(300), Some(Duration::from_secs(300)));
     }
 
     #[test]

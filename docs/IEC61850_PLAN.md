@@ -148,7 +148,7 @@ Kolom tambahan dari rencana ini yang **tidak ada di form** GRITA. Tanyakan ke sa
 |---|---|---|
 | `acquisition_mode` | `REPORT` | `REPORT` / `POLLING` / `HYBRID` |
 | `poll_interval_ms` | 2000 | Untuk mode polling |
-| `general_interrogation_interval` | 300 | Detik |
+| `general_interrogation_interval` | 300 | Detik; 0 = hanya GI awal setelah konek |
 | `request_timeout_ms` | 5000 | Timeout tiap request MMS |
 
 Catatan:
@@ -176,10 +176,11 @@ Kolom yang null **tidak ditulis** ke IED, supaya FEP tidak merusak konfigurasi R
 | `id_master_datapoint` | ya | PK + FK ke `master_datapoints.id` (uuid) |
 | `object_reference` | ya | Data Object, contoh `BAY1LD0/XCBR1.Pos` |
 | `functional_constraint` | ya | `ST` (status), `MX` (measurement), `CO` (kontrol), `SP` (setpoint). Jenis titik diturunkan dari sini |
-| `cdc` | ya | `SPS`, `DPS`, `INS`, `ENS`, `MV`, `CMV`, `BCR`, `SPC`, `DPC`, `INC`, `APC`, `BSC` |
-| `value_attribute` | | Null = default dari CDC (`stVal` untuk SPS/DPS/INS/ENS, `mag.f` untuk MV, `cVal.mag.f` untuk CMV, `actVal` untuk BCR) |
+| `cdc` | ya | `SPS`, `DPS`, `INS`, `ENS`, `ENC`, `ACT`, `ACD`, `MV`, `CMV`, `BCR`, `SPC`, `DPC`, `INC`, `APC`, `BSC` |
+| `value_attribute` | | Null = default dari CDC (`stVal` untuk SPS/DPS/INS/ENS/ENC, `general` untuk ACT/ACD, `mag.f` untuk MV, `cVal.mag.f` untuk CMV, `actVal` untuk BCR) |
 | `ctl_model` | | Hanya titik kontrol. Null = **dibaca otomatis dari IED** (`ctlModel` di FC CF) saat konek |
-| `sbo_timeout_ms` | | Hanya titik kontrol. Null = default IED |
+| `sbo_timeout_ms` | | Hanya titik kontrol. Null = default IED. **Tidak** dipakai untuk menunggu CommandTermination |
+| `oper_timeout_ms` | | Hanya titik kontrol. Batas tunggu CommandTermination (enhanced security). Null = env `OPER_TIMEOUT_MS` (10000) |
 | `interlock_check` | | Default false. Bit `Check.interlock-check` saat operate |
 | `synchro_check` | | Default false. Bit `Check.synchrocheck` saat operate |
 | `deadband` | | Hanya measurement di mode polling: perubahan lebih kecil dari ini tidak dikirim |

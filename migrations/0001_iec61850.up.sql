@@ -76,7 +76,8 @@ CREATE TABLE iec61850s (
     acquisition_mode                VARCHAR(16)  NOT NULL DEFAULT 'REPORT'
                                     CHECK (acquisition_mode IN ('REPORT', 'POLLING', 'HYBRID')),
     poll_interval_ms                INTEGER      NOT NULL DEFAULT 2000  CHECK (poll_interval_ms > 0),
-    general_interrogation_interval  INTEGER      NOT NULL DEFAULT 300   CHECK (general_interrogation_interval > 0),
+    -- detik; 0 = hanya GI awal setelah konek (tanpa GI berkala)
+    general_interrogation_interval  INTEGER      NOT NULL DEFAULT 300   CHECK (general_interrogation_interval >= 0),
     request_timeout_ms              INTEGER      NOT NULL DEFAULT 5000  CHECK (request_timeout_ms > 0),
 
     -- Sama seperti iec104s, supaya handler RTU_EVENTS & telco_statuses bisa dipakai ulang
@@ -120,14 +121,18 @@ CREATE TABLE master_datapoint_iec61850s (
     object_reference       VARCHAR(255) NOT NULL,
     functional_constraint  VARCHAR(2)   NOT NULL CHECK (functional_constraint IN ('ST', 'MX', 'CO', 'SP')),
     cdc                    VARCHAR(8)   NOT NULL
-                           CHECK (cdc IN ('SPS','DPS','INS','ENS','MV','CMV','BCR','SPC','DPC','INC','APC','BSC')),
-    -- NULL = default dari CDC (stVal / mag.f / cVal.mag.f / actVal)
+                           CHECK (cdc IN ('SPS','DPS','INS','ENS','ENC','ACT','ACD','MV','CMV','BCR',
+                                          'SPC','DPC','INC','APC','BSC')),
+    -- NULL = default dari CDC (stVal / general / mag.f / cVal.mag.f / actVal)
     value_attribute        VARCHAR(64),
     -- hanya titik kontrol; NULL = dibaca otomatis dari IED (ctlModel, FC CF)
     ctl_model              VARCHAR(40)
                            CHECK (ctl_model IN ('status-only', 'direct-with-normal-security', 'sbo-with-normal-security',
                                                 'direct-with-enhanced-security', 'sbo-with-enhanced-security')),
     sbo_timeout_ms         INTEGER      CHECK (sbo_timeout_ms > 0),
+    -- batas tunggu CommandTermination (enhanced security); NULL = env OPER_TIMEOUT_MS (default 10000).
+    -- < 30000 karena handler COMMAND menunggu hasil maks 30 detik.
+    oper_timeout_ms        INTEGER      CHECK (oper_timeout_ms > 0 AND oper_timeout_ms < 30000),
     interlock_check        BOOLEAN      NOT NULL DEFAULT FALSE,
     synchro_check          BOOLEAN      NOT NULL DEFAULT FALSE,
     -- hanya measurement di mode polling

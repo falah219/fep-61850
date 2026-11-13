@@ -219,10 +219,29 @@ Aturan yang dipakai (hasil konfirmasi):
 | `time` / `time_desc` | atribut `t` (sudah UTC, **tidak** dikoreksi `TIMEZONE`) / `RTU`; tanpa `t` → waktu server / `SERVER` |
 
 Akuisisi per mode (`iec61850s.acquisition_mode`):
-- `REPORT`: RCB dari `iec61850_report_controls`; GI setelah konek + tiap `general_interrogation_interval`.
+- `REPORT`: RCB dari `iec61850_report_controls`; GI setelah konek + tiap `general_interrogation_interval` (0 = hanya GI awal).
+  RCB yang gagal di-setup dicoba ulang tiap `RCB_RETRY_SECS` (env, default 30).
 - `POLLING`: satu `readObject` per **(LN, FC)** yang punya titik termapping, tiap `poll_interval_ms`;
   kirim jika berubah (deadband per titik), kirim ulang semua tiap `INTEGRITY_PERIOD_MS` (env).
 - `HYBRID`: report untuk RCB + polling hanya titik `MX`.
+
+Reload karena `MASTER_DATAPOINT_EVENT` / CDC digabung per `id_rtu` selama `RELOAD_DEBOUNCE_MS` (env, default 2000).
+
+BRCB (`.BR.`):
+- `ResvTms` ditulis `BRCB_RESV_TMS_SECS` (default 60) kalau IED punya elemen itu: RCB tetap dipesan untuk FEP selama putus.
+- EntryID report terakhir disimpan di memori per RCB. Saat reconnect EntryID ditulis ke IED, jadi event selama putus
+  dikirim ulang tanpa dobel. Ditolak IED -> enable tanpa EntryID + WARN di `RTU_LOGGING`.
+  EntryID hilang saat reload RTU / restart FEP.
+- Saat enable hanya elemen yang BERBEDA dari IED yang ditulis (menulis ulang DatSet bisa mengosongkan buffer).
+  OptFlds selalu memuat reason, time-stamp, dan entryID (BRCB).
+
+Waktu (`time` / `time_desc`): atribut `t` -> waktu entri report (`RTU`) -> jam server (`SERVER`).
+
+Shutdown: semua thread IED ditunggu maks `SHUTDOWN_WAIT_SECS` (default 5), lalu `RTU_STATUS=0` dikirim untuk semua IED, baru flush Kafka.
+
+Parameter OSI (`OSI_PARAMS_SIDE` = `none` | `local` | `remote`, default `none`): selain `none`, `ap_title`, `ae_qualifier`,
+`p/s/t_selector` dari `iec61850s` dipasang ke sisi itu. Nilai tidak valid -> default libIEC61850 + ERROR di `RTU_LOGGING`.
+Saat reload/stop/shutdown, thread IED lama ditunggu berhenti (maks 15 detik) sebelum konek ulang.
 
 ```powershell
 docker compose -f docker-compose.dev.yml exec dev cargo test
@@ -283,7 +302,7 @@ Alur: event `COMMAND` di `RTU_EVENTS` → cari IED (`id_rtu` atau IP) → job di
 | `action` | IEC 61850 |
 |---|---|
 | `SELECT_RTU` | SBO normal: `select`; SBO enhanced: `selectWithValue`; direct: tidak ada aksi (sukses) |
-| `OPERATE_RTU` | `operate`; enhanced security: tunggu `CommandTermination` (maks `sbo_timeout_ms`, default 10 s) |
+| `OPERATE_RTU` | `operate`; enhanced security: tunggu `CommandTermination` (maks `oper_timeout_ms`, NULL = env `OPER_TIMEOUT_MS`, default 10 s) |
 | `CANCEL_RTU` | `cancel` |
 
 - `ctlModel`: dibaca dari IED, ditimpa kolom `ctl_model` kalau diisi.

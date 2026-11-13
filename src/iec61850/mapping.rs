@@ -21,12 +21,16 @@ pub struct Point {
     pub interlock_check: bool,
     pub synchro_check: bool,
     pub deadband: Option<f64>,
+    /// Tunggu CommandTermination (ms). None = env OPER_TIMEOUT_MS
+    pub oper_timeout_ms: Option<i32>,
 }
 
 /// Atribut nilai default per CDC (dipakai kalau `value_attribute` NULL).
 pub fn default_value_attribute(cdc: &str) -> Option<&'static str> {
     Some(match cdc {
-        "SPS" | "DPS" | "INS" | "ENS" | "SPC" | "DPC" | "INC" => "stVal",
+        "SPS" | "DPS" | "INS" | "ENS" | "ENC" | "SPC" | "DPC" | "INC" => "stVal",
+        // Proteksi: trip (ACT) / start dengan arah (ACD)
+        "ACT" | "ACD" => "general",
         "MV" => "mag.f",
         "CMV" => "cVal.mag.f",
         "BCR" => "actVal",
@@ -134,6 +138,7 @@ mod tests {
             interlock_check: false,
             synchro_check: false,
             deadband: None,
+            oper_timeout_ms: None,
         }
     }
 
@@ -152,6 +157,9 @@ mod tests {
         assert_eq!(default_value_attribute("MV"), Some("mag.f"));
         assert_eq!(default_value_attribute("CMV"), Some("cVal.mag.f"));
         assert_eq!(default_value_attribute("BCR"), Some("actVal"));
+        assert_eq!(default_value_attribute("ACT"), Some("general"));
+        assert_eq!(default_value_attribute("ACD"), Some("general"));
+        assert_eq!(default_value_attribute("ENC"), Some("stVal"));
         assert_eq!(default_value_attribute("XYZ"), None);
     }
 

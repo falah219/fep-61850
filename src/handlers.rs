@@ -25,6 +25,13 @@ fn data_id_rtu(data: Option<&Value>) -> Option<i32> {
 
 pub async fn handle(mgr: &Arc<Manager>, event: KafkaEvent) {
     match event {
+        // COMMAND bisa menunggu sampai 30 detik (CommandTermination): jalan di task sendiri supaya
+        // event lain (GI, reload, command ke IED lain) tidak tertahan.
+        // Urutan SELECT -> OPERATE tetap, karena operator mengirimnya berjeda.
+        KafkaEvent::RtuEvent(m) if is_ours(&m.protocol) && m.event == "COMMAND" => {
+            let mgr = Arc::clone(mgr);
+            tokio::spawn(async move { crate::command::handle(&mgr, *m).await });
+        }
         KafkaEvent::RtuEvent(m) if is_ours(&m.protocol) => rtu_event(mgr, *m).await,
         KafkaEvent::MasterDatapoint(m) if is_ours(&m.protocol) => master_datapoint(mgr, m).await,
         KafkaEvent::MasterRtu(m) if is_ours(&m.protocol) => master_rtu(mgr, m).await,
@@ -40,9 +47,6 @@ pub async fn handle(mgr: &Arc<Manager>, event: KafkaEvent) {
 }
 
 async fn rtu_event(mgr: &Arc<Manager>, m: RtuEventMessage) {
-    if m.event == "COMMAND" {
-        return crate::command::handle(mgr, m).await;
-    }
     let id = m.id_rtu.or_else(|| data_id_rtu(m.data.as_ref())).or_else(|| mgr.id_by_ip(&m.ip_address));
     info!("[RTU_EVENTS] event={} ip={} id_rtu={:?}", m.event, safe_ip(&m.ip_address), id);
     let Some(id) = id else {
@@ -51,7 +55,7 @@ async fn rtu_event(mgr: &Arc<Manager>, m: RtuEventMessage) {
     let result = match m.event.as_str() {
         "UPDATE" | "CREATE" | "ADD" => mgr.reload(id, None).await,
         "DELETE" | "REMOVE" => {
-            mgr.stop(id);
+            mgr.stop(id).await;
             Ok(())
         }
         "STATE" => match m.state_rtu {
@@ -91,11 +95,9 @@ async fn master_datapoint(mgr: &Arc<Manager>, m: MasterDatapointEventMessage) {
         (ev, _) => return warn!("[MASTER_DATAPOINT] event {ev} tanpa tag / tidak dikenal"),
     }
     info!("[MASTER_DATAPOINT] {} id_rtu={} ioa={}", m.event, m.id_rtu, m.ioa);
-    // Mapping (object_reference, FC, ...) bisa ikut berubah: muat ulang IED-nya.
+    // Mapping (object_reference, FC, ...) bisa ikut berubah: muat ulang IED-nya (digabung/debounce).
     if mgr.contains(m.id_rtu) {
-        if let Err(e) = mgr.reload(m.id_rtu, None).await {
-            warn!("[MASTER_DATAPOINT] reload RTU {} gagal: {e}", m.id_rtu);
-        }
+        mgr.reload_later(Some(m.id_rtu), None);
     }
 }
 
@@ -110,7 +112,7 @@ async fn master_rtu(mgr: &Arc<Manager>, m: MasterRtuEventMessage) {
         return;
     }
     info!("[UPDATE_ID_RTU] {} -> {new_id}", m.id_rtu);
-    mgr.stop(m.id_rtu);
+    mgr.stop(m.id_rtu).await;
     if let Err(e) = mgr.reload(new_id, None).await {
         warn!("[UPDATE_ID_RTU] reload RTU {new_id} gagal: {e}");
     }
@@ -153,15 +155,11 @@ async fn capture_data_change(mgr: &Arc<Manager>, m: CaptureDataChangeMessage) {
         "formulas" => reload_formulas(mgr).await,
         "master_data_objects" => reload_groups(mgr).await,
         "master_general_actions" => reload_general_actions(mgr).await,
-        "iec61850s" | "iec61850_report_controls" => match data_id_rtu(data) {
-            Some(id) => {
-                let state = if m.operation == "DELETE" { Some(false) } else { None };
-                if let Err(e) = mgr.reload(id, state).await {
-                    warn!("[CDC] reload RTU {id} gagal: {e}");
-                }
-            }
-            None => mgr.reload_all().await,
-        },
+        // Reload digabung per id_rtu (RELOAD_DEBOUNCE_MS): import / edit massal = satu reload.
+        "iec61850s" | "iec61850_report_controls" => {
+            let state = if m.operation == "DELETE" { Some(false) } else { None };
+            mgr.reload_later(data_id_rtu(data), state);
+        }
         "master_datapoint_iec61850s" => {
             // id_rtu tidak ada di tabel ekstensi; cari lewat master_datapoints, kalau gagal reload semua.
             let dp = data.and_then(|d| d.get("id_master_datapoint")).and_then(Value::as_str);
@@ -169,14 +167,7 @@ async fn capture_data_change(mgr: &Arc<Manager>, m: CaptureDataChangeMessage) {
                 (Some(dp), Ok(c)) => repo::rtu_of_datapoint(&c, dp).await.ok().flatten(),
                 _ => None,
             };
-            match id {
-                Some(id) => {
-                    if let Err(e) = mgr.reload(id, None).await {
-                        warn!("[CDC] reload RTU {id} gagal: {e}");
-                    }
-                }
-                None => mgr.reload_all().await,
-            }
+            mgr.reload_later(id, None);
         }
         _ => {}
     }
@@ -203,5 +194,46 @@ async fn reload_general_actions(mgr: &Arc<Manager>) {
     match repo::load_general_actions(&c).await {
         Ok(v) => mgr.publisher.general_actions.load(v),
         Err(e) => warn!("reload general action gagal: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manager::testing::{fake_ied, manager};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn command_tidak_menahan_event_lain() {
+        let mgr = manager();
+        let (seen_tx, seen_rx) = mpsc::channel();
+        // IED palsu: menerima command tapi tidak pernah menjawab (seperti menunggu CommandTermination).
+        fake_ied(&mgr, 9001, move |rx| {
+            let mut held = Vec::new();
+            while let Ok(ctl) = rx.recv() {
+                match ctl {
+                    Ctl::Command(job) => {
+                        let _ = seen_tx.send(job.req.ioa);
+                        held.push(job);
+                    }
+                    Ctl::Stop => break,
+                    _ => {}
+                }
+            }
+        });
+        let m: RtuEventMessage = serde_json::from_str(
+            r#"{"event":"COMMAND","protocol":"IEC61850","ip_address":"ied-9001",
+                "data":{"action":"OPERATE_RTU","ioa":3001,"value":1,"id_rtu":9001}}"#,
+        )
+        .unwrap();
+        let t = Instant::now();
+        handle(&mgr, KafkaEvent::RtuEvent(Box::new(m))).await;
+        // Tanpa tokio::spawn ini tertahan sampai COMMAND_TIMEOUT (30 detik).
+        assert!(t.elapsed() < Duration::from_millis(500));
+        // Command tetap sampai ke thread IED.
+        let ioa = tokio::task::spawn_blocking(move || seen_rx.recv_timeout(Duration::from_secs(2))).await.unwrap();
+        assert_eq!(ioa, Ok(3001));
+        mgr.stop_all(Duration::from_secs(5)).await;
     }
 }

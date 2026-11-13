@@ -8,7 +8,7 @@ use tracing::warn;
 
 use crate::config::DatabaseConfig;
 
-use crate::iec61850::client::RcbSettings;
+use crate::iec61850::client::{OsiSide, RcbSettings};
 use crate::iec61850::mapper::parse_trg_ops;
 use crate::iec61850::mapping::{default_value_attribute, Point, PointMap};
 
@@ -48,6 +48,31 @@ pub struct RtuConfig {
     pub reconnect_retry_count: u32,
     /// Tidak ada di DB: kirim ulang semua nilai polling tiap periode ini (env INTEGRITY_PERIOD_MS).
     pub integrity_period_ms: u64,
+    /// Tidak ada di DB: jeda coba ulang RCB yang gagal di-setup (env RCB_RETRY_SECS).
+    pub rcb_retry_secs: u64,
+    /// Tidak ada di DB: ResvTms BRCB (env BRCB_RESV_TMS_SECS)
+    pub brcb_resv_tms_secs: i16,
+    /// Tidak ada di DB: default tunggu CommandTermination (env OPER_TIMEOUT_MS)
+    pub oper_timeout_ms: u64,
+    /// Tidak ada di DB: env OSI_PARAMS_SIDE
+    pub osi_side: OsiSide,
+    pub ap_title: String,
+    pub ae_qualifier: i32,
+    pub p_selector: String,
+    pub s_selector: String,
+    pub t_selector: String,
+}
+
+fn osi_side_from_env() -> OsiSide {
+    let v = env::var("OSI_PARAMS_SIDE").unwrap_or_default();
+    OsiSide::parse(&v).unwrap_or_else(|| {
+        warn!("OSI_PARAMS_SIDE={v:?} tidak dikenal (none|local|remote), pakai none");
+        OsiSide::None
+    })
+}
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
 fn non_negative(v: i32) -> u64 {
@@ -56,15 +81,17 @@ fn non_negative(v: i32) -> u64 {
 
 /// `id = None` -> semua RTU; `Some(id)` -> satu RTU (untuk reload dari event Kafka).
 pub async fn load_rtus(c: &Client, id: Option<i32>) -> DbResult<Vec<RtuConfig>> {
-    let integrity_period_ms = env::var("INTEGRITY_PERIOD_MS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(60_000);
+    let integrity_period_ms = env_u64("INTEGRITY_PERIOD_MS", 60_000);
+    let rcb_retry_secs = env_u64("RCB_RETRY_SECS", 30).max(1);
+    let brcb_resv_tms_secs = env_u64("BRCB_RESV_TMS_SECS", 60).min(i16::MAX as u64) as i16;
+    let oper_timeout_ms = env_u64("OPER_TIMEOUT_MS", 10_000).max(1);
+    let osi_side = osi_side_from_env();
     let rows = c
         .query(
             "SELECT id_rtu, ip_address, port, local_ip_address, acquisition_mode, poll_interval_ms,
                     general_interrogation_interval, connect_timeout_ms, request_timeout_ms,
-                    reconnect_time_ms, reconnect_retry_count, state_rtu, channel_number
+                    reconnect_time_ms, reconnect_retry_count, state_rtu, channel_number,
+                    ap_title, ae_qualifier, p_selector, s_selector, t_selector
              FROM iec61850s WHERE is_deleted = FALSE AND ($1::INT IS NULL OR id_rtu = $1) ORDER BY id_rtu",
             &[&id],
         )
@@ -87,6 +114,15 @@ pub async fn load_rtus(c: &Client, id: Option<i32>) -> DbResult<Vec<RtuConfig>> 
                 state_rtu: r.try_get(11)?,
                 channel_number: r.try_get(12)?,
                 integrity_period_ms,
+                rcb_retry_secs,
+                brcb_resv_tms_secs,
+                oper_timeout_ms,
+                osi_side,
+                ap_title: r.try_get(13)?,
+                ae_qualifier: r.try_get(14)?,
+                p_selector: r.try_get(15)?,
+                s_selector: r.try_get(16)?,
+                t_selector: r.try_get(17)?,
             })
         })
         .collect::<Result<_, _>>()
@@ -151,6 +187,7 @@ fn to_point(row: &Row) -> Result<Point, tokio_postgres::Error> {
         interlock_check: row.try_get(9)?,
         synchro_check: row.try_get(10)?,
         deadband: row.try_get(11)?,
+        oper_timeout_ms: row.try_get(12)?,
     })
 }
 
@@ -158,7 +195,8 @@ pub async fn load_points(c: &Client, id: Option<i32>) -> DbResult<PointMap> {
     let rows = c
         .query(
             "SELECT md.id_rtu, md.ioa, md.tag, x.object_reference, x.functional_constraint, x.cdc,
-                    x.value_attribute, x.ctl_model, x.sbo_timeout_ms, x.interlock_check, x.synchro_check, x.deadband
+                    x.value_attribute, x.ctl_model, x.sbo_timeout_ms, x.interlock_check, x.synchro_check, x.deadband,
+                    x.oper_timeout_ms
              FROM master_datapoint_iec61850s x
              JOIN master_datapoints md ON md.id = x.id_master_datapoint
              JOIN iec61850s r          ON r.id_rtu = md.id_rtu

@@ -84,7 +84,9 @@ async fn run() -> Result<(), String> {
 
     info!("berhenti...");
     event_task.abort();
-    mgr.stop_all();
+    // Tunggu semua thread IED berhenti (maks SHUTDOWN_WAIT_SECS) + RTU_STATUS=0 semua IED, baru flush.
+    let stopped = mgr.stop_all(Duration::from_secs(mgr.runtime.shutdown_wait_secs)).await;
+    info!("{} IED dihentikan, RTU_STATUS=0 dikirim", stopped.len());
     publisher.producer.send_system_status(0);
     publisher.producer.flush(Duration::from_secs(5));
     Ok(())
