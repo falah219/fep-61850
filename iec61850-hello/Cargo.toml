@@ -2,6 +2,7 @@
 name = "iec61850-hello"
 version = "0.1.0"
 edition = "2021"
+default-run = "iec61850-hello"
 
 [build-dependencies]
 bindgen = "0.73"

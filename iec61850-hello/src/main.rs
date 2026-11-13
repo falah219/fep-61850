@@ -3,56 +3,37 @@
 //! Pemakaian: iec61850-hello [host] [port] [object_reference]
 //! Default  : ied-sim-1 102 simpleIOGenericIO/GGIO1.AnIn1.mag.f (FC = MX)
 
-mod ffi;
-
-use std::ffi::{CStr, CString};
-
-fn err_str(err: ffi::IedClientError) -> String {
-    // SAFETY: IedClientError_toString mengembalikan string statis milik library
-    unsafe { CStr::from_ptr(ffi::IedClientError_toString(err)) }
-        .to_string_lossy()
-        .into_owned()
-}
+use iec61850_hello::{check, cstring, ffi, Ied};
 
 fn main() {
+    if let Err(e) = run() {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let host = args.next().unwrap_or_else(|| "ied-sim-1".into());
-    let port: i32 = match args.next().map(|p| p.parse()) {
-        None => 102,
-        Some(Ok(p)) => p,
-        Some(Err(_)) => return eprintln!("port tidak valid"),
-    };
+    let port: i32 = args
+        .next()
+        .map_or(Ok(102), |p| p.parse().map_err(|_| "port tidak valid".to_string()))?;
     let reference = args
         .next()
         .unwrap_or_else(|| "simpleIOGenericIO/GGIO1.AnIn1.mag.f".into());
 
-    let (Ok(c_host), Ok(c_ref)) = (CString::new(host.clone()), CString::new(reference.clone()))
-    else {
-        return eprintln!("argumen mengandung karakter NUL");
+    let ied =
+        Ied::connect(&host, port).map_err(|e| format!("gagal konek ke {host}:{port}: {e}"))?;
+    println!("terkoneksi ke {host}:{port}");
+
+    let c_ref = cstring(&reference)?;
+    let mut err = ffi::IED_ERROR_OK;
+    // SAFETY: koneksi valid selama `ied` hidup, c_ref hidup selama pemanggilan
+    let value = unsafe {
+        ffi::IedConnection_readFloatValue(ied.raw(), &mut err, c_ref.as_ptr(), ffi::IEC61850_FC_MX)
     };
+    check(err).map_err(|e| format!("gagal baca {reference}: {e}"))?;
 
-    let mut err: ffi::IedClientError = ffi::IED_ERROR_OK;
-
-    // SAFETY: con dibuat, dipakai, lalu dihancurkan di fungsi ini saja;
-    // semua pointer string hidup selama pemanggilan.
-    unsafe {
-        let con = ffi::IedConnection_create();
-        ffi::IedConnection_connect(con, &mut err, c_host.as_ptr(), port);
-
-        if err != ffi::IED_ERROR_OK {
-            eprintln!("gagal konek ke {host}:{port}: {}", err_str(err));
-        } else {
-            println!("terkoneksi ke {host}:{port}");
-            let value =
-                ffi::IedConnection_readFloatValue(con, &mut err, c_ref.as_ptr(), ffi::IEC61850_FC_MX);
-            if err == ffi::IED_ERROR_OK {
-                println!("{reference} [MX] = {value}");
-            } else {
-                eprintln!("gagal baca {reference}: {}", err_str(err));
-            }
-            ffi::IedConnection_close(con);
-        }
-
-        ffi::IedConnection_destroy(con);
-    }
+    println!("{reference} [MX] = {value}");
+    Ok(())
 }

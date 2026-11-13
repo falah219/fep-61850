@@ -66,3 +66,30 @@ simpleIOGenericIO/GGIO1.AnIn1.mag.f [MX] = 0.84147096
 ```
 
 Jalankan beberapa kali: nilainya berubah karena simulator mengisi gelombang sinus.
+
+## Fase 3 — Browse model IED
+
+Binary baru `browse` di [iec61850-hello/src/bin/browse.rs](iec61850-hello/src/bin/browse.rs).
+Kode FFI bersama dipindah ke [iec61850-hello/src/lib.rs](iec61850-hello/src/lib.rs):
+`Ied` (koneksi, otomatis close/destroy saat keluar scope) + helper `LinkedList` → `Vec<String>`.
+
+Yang ditampilkan per LN: DO beserta atribut & FC-nya (`stVal[ST]`, `ctlModel[CF]`, ...),
+dataset beserta anggotanya, dan RCB (`.BR.` = buffered, `.RP.` = unbuffered).
+
+```powershell
+docker compose -f docker-compose.dev.yml exec -w /work/iec61850-hello dev cargo run --bin browse
+docker compose -f docker-compose.dev.yml exec -w /work/iec61850-hello dev cargo run --bin browse -- ied-sim-2 102
+```
+
+Contoh potongan hasil:
+
+```
+LD  simpleIOGenericIO
+  LN  GGIO1
+      DO  AnIn1        mag[MX] q[MX] t[MX]
+      DO  SPCSO1       stVal[ST] q[ST] Oper[CO] ctlModel[CF] t[ST]
+  LN  LLN0
+      DS  Events (tetap, 4 anggota)
+            simpleIOGenericIO/GGIO1.SPCSO1.stVal[ST]
+      RCB simpleIOGenericIO/LLN0.RP.EventsRCB01
+```
