@@ -21,6 +21,11 @@ impl Ied {
         self.0
     }
 
+    pub fn is_connected(&self) -> bool {
+        // SAFETY: koneksi valid selama &self hidup
+        unsafe { ffi::IedConnection_getState(self.0) == ffi::IED_STATE_CONNECTED }
+    }
+
     /// Daftar nama Logical Device.
     pub fn logical_devices(&self) -> Result<Vec<String>, String> {
         let mut err = ffi::IED_ERROR_OK;
@@ -135,8 +140,11 @@ impl Drop for DataSetReader {
     }
 }
 
-/// SAFETY: `v` null atau MmsValue valid selama pemanggilan.
-unsafe fn sample(v: *mut ffi::MmsValue) -> Sample {
+/// Ubah satu MmsValue menjadi Sample.
+///
+/// # Safety
+/// `v` harus null atau MmsValue valid selama pemanggilan.
+pub unsafe fn sample(v: *mut ffi::MmsValue) -> Sample {
     if v.is_null() {
         return Sample { text: "<null>".into(), num: None };
     }
@@ -149,6 +157,142 @@ unsafe fn sample(v: *mut ffi::MmsValue) -> Sample {
     let num = (unsafe { ffi::MmsValue_getType(v) } == ffi::MMS_FLOAT)
         .then(|| unsafe { ffi::MmsValue_toDouble(v) });
     Sample { text, num }
+}
+
+/// Satu Report Control Block (BRCB `.BR.` atau URCB `.RP.`) yang dibaca dari IED.
+pub struct Rcb {
+    pub reference: String,
+    c_ref: CString,
+    rcb: ffi::ClientReportControlBlock,
+}
+
+impl Rcb {
+    /// Baca nilai RCB saat ini dari IED (dataset, RptID, TrgOps, ...).
+    pub fn read(ied: &Ied, reference: &str) -> Result<Self, String> {
+        let c_ref = cstring(reference)?;
+        let mut err = ffi::IED_ERROR_OK;
+        // SAFETY: koneksi valid, c_ref hidup selama pemanggilan; null = buat objek RCB baru
+        let rcb = unsafe {
+            ffi::IedConnection_getRCBValues(ied.0, &mut err, c_ref.as_ptr(), std::ptr::null_mut())
+        };
+        let me = Self { reference: reference.into(), c_ref, rcb };
+        check(err)?;
+        if me.rcb.is_null() {
+            return Err("RCB tidak ditemukan".into());
+        }
+        Ok(me)
+    }
+
+    pub fn is_buffered(&self) -> bool {
+        // SAFETY: rcb valid (dicek non-null di read)
+        unsafe { ffi::ClientReportControlBlock_isBuffered(self.rcb) }
+    }
+
+    /// Dataset yang terpasang di RCB, dalam format reference biasa (`LD/LLN0.Events`).
+    pub fn dataset(&self) -> Option<String> {
+        // SAFETY: string milik rcb, langsung disalin
+        let p = unsafe { ffi::ClientReportControlBlock_getDataSetReference(self.rcb) };
+        if p.is_null() {
+            return None;
+        }
+        // MMS memakai `$` (LD/LLN0$Events), ACSI memakai `.`
+        let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().replace('$', ".");
+        (!s.is_empty()).then_some(s)
+    }
+
+    /// Pasang callback report. Harus sebelum `enable`.
+    ///
+    /// # Safety
+    /// `param` harus tetap valid selama koneksi `ied` hidup (callback dipanggil dari thread libIEC61850).
+    pub unsafe fn install_handler(
+        &self,
+        ied: &Ied,
+        handler: ffi::ReportCallbackFunction,
+        param: *mut std::os::raw::c_void,
+    ) {
+        // SAFETY: rptId milik rcb dan disalin oleh library; syarat param dijamin pemanggil
+        unsafe {
+            let rpt_id = ffi::ClientReportControlBlock_getRptId(self.rcb);
+            ffi::IedConnection_installReportHandler(ied.0, self.c_ref.as_ptr(), rpt_id, handler, param);
+        }
+    }
+
+    /// Aktifkan report. `None` = parameter itu TIDAK ditulis (pakai setting IED).
+    pub fn enable(&self, ied: &Ied, trg_ops: Option<i32>, intg_pd_ms: Option<u32>) -> Result<(), String> {
+        let mut mask = ffi::RCB_ELEMENT_RPT_ENA;
+        // SAFETY: rcb valid; setter hanya mengubah objek lokal sebelum ditulis ke IED
+        unsafe {
+            if let Some(t) = trg_ops {
+                ffi::ClientReportControlBlock_setTrgOps(self.rcb, t);
+                mask |= ffi::RCB_ELEMENT_TRG_OPS;
+            }
+            if let Some(p) = intg_pd_ms {
+                ffi::ClientReportControlBlock_setIntgPd(self.rcb, p);
+                mask |= ffi::RCB_ELEMENT_INTG_PD;
+            }
+            if !self.is_buffered() {
+                // URCB harus di-reserve dulu supaya tidak direbut client lain
+                ffi::ClientReportControlBlock_setResv(self.rcb, true);
+                mask |= ffi::RCB_ELEMENT_RESV;
+            }
+            ffi::ClientReportControlBlock_setRptEna(self.rcb, true);
+        }
+        self.write(ied, mask)
+    }
+
+    /// Minta General Interrogation: IED mengirim semua nilai dataset sekarang.
+    pub fn gi(&self, ied: &Ied) -> Result<(), String> {
+        // SAFETY: rcb valid
+        unsafe { ffi::ClientReportControlBlock_setGI(self.rcb, true) };
+        self.write(ied, ffi::RCB_ELEMENT_GI)
+    }
+
+    fn write(&self, ied: &Ied, mask: u32) -> Result<(), String> {
+        let mut err = ffi::IED_ERROR_OK;
+        // SAFETY: koneksi dan rcb valid; true = semua elemen dalam satu request
+        unsafe { ffi::IedConnection_setRCBValues(ied.0, &mut err, self.rcb, mask, true) };
+        check(err)
+    }
+}
+
+impl Drop for Rcb {
+    fn drop(&mut self) {
+        if !self.rcb.is_null() {
+            // SAFETY: rcb milik kita, dihancurkan sekali
+            unsafe { ffi::ClientReportControlBlock_destroy(self.rcb) };
+        }
+    }
+}
+
+/// Teks TrgOps (`dchg,qchg,dupd,integrity,gi`) -> bitmask. String kosong = None (tidak ditulis ke IED).
+pub fn parse_trg_ops(s: &str) -> Result<Option<i32>, String> {
+    let mut bits = 0;
+    for p in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        bits |= match p {
+            "dchg" => ffi::TRG_OPT_DATA_CHANGED,
+            "qchg" => ffi::TRG_OPT_QUALITY_CHANGED,
+            "dupd" => ffi::TRG_OPT_DATA_UPDATE,
+            "integrity" | "period" => ffi::TRG_OPT_INTEGRITY,
+            "gi" => ffi::TRG_OPT_GI,
+            _ => return Err(format!("trg_ops tidak dikenal: {p}")),
+        };
+    }
+    Ok((bits != 0).then_some(bits as i32))
+}
+
+/// Reason-for-inclusion (bitmask) -> `action` Kafka. Satu anggota bisa punya beberapa bit;
+/// urutan prioritas: GI > INTEGRITY > DATA_CHANGE > QUALITY_CHANGE > DATA_UPDATE.
+pub fn reason_action(reason: u32) -> Option<&'static str> {
+    [
+        (ffi::IEC61850_REASON_GI, "GENERAL_INTERROGATION"),
+        (ffi::IEC61850_REASON_INTEGRITY, "INTEGRITY"),
+        (ffi::IEC61850_REASON_DATA_CHANGE, "DATA_CHANGE"),
+        (ffi::IEC61850_REASON_QUALITY_CHANGE, "QUALITY_CHANGE"),
+        (ffi::IEC61850_REASON_DATA_UPDATE, "DATA_UPDATE"),
+    ]
+    .into_iter()
+    .find(|(bit, _)| reason & bit != 0)
+    .map(|(_, a)| a)
 }
 
 /// Apakah `cur` perlu dikirim dibanding nilai terakhir yang DIKIRIM (`prev`)?
@@ -242,6 +386,27 @@ mod tests {
         assert!(!changed(&t("true"), &t("true"), 100.0));
         assert!(changed(&t("true"), &t("false"), 100.0));
         assert!(changed(&t("0000000000000"), &t("0100000000000"), 100.0));
+    }
+
+    #[test]
+    fn trg_ops_teks_ke_bit() {
+        assert_eq!(parse_trg_ops("dchg,qchg,integrity,gi"), Ok(Some(1 | 2 | 8 | 16)));
+        assert_eq!(parse_trg_ops(" dupd , period "), Ok(Some(4 | 8)));
+        assert_eq!(parse_trg_ops(""), Ok(None));
+        assert!(parse_trg_ops("dchg,xyz").is_err());
+    }
+
+    #[test]
+    fn reason_ke_action() {
+        assert_eq!(reason_action(0), None);
+        assert_eq!(reason_action(1), Some("DATA_CHANGE"));
+        assert_eq!(reason_action(2), Some("QUALITY_CHANGE"));
+        assert_eq!(reason_action(4), Some("DATA_UPDATE"));
+        assert_eq!(reason_action(8), Some("INTEGRITY"));
+        assert_eq!(reason_action(16), Some("GENERAL_INTERROGATION"));
+        assert_eq!(reason_action(1 | 2), Some("DATA_CHANGE"));
+        assert_eq!(reason_action(16 | 1), Some("GENERAL_INTERROGATION"));
+        assert_eq!(reason_action(32), None); // UNKNOWN: IED tidak mengirim reason code
     }
 
     #[test]

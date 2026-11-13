@@ -118,3 +118,31 @@ docker compose -f docker-compose.dev.yml exec -w /work/iec61850-hello dev cargo 
 # uji deadband: nilai sinus hanya -1..1, jadi DEADBAND=5 → hanya muncul saat INTEGRITY
 docker compose -f docker-compose.dev.yml exec -e DEADBAND=5 -e INTEGRITY_PERIOD_MS=10000 -w /work/iec61850-hello dev cargo run --bin poll
 ```
+
+## Fase 5 — Report (RCB)
+
+Binary `report` di [iec61850-hello/src/bin/report.rs](iec61850-hello/src/bin/report.rs),
+pembungkus RCB (`Rcb`) + `parse_trg_ops()` + `reason_action()` di [iec61850-hello/src/lib.rs](iec61850-hello/src/lib.rs).
+
+Alur per RCB:
+1. `getRCBValues` → ambil dataset yang terpasang di RCB (tidak diubah) + daftar anggotanya.
+2. `installReportHandler` → callback `on_report` (dibungkus `catch_unwind`, jalan di thread libIEC61850).
+3. `setRCBValues`: `RptEna=true` + `TrgOps` + `IntgPd` (+ `Resv` untuk URCB). Parameter kosong **tidak ditulis**.
+4. GI langsung setelah enable, lalu tiap `GI_INTERVAL_SECS`.
+
+Reason code → `action`: `GENERAL_INTERROGATION` > `INTEGRITY` > `DATA_CHANGE` > `QUALITY_CHANGE` > `DATA_UPDATE`.
+
+Default RCB: `LLN0.BR.EventsBRCB01` (dataset `Events`, SPCSO1..4.stVal) dan `LLN0.BR.Measurements01` (dataset `Measurements`).
+
+```powershell
+docker compose -f docker-compose.dev.yml exec -w /work/iec61850-hello dev cargo test
+docker compose -f docker-compose.dev.yml exec -w /work/iec61850-hello dev cargo run --bin report
+
+# lebih tenang: tanpa data-change, hanya integrity tiap 5 detik + GI
+docker compose -f docker-compose.dev.yml exec -e TRG_OPS=integrity,gi -e INTG_PD_MS=5000 -w /work/iec61850-hello dev cargo run --bin report
+
+# pakai setting TrgOps/IntgPd bawaan IED (tidak menulis apa pun selain RptEna)
+docker compose -f docker-compose.dev.yml exec -e TRG_OPS= -e INTG_PD_MS= -w /work/iec61850-hello dev cargo run --bin report
+```
+
+Catatan: AnIn1..4 berubah tiap 100 ms, jadi dengan `dchg` aktif report measurement akan sangat ramai.
