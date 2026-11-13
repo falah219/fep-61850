@@ -1,6 +1,7 @@
 //! Pembungkus kecil di atas FFI libIEC61850 yang dipakai bersama oleh binary di crate ini.
 
 pub mod ffi;
+pub mod mapping;
 
 use std::ffi::{CStr, CString};
 

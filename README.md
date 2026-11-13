@@ -146,3 +146,34 @@ docker compose -f docker-compose.dev.yml exec -e TRG_OPS= -e INTG_PD_MS= -w /wor
 ```
 
 Catatan: AnIn1..4 berubah tiap 100 ms, jadi dengan `dchg` aktif report measurement akan sangat ramai.
+
+## Fase 6 — Migrasi SQL usulan + loader mapping IOA
+
+> **USULAN, belum diuji ke Postgres mana pun. Harus di-review tim sebelum dipakai di lingkungan bersama.**
+> Jangan jalankan ke DB produksi/kantor.
+
+- [migrations/0001_iec61850.up.sql](migrations/0001_iec61850.up.sql) / [down](migrations/0001_iec61850.down.sql):
+  - `iec61850s` (koneksi IED), `iec61850_report_controls` (RCB), `master_datapoint_iec61850s` (ekstensi 1:1).
+  - Unik `(id_rtu, object_reference, FC)` lewat trigger (id_rtu ada di `master_datapoints`).
+  - Index unik parsial `master_datapoints (id_rtu, ioa) WHERE protocol='IEC61850' AND is_deleted=false`.
+  - Daftar hal yang perlu dikonfirmasi ada di header file.
+- [migrations/seed_simulator.sql](migrations/seed_simulator.sql): data contoh untuk `ied-sim-1` (RTU 9001, REPORT)
+  dan `ied-sim-2` (RTU 9002, POLLING). Rentang IOA: 1001.. status, 2001.. measurement, 3001.. kontrol.
+- [iec61850-hello/src/mapping.rs](iec61850-hello/src/mapping.rs): `PointMap`
+  - `by_ioa(id_rtu, ioa)` → untuk command
+  - `by_reference(id_rtu, ref, fc)` → untuk data masuk; menerima DO/SDO/DA, prefix terpanjang menang
+    (`LD/GGIO1.AnIn1.mag.f` → titik `AnIn1`, sisa `mag.f`)
+  - menolak IOA ganda dan `(reference, FC)` ganda per RTU
+- [iec61850-hello/src/bin/mapping.rs](iec61850-hello/src/bin/mapping.rs): muat dari Postgres lalu tampilkan.
+
+```powershell
+# unit test mapping (tanpa DB)
+docker compose -f docker-compose.dev.yml exec -w /work/iec61850-hello dev cargo test
+
+# urutan di DB lokal/dev (yang sudah punya tabel master_datapoints):
+#   psql -f migrations/0001_iec61850.up.sql
+#   psql -f migrations/seed_simulator.sql
+docker compose -f docker-compose.dev.yml exec -e POSTGRE_HOST=host.docker.internal -e POSTGRE_PORT=5432 `
+  -e DB_USERNAME=postgres -e DB_PASSWORD=... -e DB_DATABASE=ICONICS_DEV `
+  -w /work/iec61850-hello dev cargo run --bin mapping
+```

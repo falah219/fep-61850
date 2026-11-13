@@ -4,5 +4,9 @@ version = "0.1.0"
 edition = "2021"
 default-run = "iec61850-hello"
 
+[dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+tokio-postgres = "0.7"
+
 [build-dependencies]
 bindgen = "0.73"
