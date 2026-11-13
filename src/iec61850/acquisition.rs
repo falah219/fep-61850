@@ -328,6 +328,9 @@ fn session(ctx: &Arc<RtuCtx>) -> Result<(), String> {
     }
 }
 
+// Box WAJIB: callback C memegang pointer mentah ke ReportCtx. Tanpa Box, Vec memindahkan
+// elemen saat realokasi dan pointer itu jadi menggantung (use-after-free).
+#[allow(clippy::vec_box)]
 fn setup_rcb(ied: &Ied, ctx: &Arc<RtuCtx>, rcb_ref: &str, settings: &RcbSettings, out: &mut Vec<Box<ReportCtx>>) -> Result<Rcb, String> {
     let rcb = Rcb::read(ied, rcb_ref)?;
     let ds = settings.dataset.clone().or_else(|| rcb.dataset()).ok_or("RCB tidak punya dataset")?;
