@@ -270,3 +270,37 @@ Uji (di kantor, Postgres + Kafka dev):
 4. Kirim ke `RTU_EVENTS`: `{"event":"GI","protocol":"IEC61850","ip_address":"ied-sim-1","id_rtu":9001}` → data `GENERAL_INTERROGATION`.
 5. Kirim `{"event":"STATE","protocol":"IEC61850","ip_address":"ied-sim-1","id_rtu":9001,"state_rtu":false}` → status 0, tidak reconnect.
 6. Kirim event yang sama dengan `"protocol":"IEC104"` → harus diabaikan.
+
+## Fase 9 — Command (select / operate / cancel)
+
+> Ditulis **tanpa uji ke Kafka/Postgres**. Yang bisa diuji sekarang: `cargo test`, `cargo clippy`.
+
+[src/command.rs](src/command.rs) + `Control` di [src/iec61850/client.rs](src/iec61850/client.rs).
+
+Alur: event `COMMAND` di `RTU_EVENTS` → cari IED (`id_rtu` atau IP) → job dikirim ke thread IED →
+`(id_rtu, ioa)` → titik `FC = CO` → `ControlObjectClient` (di-cache per IOA selama sesi) → respons ke `RTU_COMMAND`.
+
+| `action` | IEC 61850 |
+|---|---|
+| `SELECT_RTU` | SBO normal: `select`; SBO enhanced: `selectWithValue`; direct: tidak ada aksi (sukses) |
+| `OPERATE_RTU` | `operate`; enhanced security: tunggu `CommandTermination` (maks `sbo_timeout_ms`, default 10 s) |
+| `CANCEL_RTU` | `cancel` |
+
+- `ctlModel`: dibaca dari IED, ditimpa kolom `ctl_model` kalau diisi.
+- `orCat = remote-control`, `orIdent` = field `user` di payload (default `FEP-IEC61850`).
+- `interlock_check` / `synchro_check` dari tabel mapping.
+- IOA dari field `ioa`, atau dari akhiran tag `NAMA_123` (sama dengan IEC 104).
+- Nilai: `SPC` value≠0 → true; `INC` angka; **`DPC` 2 → CLOSE (true), 1 → OPEN (false)** — pemetaan standar DCS IEC 104,
+  **belum dikonfirmasi tim** (lihat `ctl_value` di `command.rs`). `APC`/`BSC` belum didukung.
+- Respons `RTU_COMMAND` sama dengan IEC 104: `{hostname, port, protocol, tag, command_type, command_value, qualifier,
+  event: SELECT|OPERATE|CANCEL, status: active|inactive, msg, key, time}`, key = `key` payload.
+- Hasil command juga dicatat ke `RTU_LOGGING`.
+
+Uji (simulator: semua `SPCSO` = direct-with-normal-security; seed: IOA 3001..3004 = `SPCSO1..4` kontrol):
+
+```json
+{"event":"COMMAND","protocol":"IEC61850","ip_address":"ied-sim-1",
+ "data":{"action":"OPERATE_RTU","ioa":3001,"value":1,"type":"SPC","id_rtu":9001,"key":"uji_on","user":"operator1"}}
+```
+→ `RTU_COMMAND` status `active`, lalu `RTU_DATAS` IOA 1001 (`SPCSO1` status) `DATA_CHANGE` value 1.
+Ulangi dengan `"value":0` → value 0. IOA yang bukan titik kontrol (mis. 1001) → status `inactive`.

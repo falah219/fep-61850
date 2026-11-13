@@ -4,6 +4,7 @@
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_void;
+use std::sync::{Condvar, Mutex};
 
 use crate::ffi;
 
@@ -147,10 +148,20 @@ impl Drop for Spec {
     }
 }
 
-/// MmsValue hasil readObject (milik kita).
+/// MmsValue milik kita (hasil readObject atau dibuat untuk ctlVal).
 pub struct OwnedValue(*mut ffi::MmsValue);
 
 impl OwnedValue {
+    pub fn boolean(v: bool) -> Self {
+        // SAFETY: membuat nilai baru, jadi milik kita
+        Self(unsafe { ffi::MmsValue_newBoolean(v) })
+    }
+
+    pub fn int32(v: i32) -> Self {
+        // SAFETY: membuat nilai baru, jadi milik kita
+        Self(unsafe { ffi::MmsValue_newIntegerFromInt32(v) })
+    }
+
     pub fn as_ptr(&self) -> *mut ffi::MmsValue {
         self.0
     }
@@ -275,6 +286,147 @@ impl Drop for Rcb {
             unsafe { ffi::ClientReportControlBlock_destroy(self.rcb) };
         }
     }
+}
+
+/// Hasil CommandTermination (enhanced security). Diisi dari thread penerima libIEC61850.
+#[derive(Default)]
+struct Termination {
+    result: Mutex<Option<bool>>,
+    cv: Condvar,
+}
+
+/// Objek kontrol (ControlObjectClient) untuk satu DO kontrol, mis. `LD/CSWI1.Pos`.
+pub struct Control {
+    ctl: ffi::ControlObjectClient,
+    // Box: alamat harus tetap, dipegang callback C
+    termination: Box<Termination>,
+}
+
+unsafe extern "C" fn on_termination(param: *mut c_void, ctl: ffi::ControlObjectClient) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: param = &Termination milik Control yang masih hidup (handler dilepas saat Drop
+        // karena ControlObjectClient_destroy).
+        let t = unsafe { &*(param as *const Termination) };
+        let ok = unsafe { ffi::ControlObjectClient_getLastApplError(ctl) }.error == ffi::CONTROL_ERROR_NO_ERROR;
+        if let Ok(mut r) = t.result.lock() {
+            *r = Some(ok);
+            t.cv.notify_all();
+        }
+    }));
+}
+
+impl Control {
+    /// Membuat objek kontrol. Membaca ctlModel & tipe ctlVal dari IED (request MMS).
+    pub fn create(ied: &Ied, reference: &str) -> Result<Self, String> {
+        let c = cstring(reference)?;
+        // SAFETY: koneksi valid, c hidup selama pemanggilan
+        let ctl = unsafe { ffi::ControlObjectClient_create(c.as_ptr(), ied.raw()) };
+        if ctl.is_null() {
+            return Err(format!("objek kontrol {reference} tidak ditemukan / tidak bisa dibaca"));
+        }
+        let me = Self { ctl, termination: Box::default() };
+        let param = &*me.termination as *const Termination as *mut c_void;
+        // SAFETY: Termination di heap, hidup selama Control (handler ikut hilang saat destroy)
+        unsafe { ffi::ControlObjectClient_setCommandTerminationHandler(me.ctl, Some(on_termination), param) };
+        Ok(me)
+    }
+
+    pub fn control_model(&self) -> ffi::ControlModel {
+        // SAFETY: ctl valid
+        unsafe { ffi::ControlObjectClient_getControlModel(self.ctl) }
+    }
+
+    /// Timpa ctlModel hasil baca IED (dari kolom ctl_model di DB).
+    pub fn set_control_model(&self, m: ffi::ControlModel) {
+        // SAFETY: ctl valid; hanya mengubah objek lokal
+        unsafe { ffi::ControlObjectClient_setControlModel(self.ctl, m) };
+    }
+
+    /// orIdent + orCat (remote-control), interlock & synchro check.
+    pub fn prepare(&self, or_ident: &str, interlock: bool, synchro: bool) -> Result<(), String> {
+        let ident = cstring(or_ident)?;
+        // SAFETY: ctl valid; orIdent disalin library
+        unsafe {
+            ffi::ControlObjectClient_setOrigin(self.ctl, ident.as_ptr(), ffi::CONTROL_ORCAT_REMOTE_CONTROL as i32);
+            ffi::ControlObjectClient_setInterlockCheck(self.ctl, interlock);
+            ffi::ControlObjectClient_setSynchroCheck(self.ctl, synchro);
+        }
+        Ok(())
+    }
+
+    /// SBO normal: select; SBO enhanced: select-with-value; model direct: tidak ada yang perlu dipilih.
+    pub fn select(&self, value: &OwnedValue) -> Result<(), String> {
+        // SAFETY: ctl & value valid; value tidak diambil alih library
+        let ok = match self.control_model() {
+            ffi::CONTROL_MODEL_SBO_NORMAL => unsafe { ffi::ControlObjectClient_select(self.ctl) },
+            ffi::CONTROL_MODEL_SBO_ENHANCED => unsafe { ffi::ControlObjectClient_selectWithValue(self.ctl, value.as_ptr()) },
+            ffi::CONTROL_MODEL_STATUS_ONLY => return Err("ctlModel status-only, tidak bisa dikontrol".into()),
+            _ => return Ok(()),
+        };
+        if ok { Ok(()) } else { Err(self.error("select")) }
+    }
+
+    /// Operate. Enhanced security: tunggu CommandTermination (maks `wait`).
+    pub fn operate(&self, value: &OwnedValue, wait: std::time::Duration) -> Result<(), String> {
+        if let Ok(mut r) = self.termination.result.lock() {
+            *r = None;
+        }
+        // SAFETY: ctl & value valid; operTime 0 = langsung
+        if !unsafe { ffi::ControlObjectClient_operate(self.ctl, value.as_ptr(), 0) } {
+            return Err(self.error("operate"));
+        }
+        if !matches!(self.control_model(), ffi::CONTROL_MODEL_DIRECT_ENHANCED | ffi::CONTROL_MODEL_SBO_ENHANCED) {
+            return Ok(());
+        }
+        let guard = self.termination.result.lock().map_err(|_| "lock termination rusak")?;
+        let (guard, _) = self
+            .termination
+            .cv
+            .wait_timeout_while(guard, wait, |r| r.is_none())
+            .map_err(|_| "lock termination rusak")?;
+        match *guard {
+            Some(true) => Ok(()),
+            Some(false) => Err(self.error("CommandTermination-")),
+            None => Err("CommandTermination tidak diterima (timeout)".into()),
+        }
+    }
+
+    pub fn cancel(&self) -> Result<(), String> {
+        // SAFETY: ctl valid
+        if unsafe { ffi::ControlObjectClient_cancel(self.ctl) } {
+            Ok(())
+        } else {
+            Err(self.error("cancel"))
+        }
+    }
+
+    fn error(&self, what: &str) -> String {
+        // SAFETY: ctl valid
+        let (err, appl) = unsafe {
+            (ffi::ControlObjectClient_getLastError(self.ctl), ffi::ControlObjectClient_getLastApplError(self.ctl))
+        };
+        let base = check(err).err().unwrap_or_else(|| "ditolak IED".into());
+        format!("{what} gagal: {base} (LastApplError error={}, addCause={})", appl.error, appl.addCause)
+    }
+}
+
+impl Drop for Control {
+    fn drop(&mut self) {
+        // SAFETY: ctl milik kita, dihancurkan sekali
+        unsafe { ffi::ControlObjectClient_destroy(self.ctl) };
+    }
+}
+
+/// Teks ctl_model di DB -> ControlModel.
+pub fn control_model_from_str(s: &str) -> Option<ffi::ControlModel> {
+    Some(match s {
+        "status-only" => ffi::CONTROL_MODEL_STATUS_ONLY,
+        "direct-with-normal-security" => ffi::CONTROL_MODEL_DIRECT_NORMAL,
+        "sbo-with-normal-security" => ffi::CONTROL_MODEL_SBO_NORMAL,
+        "direct-with-enhanced-security" => ffi::CONTROL_MODEL_DIRECT_ENHANCED,
+        "sbo-with-enhanced-security" => ffi::CONTROL_MODEL_SBO_ENHANCED,
+        _ => return None,
+    })
 }
 
 /// Salin LinkedList<char*> ke Vec<String>, lalu bebaskan list-nya.

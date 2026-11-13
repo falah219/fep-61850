@@ -40,6 +40,9 @@ pub async fn handle(mgr: &Arc<Manager>, event: KafkaEvent) {
 }
 
 async fn rtu_event(mgr: &Arc<Manager>, m: RtuEventMessage) {
+    if m.event == "COMMAND" {
+        return crate::command::handle(mgr, m).await;
+    }
     let id = m.id_rtu.or_else(|| data_id_rtu(m.data.as_ref())).or_else(|| mgr.id_by_ip(&m.ip_address));
     info!("[RTU_EVENTS] event={} ip={} id_rtu={:?}", m.event, safe_ip(&m.ip_address), id);
     let Some(id) = id else {
@@ -69,7 +72,6 @@ async fn rtu_event(mgr: &Arc<Manager>, m: RtuEventMessage) {
             }
         }
         "CHANNEL" => Ok(()), // sama dengan IEC 104: hanya dicatat
-        "COMMAND" => Err("COMMAND belum didukung (fase 9)".into()),
         other => Err(format!("event tidak dikenal: {other}")),
     };
     if let Err(e) = result {

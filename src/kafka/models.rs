@@ -86,6 +86,8 @@ pub struct RtuEventMessage {
     pub id_rtu: Option<i32>,
     pub description: Option<String>,
     pub qualifier: Option<u8>,
+    /// Pemberi perintah (orIdent) untuk COMMAND
+    pub user: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

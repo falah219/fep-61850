@@ -3,6 +3,8 @@
 //! Satu thread OS per IED (fungsi libIEC61850 blocking). Report datang dari thread penerima
 //! libIEC61850 lewat callback.
 
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::ffi::{c_void, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,7 +15,8 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tracing::{info, warn};
 
-use super::client::{fc_from_str, ConnectParams, Ied, Rcb, RcbSettings, Spec};
+use super::client::{control_model_from_str, fc_from_str, ConnectParams, Control, Ied, OwnedValue, Rcb, RcbSettings, Spec};
+use crate::command::{ctl_value, CommandAction, CommandJob, CommandReq, CtlVal};
 use super::mapper::{action_rank, mms_quality, mms_time, mms_to_json, reason_action};
 use super::mapping::{split_fc, Point};
 use crate::ffi;
@@ -221,7 +224,6 @@ struct PollGroup {
 }
 
 /// Perintah ke thread IED (dari handler Kafka / ping).
-#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Ctl {
     /// Hentikan thread (STATE false, DELETE, RESET, reload konfigurasi)
     Stop,
@@ -229,6 +231,8 @@ pub enum Ctl {
     Gi,
     /// Potong jeda reconnect (ping: IED kembali terjangkau)
     Wake,
+    /// Select / operate / cancel (event COMMAND). Hasil dikirim lewat `reply`.
+    Command(Box<CommandJob>),
 }
 
 /// Batas jumlah percobaan konek serentak (`MAX_CONCURRENT_CONNECTS`).
@@ -311,6 +315,9 @@ pub fn run_ied(ctx: Arc<RtuCtx>, rx: Receiver<Ctl>) {
         }
         match rx.recv_timeout(Duration::from_millis(r.reconnect_time_ms)) {
             Ok(Ctl::Stop) | Err(RecvTimeoutError::Disconnected) => return,
+            Ok(Ctl::Command(job)) => {
+                let _ = job.reply.send(Err("IED tidak terkoneksi".into()));
+            }
             Ok(Ctl::Gi | Ctl::Wake) | Err(RecvTimeoutError::Timeout) => {}
         }
     }
@@ -386,6 +393,7 @@ fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End, String> {
     let mut next_poll = Instant::now();
     let mut last_integrity: Option<Instant> = None;
     let mut sent: Vec<Option<PointState>> = vec![None; ctx.points.len()];
+    let mut controls: HashMap<i32, Control> = HashMap::new();
 
     loop {
         let gi_due = last_gi.is_none_or(|t| gi_every.is_some_and(|every| t.elapsed() >= every));
@@ -427,8 +435,56 @@ fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End, String> {
                 last_integrity = None;
                 next_poll = Instant::now();
             }
+            Ok(Ctl::Command(job)) => {
+                let result = execute_command(&ied, ctx, &mut controls, &job.req);
+                let msg = match &result {
+                    Ok(()) => format!("{:?} ioa {} sukses", job.req.action, job.req.ioa),
+                    Err(e) => format!("{:?} ioa {} gagal: {e}", job.req.action, job.req.ioa),
+                };
+                producer.send_log(&r.ip_address, r.id_rtu, if result.is_ok() { "INFO" } else { "WARN" }, &msg);
+                let _ = job.reply.send(result);
+            }
             Ok(Ctl::Wake) | Err(RecvTimeoutError::Timeout) => {}
         }
+    }
+}
+
+/// Jalankan select/operate/cancel di thread IED. Objek kontrol di-cache per IOA selama sesi,
+/// supaya SELECT dan OPERATE yang datang terpisah memakai objek (ctlNum) yang sama.
+fn execute_command(ied: &Ied, ctx: &RtuCtx, controls: &mut HashMap<i32, Control>, req: &CommandReq) -> Result<(), String> {
+    let p = ctx
+        .points
+        .iter()
+        .find(|p| p.ioa == req.ioa && p.fc == "CO")
+        .ok_or_else(|| format!("IOA {} bukan titik kontrol (FC CO) di RTU ini", req.ioa))?;
+
+    let ctl = match controls.entry(req.ioa) {
+        Entry::Occupied(e) => e.into_mut(),
+        Entry::Vacant(e) => {
+            let ctl = Control::create(ied, &p.object_reference)?;
+            if let Some(m) = p.ctl_model.as_deref().and_then(control_model_from_str) {
+                ctl.set_control_model(m);
+            }
+            e.insert(ctl)
+        }
+    };
+    ctl.prepare(&req.or_ident, p.interlock_check, p.synchro_check)?;
+
+    let value = || -> Result<OwnedValue, String> {
+        let v = req.value.ok_or("value wajib diisi")?;
+        Ok(match ctl_value(&p.cdc, v)? {
+            CtlVal::Bool(b) => OwnedValue::boolean(b),
+            CtlVal::Int(i) => OwnedValue::int32(i),
+        })
+    };
+    match req.action {
+        CommandAction::Select => ctl.select(&value()?),
+        CommandAction::Operate => {
+            // Tunggu CommandTermination maks sbo_timeout_ms (default 10 detik)
+            let wait = Duration::from_millis(p.sbo_timeout_ms.map_or(10_000, |v| v.max(0) as u64));
+            ctl.operate(&value()?, wait)
+        }
+        CommandAction::Cancel => ctl.cancel(),
     }
 }
 
