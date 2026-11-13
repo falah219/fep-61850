@@ -1,0 +1,33 @@
+# Lingkungan development lokal FEP IEC 61850.
+# Kafka & Postgres TIDAK disertakan di sini.
+x-ied-sim: &ied-sim
+  build: { context: ., dockerfile: docker/Dockerfile.dev, target: ied-sim }
+  image: fep61850-ied-sim
+  restart: unless-stopped
+  stop_signal: SIGINT   # simulator hanya menangani SIGINT
+
+services:
+  dev:
+    build: { context: ., dockerfile: docker/Dockerfile.dev, target: dev }
+    command: sleep infinity
+    volumes:
+      - .:/work
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target:/work/target
+    environment:
+      CARGO_TARGET_DIR: /work/target
+    depends_on: [ied-sim-1, ied-sim-2]
+
+  ied-sim-1:
+    <<: *ied-sim
+    ports: ["10102:102"]
+
+  ied-sim-2:
+    <<: *ied-sim
+    ports: ["10103:102"]
+
+volumes:
+  cargo-registry:
+  cargo-git:
+  target:

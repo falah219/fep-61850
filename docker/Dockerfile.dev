@@ -1,0 +1,36 @@
+# Satu Dockerfile, tiga stage:
+#   libiec61850 : build library + contoh server (dipakai bersama)
+#   dev         : toolchain Rust untuk build FEP (fase 2+)
+#   ied-sim     : image kecil berisi simulator IED
+
+ARG LIBIEC61850_TAG=v1.6.2.1
+
+FROM debian:bookworm-slim AS libiec61850
+ARG LIBIEC61850_TAG
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git ca-certificates build-essential cmake \
+    && rm -rf /var/lib/apt/lists/*
+# Pin ke tag rilis stabil (setara pin commit lib60870 di FEP IEC 104)
+RUN git clone --depth 1 -b ${LIBIEC61850_TAG} https://github.com/mz-automation/libiec61850.git /src \
+    && cmake -S /src -B /src/build -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=ON -DCMAKE_INSTALL_PREFIX=/usr/local \
+    && cmake --build /src/build -j"$(nproc)" --target iec61850 server_example_basic_io mms_utility \
+    && cmake --install /src/build \
+    && cp /src/build/examples/server_example_basic_io/server_example_basic_io /usr/local/bin/ied-sim \
+    && cp /src/build/examples/mms_utility/mms_utility /usr/local/bin/mms_utility
+
+FROM rust:slim-bookworm AS dev
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake clang libclang-dev pkg-config libssl-dev libsasl2-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup component add clippy rustfmt
+COPY --from=libiec61850 /usr/local/lib/ /usr/local/lib/
+COPY --from=libiec61850 /usr/local/include/libiec61850 /usr/local/include/libiec61850
+COPY --from=libiec61850 /usr/local/bin/mms_utility /usr/local/bin/
+WORKDIR /work
+
+FROM debian:bookworm-slim AS ied-sim
+COPY --from=libiec61850 /usr/local/bin/ied-sim /usr/local/bin/mms_utility /usr/local/bin/
+EXPOSE 102
+# Port MMS bisa diganti lewat argumen pertama (dipakai untuk banyak instance)
+ENTRYPOINT ["ied-sim"]
+CMD ["102"]
