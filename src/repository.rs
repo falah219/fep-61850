@@ -52,6 +52,8 @@ pub struct RtuConfig {
     pub rcb_retry_secs: u64,
     /// Tidak ada di DB: ResvTms BRCB (env BRCB_RESV_TMS_SECS)
     pub brcb_resv_tms_secs: i16,
+    /// Tidak ada di DB: tanpa tanda hidup selama ini -> cek LLN0.Mod.stVal (env LIVENESS_SECS)
+    pub liveness_secs: u64,
     /// Tidak ada di DB: default tunggu CommandTermination (env OPER_TIMEOUT_MS)
     pub oper_timeout_ms: u64,
     /// Tidak ada di DB: env OSI_PARAMS_SIDE
@@ -71,6 +73,12 @@ fn osi_side_from_env() -> OsiSide {
     })
 }
 
+/// Default retry RCB (detik).
+pub const DEFAULT_RCB_RETRY_SECS: u64 = 30;
+/// Default ResvTms BRCB (detik). HARUS < DEFAULT_RCB_RETRY_SECS: kalau reservasi sesi lama yang
+/// mati masih menahan BRCB, percobaan ulang RCB berikutnya sudah melewati masa reservasinya.
+pub const DEFAULT_BRCB_RESV_TMS_SECS: u64 = 20;
+
 fn env_u64(key: &str, default: u64) -> u64 {
     env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
@@ -82,8 +90,9 @@ fn non_negative(v: i32) -> u64 {
 /// `id = None` -> semua RTU; `Some(id)` -> satu RTU (untuk reload dari event Kafka).
 pub async fn load_rtus(c: &Client, id: Option<i32>) -> DbResult<Vec<RtuConfig>> {
     let integrity_period_ms = env_u64("INTEGRITY_PERIOD_MS", 60_000);
-    let rcb_retry_secs = env_u64("RCB_RETRY_SECS", 30).max(1);
-    let brcb_resv_tms_secs = env_u64("BRCB_RESV_TMS_SECS", 60).min(i16::MAX as u64) as i16;
+    let rcb_retry_secs = env_u64("RCB_RETRY_SECS", DEFAULT_RCB_RETRY_SECS).max(1);
+    let brcb_resv_tms_secs = env_u64("BRCB_RESV_TMS_SECS", DEFAULT_BRCB_RESV_TMS_SECS).min(i16::MAX as u64) as i16;
+    let liveness_secs = env_u64("LIVENESS_SECS", 30).max(1);
     let oper_timeout_ms = env_u64("OPER_TIMEOUT_MS", 10_000).max(1);
     let osi_side = osi_side_from_env();
     let rows = c
@@ -116,6 +125,7 @@ pub async fn load_rtus(c: &Client, id: Option<i32>) -> DbResult<Vec<RtuConfig>> 
                 integrity_period_ms,
                 rcb_retry_secs,
                 brcb_resv_tms_secs,
+                liveness_secs,
                 oper_timeout_ms,
                 osi_side,
                 ap_title: r.try_get(13)?,
@@ -309,4 +319,15 @@ pub async fn rtu_of_datapoint(c: &Client, id_master_datapoint: &str) -> DbResult
         .await
         .map_err(db_err("query id_rtu datapoint"))?;
     Ok(row.and_then(|r| r.try_get(0).ok()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resv_tms_lebih_pendek_dari_retry_rcb() {
+        assert_eq!(DEFAULT_BRCB_RESV_TMS_SECS, 20);
+        assert!(DEFAULT_BRCB_RESV_TMS_SECS < DEFAULT_RCB_RETRY_SECS);
+    }
 }

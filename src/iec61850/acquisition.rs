@@ -16,8 +16,8 @@ use serde_json::Value;
 use tracing::{error, info, warn};
 
 use super::client::{
-    control_model_from_str, fc_from_str, octet_bytes, osi_params, ConnectParams, Control, Ied, OsiParams, OwnedValue, Rcb,
-    RcbSettings, Spec,
+    control_model_from_str, fc_from_str, octet_bytes, osi_params, ConnectParams, Control, Ied, Liveness, OsiParams,
+    OwnedValue, Rcb, RcbSettings, Spec,
 };
 use crate::command::{ctl_value, CommandAction, CommandJob, CommandReq, CtlVal};
 use super::mapper::{action_rank, mms_quality, mms_time, mms_to_json, reason_action};
@@ -97,6 +97,15 @@ pub fn next_deadline(deadline: Instant, now: Instant, interval: Duration) -> (In
 /// Batas tunggu CommandTermination: kolom oper_timeout_ms titik, NULL = env OPER_TIMEOUT_MS.
 pub fn oper_wait(point_ms: Option<i32>, default_ms: u64) -> Duration {
     Duration::from_millis(point_ms.filter(|&v| v > 0).map_or(default_ms, |v| v as u64))
+}
+
+/// Target cek liveness: `LD/LLN0.Mod.stVal` dari LD pertama (titik termapping, lalu RCB).
+pub fn probe_reference(points: &[Point], rcbs: &[(String, RcbSettings)]) -> Option<String> {
+    points
+        .iter()
+        .map(|p| p.object_reference.as_str())
+        .chain(rcbs.iter().map(|(r, _)| r.as_str()))
+        .find_map(|r| r.split_once('/').map(|(ld, _)| format!("{ld}/LLN0.Mod.stVal")))
 }
 
 /// Interval GI berkala. 0 = hanya GI awal setelah konek.
@@ -239,6 +248,8 @@ struct ReportCtx {
     rtu: Arc<RtuCtx>,
     rcb_ref: String,
     members: Vec<MemberPlan>,
+    /// Report masuk = tanda hidup koneksi
+    alive: Arc<Liveness>,
 }
 
 unsafe extern "C" fn on_report(param: *mut c_void, report: ffi::ClientReport) {
@@ -246,6 +257,7 @@ unsafe extern "C" fn on_report(param: *mut c_void, report: ffi::ClientReport) {
     let res = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: param = &ReportCtx yang hidup lebih lama dari koneksi (lihat session()).
         let ctx = unsafe { &*(param as *const ReportCtx) };
+        ctx.alive.touch();
         let rtu = &ctx.rtu;
         // SAFETY: report & nilainya valid selama callback; tidak disimpan
         let values = unsafe { ffi::ClientReport_getDataSetValues(report) };
@@ -431,10 +443,14 @@ fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End, String> {
     let use_poll = matches!(r.acquisition_mode.as_str(), "POLLING" | "HYBRID");
 
     // RCB yang gagal (mis. masih di-reserve sesi lama / IED belum siap) dicoba ulang tiap RCB_RETRY_SECS.
+    // Koneksi mati di tengah setup -> RCB berikutnya tidak dicoba di koneksi yang sama.
     let rcb_retry = Duration::from_secs(r.rcb_retry_secs);
     let mut pending: Vec<usize> = if use_report { (0..ctx.rcbs.len()).collect() } else { Vec::new() };
-    let mut rcbs = retry_pending(&mut pending, |i| try_setup_rcb(&ied, ctx, i, &mut report_ctxs, false));
+    let mut rcbs = retry_pending(&mut pending, |i| (!ied.lost()).then(|| try_setup_rcb(&ied, ctx, i, &mut report_ctxs, false)).flatten());
     let mut next_rcb_retry = Instant::now() + rcb_retry;
+    if ied.lost() {
+        return Ok(End::Disconnected);
+    }
 
     let mut groups = Vec::new();
     if use_poll {
@@ -459,6 +475,15 @@ fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End, String> {
         }
     }
 
+    if ied.lost() {
+        return Ok(End::Disconnected);
+    }
+
+    // Liveness: tanpa request sukses / report selama LIVENESS_SECS -> baca LLN0.Mod.stVal.
+    // Koneksi bisa mati tapi getState() tetap CONNECTED (lihat docs/CATATAN_TERBUKA.md).
+    let liveness = Duration::from_secs(r.liveness_secs);
+    let probe_ref = probe_reference(&ctx.points, &ctx.rcbs).and_then(|s| CString::new(s).ok());
+
     let gi_every = gi_every(r.general_interrogation_interval);
     let interval = Duration::from_millis(r.poll_interval_ms);
     let integrity = Duration::from_millis(r.integrity_period_ms);
@@ -471,7 +496,7 @@ fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End, String> {
     loop {
         let gi_due = last_gi.is_none_or(|t| gi_every.is_some_and(|every| t.elapsed() >= every));
         if !rcbs.is_empty() && gi_due {
-            for rcb in &rcbs {
+            for rcb in rcbs.iter().take_while(|_| !ied.lost()) {
                 if let Err(e) = rcb.gi(&ied) {
                     warn!(id_rtu = r.id_rtu, "GI {} gagal: {e}", rcb.reference);
                 }
@@ -479,8 +504,9 @@ fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End, String> {
             last_gi = Some(Instant::now());
         }
 
-        if !pending.is_empty() && Instant::now() >= next_rcb_retry {
-            let recovered = retry_pending(&mut pending, |i| try_setup_rcb(&ied, ctx, i, &mut report_ctxs, true));
+        if !pending.is_empty() && !ied.lost() && Instant::now() >= next_rcb_retry {
+            let recovered =
+                retry_pending(&mut pending, |i| (!ied.lost()).then(|| try_setup_rcb(&ied, ctx, i, &mut report_ctxs, true)).flatten());
             // GI supaya nilai terkini langsung terkirim, tidak menunggu GI berkala.
             // last_gi None = GI awal belum jalan, nanti otomatis mencakup RCB ini.
             for rcb in recovered.iter().filter(|_| last_gi.is_some()) {
@@ -505,7 +531,18 @@ fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End, String> {
             next_poll = next;
         }
 
-        if !ied.is_connected() {
+        if !ied.lost() && ied.idle() >= liveness {
+            if let Some(probe) = &probe_ref {
+                if let Err(e) = ied.probe(probe) {
+                    let msg = format!("tidak ada respons IED {}s, cek {probe:?} gagal: {e}; reconnect", liveness.as_secs());
+                    warn!(id_rtu = r.id_rtu, "{msg}");
+                    producer.send_log(&r.ip_address, r.id_rtu, "WARN", &msg);
+                    return Ok(End::Disconnected);
+                }
+            }
+        }
+
+        if !ied.is_connected() || ied.lost() {
             return Ok(End::Disconnected);
         }
         let wait = if groups.is_empty() {
@@ -563,13 +600,18 @@ fn execute_command(ied: &Ied, ctx: &RtuCtx, controls: &mut HashMap<i32, Control>
             CtlVal::Int(i) => OwnedValue::int32(i),
         })
     };
-    match req.action {
+    let result = match req.action {
         CommandAction::Select => ctl.select(&value()?),
-        CommandAction::Operate => {
-            ctl.operate(&value()?, oper_wait(p.oper_timeout_ms, ctx.rtu.oper_timeout_ms))
-        }
+        CommandAction::Operate => ctl.operate(&value()?, oper_wait(p.oper_timeout_ms, ctx.rtu.oper_timeout_ms)),
         CommandAction::Cancel => ctl.cancel(),
+    };
+    if result.is_ok() {
+        ied.touch();
+    } else if ctl.connection_lost() {
+        // sesi diakhiri di loop session() -> reconnect
+        ied.mark_lost();
     }
+    result
 }
 
 /// Setup RCB ke-`i` + log. Gagal pertama: WARN ke RTU_LOGGING. Percobaan ulang yang gagal hanya
@@ -584,6 +626,8 @@ fn try_setup_rcb(ied: &Ied, ctx: &Arc<RtuCtx>, i: usize, out: &mut Vec<Box<Repor
             if retry {
                 info!(id_rtu = r.id_rtu, "RCB {rcb_ref} aktif setelah dicoba ulang");
                 producer.send_log(&r.ip_address, r.id_rtu, "INFO", &format!("RCB {rcb_ref} aktif setelah dicoba ulang"));
+            } else {
+                info!(id_rtu = r.id_rtu, "RCB {rcb_ref} aktif");
             }
             Some(rcb)
         }
@@ -634,7 +678,7 @@ fn setup_rcb(ied: &Ied, ctx: &Arc<RtuCtx>, rcb_ref: &str, settings: &RcbSettings
     let mapped = members.iter().filter(|m| !m.picks.is_empty()).count();
     info!(id_rtu = ctx.rtu.id_rtu, "RCB {rcb_ref}: dataset {ds}, {} anggota, {mapped} termapping", members.len());
 
-    let rc = Box::new(ReportCtx { rtu: Arc::clone(ctx), rcb_ref: rcb_ref.to_string(), members });
+    let rc = Box::new(ReportCtx { rtu: Arc::clone(ctx), rcb_ref: rcb_ref.to_string(), members, alive: ied.liveness() });
     let param = &*rc as *const ReportCtx as *mut c_void;
     out.push(rc);
     // SAFETY: ReportCtx di heap, hidup sampai setelah `ied` di-drop (lihat session()).
@@ -657,6 +701,7 @@ fn poll_cycle(ied: &Ied, ctx: &RtuCtx, groups: &[PollGroup], sent: &mut [Option<
     // callback report (mode HYBRID) tidak tertahan selama request berjalan.
     let values: Vec<_> = groups
         .iter()
+        .take_while(|_| !ied.lost())
         .filter_map(|g| match ied.read_object(&g.reference, g.fc) {
             Ok(v) => Some((g, v)),
             Err(e) => {
@@ -758,6 +803,32 @@ mod tests {
         assert_eq!(pending, vec![2]);
         assert!(retry_pending(&mut pending, &mut setup).is_empty());
         assert_eq!(attempts, [1, 2, 3]);
+    }
+
+    #[test]
+    fn target_liveness() {
+        use crate::iec61850::mapping::default_value_attribute;
+        let pt = |r: &str| Point {
+            id_rtu: 1,
+            ioa: 1,
+            tag: None,
+            object_reference: r.into(),
+            fc: "ST".into(),
+            cdc: "SPS".into(),
+            value_attribute: default_value_attribute("SPS").unwrap_or_default().into(),
+            ctl_model: None,
+            sbo_timeout_ms: None,
+            interlock_check: false,
+            synchro_check: false,
+            deadband: None,
+            oper_timeout_ms: None,
+        };
+        let rcb = |r: &str| (r.to_string(), RcbSettings::default());
+        assert_eq!(probe_reference(&[pt("BAY1LD0/XCBR1.Pos")], &[rcb("X/LLN0.BR.b")]).as_deref(), Some("BAY1LD0/LLN0.Mod.stVal"));
+        // tanpa titik: dari RCB
+        assert_eq!(probe_reference(&[], &[rcb("simpleIOGenericIO/LLN0.BR.EventsBRCB01")]).as_deref(), Some("simpleIOGenericIO/LLN0.Mod.stVal"));
+        assert_eq!(probe_reference(&[pt("tanpa-slash")], &[]), None);
+        assert_eq!(probe_reference(&[], &[]), None);
     }
 
     #[test]

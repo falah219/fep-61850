@@ -20,6 +20,30 @@ Hal yang **belum diputuskan / belum dikonfirmasi tim**. Perbarui file ini setiap
 | 12 | **BRCB EntryID & ResvTms di IED asli** | Dirancang sesuai IEC 61850-7-2 dan diuji ke simulator libIEC61850. Perlu dicek ke IED vendor: (a) apakah EntryID dari sesi sebelumnya diterima, (b) apakah `ResvTms` didukung (IED Ed1 biasanya tidak; elemen dilewati kalau tidak ada). EntryID hanya di memori: hilang saat reload RTU / restart FEP (event selama restart FEP bisa hilang). | `resume_from_entry_id` di [src/iec61850/acquisition.rs](../src/iec61850/acquisition.rs) |
 | 13 | **`oper_timeout_ms` vs batas 30 detik handler COMMAND** | Kolom baru (NULL = env `OPER_TIMEOUT_MS`, default 10000), CHECK `< 30000` karena handler COMMAND menunggu hasil maks 30 detik. `sbo_timeout_ms` tidak lagi dipakai untuk CommandTermination (tidak dipakai sama sekali di FEP). | migrasi `0001`, `oper_wait` di [src/iec61850/acquisition.rs](../src/iec61850/acquisition.rs) |
 
+## Temuan uji
+
+### Koneksi mati yang tetap terbaca CONNECTED
+
+- **Gejala**: banyak IED konek serentak (FEP start / reconnect massal). Sebagian IED tetap terlihat
+  online (`RTU_STATUS=1`), tapi RCB-nya tidak pernah aktif dan report tidak datang.
+- **Penyebab (dugaan)**: banyak connect serentak di libIEC61850 v1.6.2.1 bisa menghasilkan koneksi
+  mati yang `IedConnection_getState()`-nya tetap `CONNECTED`. Setiap request di koneksi itu gagal
+  (`CONNECTION_LOST` / `NOT_CONNECTED` / timeout), dan FEP sebelumnya terus mencoba ulang RCB di
+  koneksi yang sama.
+- **Mitigasi**:
+  1. `MAX_CONCURRENT_CONNECTS` default 4 (sebelumnya 200).
+  2. Error koneksi di request mana pun langsung mengakhiri sesi lalu reconnect.
+  3. Liveness `LIVENESS_SECS` (30): tanpa tanda hidup -> baca `LLN0.Mod.stVal`; gagal -> reconnect.
+  4. `BRCB_RESV_TMS_SECS` default 20 (< `RCB_RETRY_SECS` 30), supaya reservasi BRCB dari sesi mati
+     sudah lepas saat RCB dicoba ulang.
+- **Uji penerimaan**: 20 simulator di port berbeda, FEP di-start 10 kali; dalam 60 detik tidak boleh
+  ada IED yang `RTU_STATUS=1` tanpa RCB aktif. **Belum dijalankan.** Perangkat:
+  `docker-compose.sim20.yml` (20 simulator, port host 10201..10220), `migrations/seed_sim20.sql`
+  (RTU 9101..9120), lalu di container dev `scripts/uji_konek_serentak.sh 10 90`.
+- **Perlu dikonfirmasi**: apakah akar masalahnya di libIEC61850 (laporkan ke MZ Automation) atau di
+  cara FEP memakai `IedConnection`. Dengan mitigasi di atas gejalanya tertangani, tapi penyebab
+  pastinya belum diketahui.
+
 ## Keputusan yang sudah dikonfirmasi
 
 - Tabel baru `iec61850s` (belum ada tabel backend untuk form "Add Client").
@@ -34,6 +58,8 @@ Hal yang **belum diputuskan / belum dikonfirmasi tim**. Perbarui file ini setiap
 - `general_interrogation_interval >= 0`; 0 = GI hanya saat konek (CHECK langsung di migrasi `0001`, belum dipakai).
 - Waktu: atribut `t` -> waktu entri report (`time_desc` `RTU`) -> jam server (`SERVER`).
 - Shutdown: tunggu thread IED maks `SHUTDOWN_WAIT_SECS` (5), lalu `RTU_STATUS=0` untuk semua IED, baru flush Kafka.
+- `MAX_CONCURRENT_CONNECTS` default 4, `BRCB_RESV_TMS_SECS` default 20, `LIVENESS_SECS` default 30.
+- COMMAND masuk antrean IED sesuai urutan kedatangan; hanya tunggu hasil + respons yang di-spawn.
 
 ## Belum diuji (butuh Postgres + Kafka dev)
 

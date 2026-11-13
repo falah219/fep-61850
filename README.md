@@ -228,7 +228,7 @@ Akuisisi per mode (`iec61850s.acquisition_mode`):
 Reload karena `MASTER_DATAPOINT_EVENT` / CDC digabung per `id_rtu` selama `RELOAD_DEBOUNCE_MS` (env, default 2000).
 
 BRCB (`.BR.`):
-- `ResvTms` ditulis `BRCB_RESV_TMS_SECS` (default 60) kalau IED punya elemen itu: RCB tetap dipesan untuk FEP selama putus.
+- `ResvTms` ditulis `BRCB_RESV_TMS_SECS` (default 20, harus < `RCB_RETRY_SECS`) kalau IED punya elemen itu: RCB tetap dipesan untuk FEP selama putus.
 - EntryID report terakhir disimpan di memori per RCB. Saat reconnect EntryID ditulis ke IED, jadi event selama putus
   dikirim ulang tanpa dobel. Ditolak IED -> enable tanpa EntryID + WARN di `RTU_LOGGING`.
   EntryID hilang saat reload RTU / restart FEP.
@@ -259,7 +259,21 @@ File baru: [src/manager.rs](src/manager.rs), [src/handlers.rs](src/handlers.rs),
 
 - **Satu thread per IED** dengan saluran kontrol `Stop` / `Gi` / `Wake` (`acquisition.rs`).
   Jeda reconnect = `reconnect_time_ms`, `reconnect_retry_count` 0 = tanpa batas.
-- **`MAX_CONCURRENT_CONNECTS`**: gate yang membatasi percobaan konek serentak.
+- **`MAX_CONCURRENT_CONNECTS`** (default 4): gate yang membatasi percobaan konek serentak.
+- **Koneksi mati**: request MMS yang gagal dengan `CONNECTION_LOST` / `NOT_CONNECTED` (RCB, polling, GI,
+  command) langsung mengakhiri sesi lalu reconnect; RCB tidak dicoba terus di koneksi yang sama.
+- **Liveness**: tanpa request sukses / report masuk selama `LIVENESS_SECS` (default 30), FEP membaca
+  `<LD pertama>/LLN0.Mod.stVal` [ST]. Gagal (timeout / koneksi mati) -> sesi diakhiri, reconnect.
+  IED yang menjawab dengan error (mis. objek tidak ada) tetap dianggap hidup.
+- **COMMAND**: dimasukkan ke antrean IED langsung saat event diterima (urutan kedatangan);
+  hanya menunggu hasil + respons `RTU_COMMAND` yang jalan di task terpisah.
+
+Uji koneksi serentak (20 simulator, FEP start 10 kali, RCB harus aktif dalam 60 detik):
+```bash
+docker compose -f docker-compose.dev.yml -f docker-compose.sim20.yml up -d
+psql ... -f migrations/seed_sim20.sql      # DB dev, RTU 9101..9120
+docker compose -f docker-compose.dev.yml -f docker-compose.sim20.yml exec -w /work dev scripts/uji_konek_serentak.sh 10 90
+```
 - **`RTU_STATUS`**: 1 saat sesi MMS aktif, 0 saat putus/gagal (sekali per rangkaian gagal);
   heartbeat tiap `STATUS_HEARTBEAT_INTERVAL_SECS`; status sistem 1 saat start, 0 saat stop;
   status per channel dari ping ICMP (hanya IP literal, butuh root/CAP_NET_RAW).

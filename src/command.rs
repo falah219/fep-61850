@@ -1,6 +1,7 @@
 //! Event COMMAND (RTU_EVENTS) -> select / operate / cancel IEC 61850 -> respons RTU_COMMAND.
 //! Format payload & respons sama dengan `kafka/handlers/rtu_event/command` FEP IEC 104.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -139,21 +140,40 @@ fn parse_command_data(m: &RtuEventMessage) -> CommandData {
     }
 }
 
-pub async fn handle(mgr: &Arc<Manager>, m: RtuEventMessage) {
+/// Bagian SINKRON: parse lalu masukkan command ke antrean thread IED saat itu juga, jadi urutan
+/// command ke satu IED = urutan kedatangan Kafka (SELECT selalu sebelum OPERATE).
+/// Future yang dikembalikan (tunggu hasil + kirim respons RTU_COMMAND) boleh di-`tokio::spawn`.
+pub fn submit(mgr: &Arc<Manager>, m: RtuEventMessage) -> Option<impl Future<Output = ()> + Send + 'static> {
     let cd = parse_command_data(&m);
     let Some(action) = CommandAction::parse(&cd.action) else {
-        return warn!("[COMMAND] action tidak dikenal: {:?}", cd.action);
+        warn!("[COMMAND] action tidak dikenal: {:?}", cd.action);
+        return None;
     };
     let value = as_i32(cd.value.as_ref());
     let ioa = as_i32(cd.ioa.as_ref()).or_else(|| cd.tag.as_deref().and_then(ioa_from_tag));
     info!("[COMMAND] {} ip={} id_rtu={:?} ioa={ioa:?} value={value:?} key={:?}", action.as_str(), cd.ip_address, cd.id_rtu, cd.key);
 
-    let result = execute(mgr, &cd, action, ioa, value).await;
-    match &result {
+    let queued = enqueue(mgr, &cd, action, ioa, value);
+    let mgr = Arc::clone(mgr);
+    Some(async move {
+        let result = match queued {
+            Ok(rx) => match tokio::time::timeout(COMMAND_TIMEOUT, rx).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err("thread IED berhenti sebelum command selesai".into()),
+                Err(_) => Err("timeout menunggu hasil command".into()),
+            },
+            Err(e) => Err(e),
+        };
+        respond(&mgr, &cd, action, ioa, value, &result);
+    })
+}
+
+fn respond(mgr: &Manager, cd: &CommandData, action: CommandAction, ioa: Option<i32>, value: Option<i32>, result: &Result<(), String>) {
+    match result {
         Ok(()) => info!("[COMMAND] {} sukses ioa={ioa:?}", action.as_str()),
         Err(e) => error!("[COMMAND] {} gagal ioa={ioa:?}: {e}", action.as_str()),
     }
-    let (status, msg) = match &result {
+    let (status, msg) = match result {
         Ok(()) => ("active", format!("{} success RTU status is Active", action.as_str())),
         Err(e) => ("inactive", format!("{} failed: {e} - RTU status is Inactive", action.as_str())),
     };
@@ -176,7 +196,14 @@ pub async fn handle(mgr: &Arc<Manager>, m: RtuEventMessage) {
     mgr.publisher.producer.send_raw(TOPIC_RTU_COMMAND, topic_key, &response);
 }
 
-async fn execute(mgr: &Arc<Manager>, cd: &CommandData, action: CommandAction, ioa: Option<i32>, value: Option<i32>) -> Result<(), String> {
+/// Validasi + kirim ke antrean thread IED (tanpa menunggu).
+fn enqueue(
+    mgr: &Manager,
+    cd: &CommandData,
+    action: CommandAction,
+    ioa: Option<i32>,
+    value: Option<i32>,
+) -> Result<oneshot::Receiver<Result<(), String>>, String> {
     let id = cd.id_rtu.or_else(|| mgr.id_by_ip(&cd.ip_address)).ok_or("RTU tidak ditemukan untuk IP ini")?;
     let ioa = ioa.ok_or("ioa atau tag dengan IOA wajib diisi")?;
     if action != CommandAction::Cancel && value.is_none() {
@@ -192,11 +219,7 @@ async fn execute(mgr: &Arc<Manager>, cd: &CommandData, action: CommandAction, io
     if !mgr.send(id, Ctl::Command(Box::new(CommandJob { req, reply: tx }))) {
         return Err(format!("RTU {id} tidak berjalan"));
     }
-    match tokio::time::timeout(COMMAND_TIMEOUT, rx).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(_)) => Err("thread IED berhenti sebelum command selesai".into()),
-        Err(_) => Err("timeout menunggu hasil command".into()),
-    }
+    Ok(rx)
 }
 
 #[cfg(test)]

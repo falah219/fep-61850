@@ -25,12 +25,13 @@ fn data_id_rtu(data: Option<&Value>) -> Option<i32> {
 
 pub async fn handle(mgr: &Arc<Manager>, event: KafkaEvent) {
     match event {
-        // COMMAND bisa menunggu sampai 30 detik (CommandTermination): jalan di task sendiri supaya
-        // event lain (GI, reload, command ke IED lain) tidak tertahan.
-        // Urutan SELECT -> OPERATE tetap, karena operator mengirimnya berjeda.
+        // COMMAND masuk antrean IED SEKARANG (urutan kedatangan terjaga: SELECT sebelum OPERATE).
+        // Hanya menunggu hasil (bisa sampai 30 detik) + kirim respons yang jalan di task sendiri,
+        // supaya event lain tidak tertahan.
         KafkaEvent::RtuEvent(m) if is_ours(&m.protocol) && m.event == "COMMAND" => {
-            let mgr = Arc::clone(mgr);
-            tokio::spawn(async move { crate::command::handle(&mgr, *m).await });
+            if let Some(wait_and_respond) = crate::command::submit(mgr, *m) {
+                tokio::spawn(wait_and_respond);
+            }
         }
         KafkaEvent::RtuEvent(m) if is_ours(&m.protocol) => rtu_event(mgr, *m).await,
         KafkaEvent::MasterDatapoint(m) if is_ours(&m.protocol) => master_datapoint(mgr, m).await,
@@ -234,6 +235,40 @@ mod tests {
         // Command tetap sampai ke thread IED.
         let ioa = tokio::task::spawn_blocking(move || seen_rx.recv_timeout(Duration::from_secs(2))).await.unwrap();
         assert_eq!(ioa, Ok(3001));
+        mgr.stop_all(Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn command_masuk_antrean_ied_sesuai_urutan_kedatangan() {
+        use crate::command::CommandAction;
+        let mgr = manager();
+        let (seen_tx, seen_rx) = mpsc::channel();
+        fake_ied(&mgr, 9001, move |rx| {
+            let mut held = Vec::new();
+            while let Ok(ctl) = rx.recv() {
+                match ctl {
+                    Ctl::Command(job) => {
+                        let _ = seen_tx.send(job.req.action);
+                        held.push(job);
+                    }
+                    Ctl::Stop => break,
+                    _ => {}
+                }
+            }
+        });
+        let cmd = |action: &str| {
+            let json = format!(
+                r#"{{"event":"COMMAND","protocol":"IEC61850","ip_address":"ied-9001",
+                    "data":{{"action":"{action}","ioa":3001,"value":1,"id_rtu":9001}}}}"#
+            );
+            KafkaEvent::RtuEvent(Box::new(serde_json::from_str::<RtuEventMessage>(&json).unwrap()))
+        };
+        handle(&mgr, cmd("SELECT_RTU")).await;
+        handle(&mgr, cmd("OPERATE_RTU")).await;
+        // recv BLOCKING di thread runtime (current_thread): task yang di-spawn TIDAK bisa jalan di sini.
+        // Jadi command harus sudah masuk antrean secara sinkron di dalam handle().
+        let order: Vec<_> = (0..2).map(|_| seen_rx.recv_timeout(Duration::from_secs(1))).collect();
+        assert_eq!(order, vec![Ok(CommandAction::Select), Ok(CommandAction::Operate)]);
         mgr.stop_all(Duration::from_secs(5)).await;
     }
 }

@@ -27,7 +27,7 @@ data:
   # Gabungkan reload per id_rtu dari MASTER_DATAPOINT_EVENT / CDC (ms)
   RELOAD_DEBOUNCE_MS: "2000"
   # ResvTms BRCB (detik): RCB tetap dipesan untuk FEP selama koneksi putus
-  BRCB_RESV_TMS_SECS: "60"
+  BRCB_RESV_TMS_SECS: "20"
   # Default tunggu CommandTermination (ms) kalau kolom oper_timeout_ms NULL
   OPER_TIMEOUT_MS: "10000"
   # Tunggu thread IED berhenti saat shutdown (detik); harus < terminationGracePeriodSeconds
@@ -36,7 +36,11 @@ data:
   OSI_PARAMS_SIDE: "none"
 
   STATUS_HEARTBEAT_INTERVAL_SECS: "10"
-  MAX_CONCURRENT_CONNECTS: "200"
+  # Sengaja kecil: connect serentak di libIEC61850 bisa menghasilkan koneksi mati yang tetap
+  # terbaca CONNECTED (docs/CATATAN_TERBUKA.md)
+  MAX_CONCURRENT_CONNECTS: "4"
+  # Tanpa tanda hidup selama ini (detik) -> cek LLN0.Mod.stVal; gagal -> reconnect
+  LIVENESS_SECS: "30"
 
   PING_INTERVAL_MS: "5000"
   PING_TIMEOUT_MS: "2000"

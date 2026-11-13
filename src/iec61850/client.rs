@@ -2,9 +2,12 @@
 //!
 //! Semua fungsi di sini BLOCKING (request MMS). Jangan dipanggil langsung dari task async.
 
+use std::cell::Cell;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_void;
-use std::sync::{Condvar, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::ffi;
 
@@ -170,8 +173,55 @@ fn apply_osi(con: ffi::IedConnection, o: &OsiParams) -> Result<(), String> {
     Ok(())
 }
 
+/// Error yang berarti koneksi MMS sudah mati: sesi harus diakhiri lalu reconnect.
+pub fn is_connection_error(err: ffi::IedClientError) -> bool {
+    matches!(err, ffi::IED_ERROR_CONNECTION_LOST | ffi::IED_ERROR_NOT_CONNECTED)
+}
+
+/// Error yang berarti IED MENJAWAB request (ditolak / objek tidak ada): koneksinya hidup.
+pub fn is_server_response(err: ffi::IedClientError) -> bool {
+    matches!(
+        err,
+        ffi::IED_ERROR_ACCESS_DENIED
+            | ffi::IED_ERROR_OBJECT_DOES_NOT_EXIST
+            | ffi::IED_ERROR_OBJECT_ACCESS_UNSUPPORTED
+            | ffi::IED_ERROR_OBJECT_UNDEFINED
+            | ffi::IED_ERROR_TYPE_INCONSISTENT
+            | ffi::IED_ERROR_TEMPORARILY_UNAVAILABLE
+    )
+}
+
+/// Kapan terakhir ada tanda hidup dari IED (request sukses / report masuk).
+/// Disentuh dari thread IED dan dari thread penerima report libIEC61850.
+pub struct Liveness {
+    base: Instant,
+    last_ms: AtomicU64,
+}
+
+impl Default for Liveness {
+    fn default() -> Self {
+        Self { base: Instant::now(), last_ms: AtomicU64::new(0) }
+    }
+}
+
+impl Liveness {
+    pub fn touch(&self) {
+        self.last_ms.store(self.base.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// Lama tanpa tanda hidup.
+    pub fn idle(&self) -> Duration {
+        self.base.elapsed().saturating_sub(Duration::from_millis(self.last_ms.load(Ordering::Relaxed)))
+    }
+}
+
 /// Koneksi MMS ke satu IED. Otomatis close + destroy saat di-drop.
-pub struct Ied(ffi::IedConnection);
+pub struct Ied {
+    con: ffi::IedConnection,
+    /// Ada request yang gagal karena koneksi mati (getState bisa tetap CONNECTED).
+    lost: Cell<bool>,
+    alive: Arc<Liveness>,
+}
 
 // SAFETY: IedConnection libIEC61850 thread-safe untuk request dari satu thread pemilik + callback
 // dari thread penerima internalnya. Ied hanya dipindah antar thread, tidak dipakai bersamaan.
@@ -183,25 +233,73 @@ impl Ied {
         let c_local = p.local_ip.filter(|ip| *ip != "0.0.0.0" && !ip.is_empty()).map(cstring).transpose()?;
         let mut err = ffi::IED_ERROR_OK;
         // SAFETY: handle baru; kalau konek gagal, Drop tetap memanggil destroy.
-        let ied = Ied(unsafe { ffi::IedConnection_create() });
+        let ied = Ied { con: unsafe { ffi::IedConnection_create() }, lost: Cell::new(false), alive: Arc::default() };
+        // SAFETY: handle valid; setter hanya mengubah konfigurasi lokal
         unsafe {
-            ffi::IedConnection_setConnectTimeout(ied.0, p.connect_timeout_ms);
-            ffi::IedConnection_setRequestTimeout(ied.0, p.request_timeout_ms);
+            ffi::IedConnection_setConnectTimeout(ied.con, p.connect_timeout_ms);
+            ffi::IedConnection_setRequestTimeout(ied.con, p.request_timeout_ms);
             if let Some(local) = &c_local {
-                ffi::IedConnection_setLocalAddress(ied.0, local.as_ptr(), 0);
+                ffi::IedConnection_setLocalAddress(ied.con, local.as_ptr(), 0);
             }
         }
         if let Some(o) = p.osi {
-            apply_osi(ied.0, o)?;
+            apply_osi(ied.con, o)?;
         }
         // SAFETY: handle valid, c_host hidup selama pemanggilan
-        unsafe { ffi::IedConnection_connect(ied.0, &mut err, c_host.as_ptr(), p.port) };
-        check(err).map(|_| ied)
+        unsafe { ffi::IedConnection_connect(ied.con, &mut err, c_host.as_ptr(), p.port) };
+        check(err)?;
+        ied.alive.touch();
+        Ok(ied)
+    }
+
+    /// Catat hasil satu request: sukses / dijawab IED = tanda hidup; error koneksi = sesi mati.
+    fn note(&self, err: ffi::IedClientError) {
+        if err == ffi::IED_ERROR_OK || is_server_response(err) {
+            self.alive.touch();
+        } else if is_connection_error(err) {
+            self.lost.set(true);
+        }
     }
 
     pub fn is_connected(&self) -> bool {
         // SAFETY: koneksi valid selama &self hidup
-        unsafe { ffi::IedConnection_getState(self.0) == ffi::IED_STATE_CONNECTED }
+        unsafe { ffi::IedConnection_getState(self.con) == ffi::IED_STATE_CONNECTED }
+    }
+
+    /// true kalau ada request yang gagal karena koneksi mati: sesi harus diakhiri.
+    pub fn lost(&self) -> bool {
+        self.lost.get()
+    }
+
+    pub fn mark_lost(&self) {
+        self.lost.set(true);
+    }
+
+    pub fn touch(&self) {
+        self.alive.touch();
+    }
+
+    pub fn idle(&self) -> Duration {
+        self.alive.idle()
+    }
+
+    /// Untuk callback report (tanda hidup dari thread penerima).
+    pub fn liveness(&self) -> Arc<Liveness> {
+        Arc::clone(&self.alive)
+    }
+
+    /// Cek hidup: baca `reference` [ST]. Ok juga kalau IED menjawab dengan error (mis. objek tidak
+    /// ada) karena itu tetap bukti koneksinya hidup. Err = timeout / koneksi mati.
+    pub fn probe(&self, reference: &CStr) -> Result<(), String> {
+        let mut err = ffi::IED_ERROR_OK;
+        // SAFETY: koneksi valid, reference hidup selama pemanggilan; nilai milik kita (dibuang)
+        let v = unsafe { ffi::IedConnection_readObject(self.con, &mut err, reference.as_ptr(), ffi::IEC61850_FC_ST) };
+        drop(OwnedValue(v));
+        self.note(err);
+        if is_server_response(err) {
+            return Ok(());
+        }
+        check(err)
     }
 
     /// Anggota dataset, contoh `LD/GGIO1.AnIn1.mag.f[MX]`. `ds_ref` contoh `LD/LLN0.Events`.
@@ -210,8 +308,9 @@ impl Ied {
         let mut err = ffi::IED_ERROR_OK;
         // SAFETY: koneksi valid, c hidup selama pemanggilan; null = tidak perlu flag deletable
         let list = unsafe {
-            ffi::IedConnection_getDataSetDirectory(self.0, &mut err, c.as_ptr(), std::ptr::null_mut())
+            ffi::IedConnection_getDataSetDirectory(self.con, &mut err, c.as_ptr(), std::ptr::null_mut())
         };
+        self.note(err);
         take_strings(list, err)
     }
 
@@ -220,8 +319,9 @@ impl Ied {
         let c = cstring(reference)?;
         let mut err = ffi::IED_ERROR_OK;
         // SAFETY: koneksi valid, c hidup selama pemanggilan
-        let s = unsafe { ffi::IedConnection_getVariableSpecification(self.0, &mut err, c.as_ptr(), fc) };
+        let s = unsafe { ffi::IedConnection_getVariableSpecification(self.con, &mut err, c.as_ptr(), fc) };
         let spec = Spec(s);
+        self.note(err);
         check(err)?;
         if spec.0.is_null() {
             return Err(format!("spec {reference} kosong"));
@@ -233,8 +333,9 @@ impl Ied {
     pub fn read_object(&self, reference: &CString, fc: ffi::FunctionalConstraint) -> Result<OwnedValue, String> {
         let mut err = ffi::IED_ERROR_OK;
         // SAFETY: koneksi valid, reference hidup selama pemanggilan; nilai jadi milik kita
-        let v = unsafe { ffi::IedConnection_readObject(self.0, &mut err, reference.as_ptr(), fc) };
+        let v = unsafe { ffi::IedConnection_readObject(self.con, &mut err, reference.as_ptr(), fc) };
         let v = OwnedValue(v);
+        self.note(err);
         check(err)?;
         if v.0.is_null() {
             return Err("nilai kosong".into());
@@ -243,7 +344,7 @@ impl Ied {
     }
 
     fn raw(&self) -> ffi::IedConnection {
-        self.0
+        self.con
     }
 }
 
@@ -252,8 +353,8 @@ impl Drop for Ied {
         // SAFETY: handle dari IedConnection_create, di-drop sekali. close aman walau belum konek.
         // Setelah close, tidak ada callback report lagi.
         unsafe {
-            ffi::IedConnection_close(self.0);
-            ffi::IedConnection_destroy(self.0);
+            ffi::IedConnection_close(self.con);
+            ffi::IedConnection_destroy(self.con);
         }
     }
 }
@@ -411,6 +512,7 @@ impl Rcb {
             ffi::IedConnection_getRCBValues(ied.raw(), &mut err, c_ref.as_ptr(), std::ptr::null_mut())
         };
         let me = Self { reference: reference.into(), c_ref, rcb };
+        ied.note(err);
         check(err)?;
         if me.rcb.is_null() {
             return Err("RCB tidak ditemukan".into());
@@ -530,6 +632,7 @@ impl Rcb {
         let mut err = ffi::IED_ERROR_OK;
         // SAFETY: koneksi dan rcb valid; true = satu request
         unsafe { ffi::IedConnection_setRCBValues(ied.raw(), &mut err, self.rcb, mask, true) };
+        ied.note(err);
         check(err)
     }
 }
@@ -655,6 +758,12 @@ impl Control {
         }
     }
 
+    /// true kalau perintah terakhir gagal karena koneksi mati.
+    pub fn connection_lost(&self) -> bool {
+        // SAFETY: ctl valid
+        is_connection_error(unsafe { ffi::ControlObjectClient_getLastError(self.ctl) })
+    }
+
     fn error(&self, what: &str) -> String {
         // SAFETY: ctl valid
         let (err, appl) = unsafe {
@@ -708,6 +817,35 @@ fn take_strings(list: ffi::LinkedList, err: ffi::IedClientError) -> Result<Vec<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn klasifikasi_error() {
+        assert!(is_connection_error(ffi::IED_ERROR_CONNECTION_LOST));
+        assert!(is_connection_error(ffi::IED_ERROR_NOT_CONNECTED));
+        // timeout bukan bukti putus (bisa IED lambat) -> ditangani liveness
+        assert!(!is_connection_error(ffi::IED_ERROR_TIMEOUT));
+        assert!(!is_connection_error(ffi::IED_ERROR_OBJECT_DOES_NOT_EXIST));
+        // IED menjawab -> koneksi hidup
+        assert!(is_server_response(ffi::IED_ERROR_OBJECT_DOES_NOT_EXIST));
+        assert!(is_server_response(ffi::IED_ERROR_ACCESS_DENIED));
+        assert!(!is_server_response(ffi::IED_ERROR_TIMEOUT));
+        assert!(!is_server_response(ffi::IED_ERROR_CONNECTION_LOST));
+    }
+
+    #[test]
+    fn liveness_idle_dan_touch() {
+        let l = Liveness::default();
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(l.idle() >= Duration::from_millis(50));
+        l.touch();
+        assert!(l.idle() < Duration::from_millis(50));
+        // disentuh dari thread lain (callback report)
+        let l = Arc::new(l);
+        std::thread::sleep(Duration::from_millis(60));
+        let l2 = Arc::clone(&l);
+        std::thread::spawn(move || l2.touch()).join().unwrap();
+        assert!(l.idle() < Duration::from_millis(50));
+    }
 
     #[test]
     fn selector_hex() {

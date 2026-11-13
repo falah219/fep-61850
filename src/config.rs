@@ -112,6 +112,10 @@ pub struct RuntimeConfig {
 
 const DEFAULT_TOPICS: &str = "RTU_EVENTS,RTU_COMMAND_CONFIG_REQUEST,MASTER_DATAPOINT_EVENT,MASTER_DATA_OBJECT_EVENT,CAPTURE_DATA_CHANGE,MASTER_RTU_EVENTS,MANUAL_SET_EVENT";
 
+/// Default kecil: banyak connect serentak di libIEC61850 bisa menghasilkan koneksi mati yang
+/// getState()-nya tetap CONNECTED (lihat docs/CATATAN_TERBUKA.md).
+pub const DEFAULT_MAX_CONCURRENT_CONNECTS: usize = 4;
+
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
     env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
@@ -119,7 +123,7 @@ fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
 impl RuntimeConfig {
     pub fn from_env() -> Self {
         Self {
-            max_concurrent_connects: env_or("MAX_CONCURRENT_CONNECTS", 200).max(1),
+            max_concurrent_connects: env_or("MAX_CONCURRENT_CONNECTS", DEFAULT_MAX_CONCURRENT_CONNECTS).max(1),
             status_heartbeat_interval_secs: env_or("STATUS_HEARTBEAT_INTERVAL_SECS", 10).max(1),
             ping_interval_ms: env_or("PING_INTERVAL_MS", 5000).max(100),
             ping_timeout_ms: env_or("PING_TIMEOUT_MS", 2000),
@@ -161,5 +165,16 @@ impl DatabaseConfig {
             password: env::var("DB_PASSWORD").unwrap_or_default(),
             dbname: env::var("DB_DATABASE").unwrap_or_else(|_| "ICONICS_DEV".into()),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_connect_serentak() {
+        assert_eq!(DEFAULT_MAX_CONCURRENT_CONNECTS, 4);
+        assert_eq!(env_or::<usize>("FEP_TEST_ENV_TIDAK_ADA", DEFAULT_MAX_CONCURRENT_CONNECTS), 4);
     }
 }
