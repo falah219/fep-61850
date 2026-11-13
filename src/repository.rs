@@ -2,14 +2,29 @@
 
 use std::env;
 
-use tokio_postgres::{Client, Row};
+use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
+use tokio_postgres::{Client, NoTls, Row};
 use tracing::warn;
+
+use crate::config::DatabaseConfig;
 
 use crate::iec61850::client::RcbSettings;
 use crate::iec61850::mapper::parse_trg_ops;
 use crate::iec61850::mapping::{default_value_attribute, Point, PointMap};
 
 type DbResult<T> = Result<T, String>;
+
+/// Pool koneksi Postgres (sama seperti `repository/pool.rs` FEP IEC 104).
+pub fn create_pool(db: &DatabaseConfig) -> DbResult<Pool> {
+    let mut cfg = Config::new();
+    cfg.host = Some(db.host.clone());
+    cfg.port = Some(db.port);
+    cfg.user = Some(db.user.clone());
+    cfg.password = Some(db.password.clone());
+    cfg.dbname = Some(db.dbname.clone());
+    cfg.manager = Some(ManagerConfig { recycling_method: RecyclingMethod::Fast });
+    cfg.create_pool(Some(Runtime::Tokio1), NoTls).map_err(|e| format!("gagal membuat pool DB: {e}"))
+}
 
 fn db_err(what: &str) -> impl Fn(tokio_postgres::Error) -> String + '_ {
     move |e| format!("{what}: {e}")
@@ -18,6 +33,8 @@ fn db_err(what: &str) -> impl Fn(tokio_postgres::Error) -> String + '_ {
 #[derive(Debug, Clone)]
 pub struct RtuConfig {
     pub id_rtu: i32,
+    pub state_rtu: bool,
+    pub channel_number: i32,
     pub ip_address: String,
     pub port: i32,
     pub local_ip_address: String,
@@ -37,7 +54,8 @@ fn non_negative(v: i32) -> u64 {
     v.max(0) as u64
 }
 
-pub async fn load_rtus(c: &Client) -> DbResult<Vec<RtuConfig>> {
+/// `id = None` -> semua RTU; `Some(id)` -> satu RTU (untuk reload dari event Kafka).
+pub async fn load_rtus(c: &Client, id: Option<i32>) -> DbResult<Vec<RtuConfig>> {
     let integrity_period_ms = env::var("INTEGRITY_PERIOD_MS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -46,9 +64,9 @@ pub async fn load_rtus(c: &Client) -> DbResult<Vec<RtuConfig>> {
         .query(
             "SELECT id_rtu, ip_address, port, local_ip_address, acquisition_mode, poll_interval_ms,
                     general_interrogation_interval, connect_timeout_ms, request_timeout_ms,
-                    reconnect_time_ms, reconnect_retry_count
-             FROM iec61850s WHERE is_deleted = FALSE AND state_rtu = TRUE ORDER BY id_rtu",
-            &[],
+                    reconnect_time_ms, reconnect_retry_count, state_rtu, channel_number
+             FROM iec61850s WHERE is_deleted = FALSE AND ($1::INT IS NULL OR id_rtu = $1) ORDER BY id_rtu",
+            &[&id],
         )
         .await
         .map_err(db_err("query iec61850s"))?;
@@ -66,6 +84,8 @@ pub async fn load_rtus(c: &Client) -> DbResult<Vec<RtuConfig>> {
                 request_timeout_ms: non_negative(r.try_get(8)?) as u32,
                 reconnect_time_ms: non_negative(r.try_get(9)?),
                 reconnect_retry_count: non_negative(r.try_get(10)?) as u32,
+                state_rtu: r.try_get(11)?,
+                channel_number: r.try_get(12)?,
                 integrity_period_ms,
             })
         })
@@ -74,12 +94,13 @@ pub async fn load_rtus(c: &Client) -> DbResult<Vec<RtuConfig>> {
 }
 
 /// (id_rtu, rcb_reference, settings). Baris dengan trg_ops tidak valid dilewati + warning.
-pub async fn load_rcbs(c: &Client) -> DbResult<Vec<(i32, String, RcbSettings)>> {
+pub async fn load_rcbs(c: &Client, id: Option<i32>) -> DbResult<Vec<(i32, String, RcbSettings)>> {
     let rows = c
         .query(
             "SELECT id_rtu, rcb_reference, dataset_reference, trg_ops, intg_pd_ms, buf_tm_ms
-             FROM iec61850_report_controls WHERE enabled = TRUE ORDER BY id",
-            &[],
+             FROM iec61850_report_controls
+             WHERE enabled = TRUE AND ($1::INT IS NULL OR id_rtu = $1) ORDER BY id",
+            &[&id],
         )
         .await
         .map_err(db_err("query iec61850_report_controls"))?;
@@ -133,7 +154,7 @@ fn to_point(row: &Row) -> Result<Point, tokio_postgres::Error> {
     })
 }
 
-pub async fn load_points(c: &Client) -> DbResult<PointMap> {
+pub async fn load_points(c: &Client, id: Option<i32>) -> DbResult<PointMap> {
     let rows = c
         .query(
             "SELECT md.id_rtu, md.ioa, md.tag, x.object_reference, x.functional_constraint, x.cdc,
@@ -142,8 +163,9 @@ pub async fn load_points(c: &Client) -> DbResult<PointMap> {
              JOIN master_datapoints md ON md.id = x.id_master_datapoint
              JOIN iec61850s r          ON r.id_rtu = md.id_rtu
              WHERE md.is_deleted = FALSE AND r.is_deleted = FALSE AND md.protocol = 'IEC61850'
+               AND ($1::INT IS NULL OR md.id_rtu = $1)
              ORDER BY md.id_rtu, md.ioa",
-            &[],
+            &[&id],
         )
         .await
         .map_err(db_err("query mapping titik"))?;
@@ -240,4 +262,13 @@ pub async fn load_general_actions(c: &Client) -> DbResult<Vec<(String, i32)>> {
         .await
         .map_err(db_err("query general action"))?;
     Ok(rows.iter().filter_map(|r| Some((r.try_get(0).ok()?, r.try_get(1).ok()?))).collect())
+}
+
+/// id_rtu pemilik sebuah master_datapoints.id (uuid dalam bentuk teks).
+pub async fn rtu_of_datapoint(c: &Client, id_master_datapoint: &str) -> DbResult<Option<i32>> {
+    let row = c
+        .query_opt("SELECT id_rtu FROM master_datapoints WHERE id::TEXT = $1", &[&id_master_datapoint])
+        .await
+        .map_err(db_err("query id_rtu datapoint"))?;
+    Ok(row.and_then(|r| r.try_get(0).ok()))
 }

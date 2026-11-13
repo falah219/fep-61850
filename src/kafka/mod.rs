@@ -9,8 +9,16 @@ use tracing::{info, warn};
 
 use crate::config::KafkaConfig;
 
+pub mod consumer;
+pub mod models;
+
+use models::{RtuLoggingMessage, RtuStatusMessage};
+
 pub const TOPIC_RTU_DATAS: &str = "RTU_DATAS";
 pub const TOPIC_DATAPOINTS: &str = "DATAPOINTS";
+pub const TOPIC_RTU_STATUS: &str = "RTU_STATUS";
+pub const TOPIC_RTU_LOGGING: &str = "RTU_LOGGING";
+pub const TOPIC_MANUAL_SET_RESPONSE: &str = "MANUAL_SET_EVENT_RESPONSE";
 
 /// Salinan `DataMessage` FEP IEC 104. Urutan & nama field JANGAN diubah.
 #[derive(Serialize)]
@@ -69,6 +77,39 @@ impl KafkaProducer {
             Ok(json) => self.send_with_key(topic, key, &json),
             Err(e) => warn!("[KAFKA] Gagal serialize DataMessage: {e}"),
         }
+    }
+
+    fn send_json<T: Serialize>(&self, topic: &str, key: &str, msg: &T) {
+        match serde_json::to_string(msg) {
+            Ok(json) => self.send_with_key(topic, key, &json),
+            Err(e) => warn!("[KAFKA] Gagal serialize pesan {topic}: {e}"),
+        }
+    }
+
+    /// RTU_STATUS: 1 = terkoneksi, 0 = putus. Key = id_rtu (sama dengan IEC 104).
+    pub fn send_status(&self, ip: &str, id_rtu: i32, status: i32) {
+        self.send_json(TOPIC_RTU_STATUS, &id_rtu.to_string(), &RtuStatusMessage::new(ip, id_rtu, status, None));
+    }
+
+    /// RTU_STATUS dengan channel (hasil ping jaringan).
+    pub fn send_status_with_channel(&self, ip: &str, id_rtu: i32, channel: i32, status: i32) {
+        let msg = RtuStatusMessage::new(ip, id_rtu, status, Some(channel));
+        self.send_json(TOPIC_RTU_STATUS, &id_rtu.to_string(), &msg);
+    }
+
+    /// Status sistem FEP: 1 = start, 0 = stop (`ip_address: "system"`, `id_rtu: 0`).
+    pub fn send_system_status(&self, status: i32) {
+        self.send_status("system", 0, status);
+    }
+
+    /// RTU_LOGGING, format `[LEVEL] pesan` (sama dengan `send_formatted_log` IEC 104).
+    pub fn send_log(&self, ip: &str, id_rtu: i32, level: &str, message: &str) {
+        let msg = RtuLoggingMessage::new(ip, id_rtu, &format!("[{level}] {message}"));
+        self.send_json(TOPIC_RTU_LOGGING, &id_rtu.to_string(), &msg);
+    }
+
+    pub fn send_raw(&self, topic: &str, key: &str, msg: &impl Serialize) {
+        self.send_json(topic, key, msg);
     }
 
     pub fn flush(&self, timeout: Duration) {

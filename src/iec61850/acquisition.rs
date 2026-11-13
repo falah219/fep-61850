@@ -5,7 +5,9 @@
 
 use std::ffi::{c_void, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -142,13 +144,22 @@ pub struct RtuCtx {
     pub rcbs: Vec<(String, RcbSettings)>,
     pub points: Vec<Point>,
     pub publisher: Arc<Publisher>,
+    pub gate: Arc<ConnectGate>,
+    /// true selama sesi MMS aktif (dipakai heartbeat RTU_STATUS)
+    pub connected: AtomicBool,
     state: Mutex<Vec<PointState>>,
 }
 
 impl RtuCtx {
-    pub fn new(rtu: RtuConfig, rcbs: Vec<(String, RcbSettings)>, points: Vec<Point>, publisher: Arc<Publisher>) -> Self {
+    pub fn new(
+        rtu: RtuConfig,
+        rcbs: Vec<(String, RcbSettings)>,
+        points: Vec<Point>,
+        publisher: Arc<Publisher>,
+        gate: Arc<ConnectGate>,
+    ) -> Self {
         let state = Mutex::new(vec![PointState::default(); points.len()]);
-        Self { rtu, rcbs, points, publisher, state }
+        Self { rtu, rcbs, points, publisher, gate, connected: AtomicBool::new(false), state }
     }
 
     fn publish(&self, i: usize, s: &PointState, action: &str) {
@@ -209,45 +220,124 @@ struct PollGroup {
     plan: MemberPlan,
 }
 
-/// Loop selamanya: konek, akuisisi sampai putus, tunggu, ulangi.
+/// Perintah ke thread IED (dari handler Kafka / ping).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Ctl {
+    /// Hentikan thread (STATE false, DELETE, RESET, reload konfigurasi)
+    Stop,
+    /// GI sekarang (event GI). Mode polling: siklus integrity sekarang.
+    Gi,
+    /// Potong jeda reconnect (ping: IED kembali terjangkau)
+    Wake,
+}
+
+/// Batas jumlah percobaan konek serentak (`MAX_CONCURRENT_CONNECTS`).
+pub struct ConnectGate {
+    free: Mutex<usize>,
+    cv: Condvar,
+}
+
+pub struct GatePermit<'a>(&'a ConnectGate);
+
+impl ConnectGate {
+    pub fn new(max: usize) -> Self {
+        Self { free: Mutex::new(max.max(1)), cv: Condvar::new() }
+    }
+
+    pub fn acquire(&self) -> GatePermit<'_> {
+        let mut free = self.free.lock().unwrap_or_else(|e| e.into_inner());
+        while *free == 0 {
+            free = self.cv.wait(free).unwrap_or_else(|e| e.into_inner());
+        }
+        *free -= 1;
+        GatePermit(self)
+    }
+}
+
+impl Drop for GatePermit<'_> {
+    fn drop(&mut self) {
+        let mut free = self.0.free.lock().unwrap_or_else(|e| e.into_inner());
+        *free += 1;
+        self.0.cv.notify_one();
+    }
+}
+
+enum End {
+    /// Diminta berhenti lewat Ctl::Stop
+    Stopped,
+    /// Koneksi putus setelah sempat jalan
+    Disconnected,
+}
+
+/// Loop: konek, akuisisi sampai putus, tunggu `reconnect_time_ms`, ulangi. Berhenti saat Ctl::Stop.
 /// `reconnect_retry_count` = 0 berarti tanpa batas.
-pub fn run_ied(ctx: Arc<RtuCtx>) {
-    let id = ctx.rtu.id_rtu;
+pub fn run_ied(ctx: Arc<RtuCtx>, rx: Receiver<Ctl>) {
+    let r = &ctx.rtu;
+    let producer = &ctx.publisher.producer;
     let mut failures: u32 = 0;
     loop {
-        match session(&ctx) {
-            Ok(()) => {
+        let result = session(&ctx, &rx);
+        let was_connected = ctx.connected.swap(false, Ordering::SeqCst);
+        if was_connected {
+            producer.send_status(&r.ip_address, r.id_rtu, 0);
+        }
+        match result {
+            Ok(End::Stopped) => {
+                info!(id_rtu = r.id_rtu, "thread IED dihentikan");
+                return;
+            }
+            Ok(End::Disconnected) => {
                 failures = 0;
-                warn!(id_rtu = id, "koneksi ke IED terputus");
+                warn!(id_rtu = r.id_rtu, "koneksi ke IED terputus");
+                producer.send_log(&r.ip_address, r.id_rtu, "WARN", "koneksi MMS terputus");
             }
             Err(e) => {
                 failures += 1;
-                warn!(id_rtu = id, attempt = failures, "sesi IED gagal: {e}");
-                let max = ctx.rtu.reconnect_retry_count;
+                warn!(id_rtu = r.id_rtu, attempt = failures, "sesi IED gagal: {e}");
+                // Status 0 + log hanya di kegagalan pertama supaya tidak banjir (heartbeat tetap jalan).
+                if failures == 1 {
+                    if !was_connected {
+                        producer.send_status(&r.ip_address, r.id_rtu, 0);
+                    }
+                    producer.send_log(&r.ip_address, r.id_rtu, "ERROR", &format!("gagal konek MMS: {e}"));
+                }
+                let max = r.reconnect_retry_count;
                 if max > 0 && failures >= max {
-                    warn!(id_rtu = id, "berhenti reconnect setelah {failures} percobaan");
+                    warn!(id_rtu = r.id_rtu, "berhenti reconnect setelah {failures} percobaan");
+                    producer.send_log(&r.ip_address, r.id_rtu, "ERROR", "berhenti reconnect, batas percobaan tercapai");
                     return;
                 }
             }
         }
-        std::thread::sleep(Duration::from_millis(ctx.rtu.reconnect_time_ms));
+        match rx.recv_timeout(Duration::from_millis(r.reconnect_time_ms)) {
+            Ok(Ctl::Stop) | Err(RecvTimeoutError::Disconnected) => return,
+            Ok(Ctl::Gi | Ctl::Wake) | Err(RecvTimeoutError::Timeout) => {}
+        }
     }
 }
 
-/// Satu sesi koneksi. Ok(()) = koneksi putus setelah sempat jalan.
-fn session(ctx: &Arc<RtuCtx>) -> Result<(), String> {
+/// Satu sesi koneksi.
+fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End, String> {
     let r = &ctx.rtu;
+    let producer = &ctx.publisher.producer;
     // Dideklarasikan SEBELUM `ied` -> di-drop SESUDAH koneksi ditutup, jadi callback tidak
     // pernah memegang ReportCtx yang sudah dibebaskan.
     let mut report_ctxs: Vec<Box<ReportCtx>> = Vec::new();
-    let ied = Ied::connect(&ConnectParams {
-        host: &r.ip_address,
-        port: r.port,
-        local_ip: Some(r.local_ip_address.as_str()),
-        connect_timeout_ms: r.connect_timeout_ms,
-        request_timeout_ms: r.request_timeout_ms,
-    })?;
-    info!(id_rtu = r.id_rtu, "terkoneksi ke {}:{} mode={}", r.ip_address, r.port, r.acquisition_mode);
+    let ied = {
+        let _permit = ctx.gate.acquire();
+        Ied::connect(&ConnectParams {
+            host: &r.ip_address,
+            port: r.port,
+            local_ip: Some(r.local_ip_address.as_str()),
+            connect_timeout_ms: r.connect_timeout_ms,
+            request_timeout_ms: r.request_timeout_ms,
+        })?
+    };
+    ctx.connected.store(true, Ordering::SeqCst);
+    producer.send_status(&r.ip_address, r.id_rtu, 1);
+    let msg = format!("terkoneksi MMS {}:{} mode {}", r.ip_address, r.port, r.acquisition_mode);
+    producer.send_log(&r.ip_address, r.id_rtu, "INFO", &msg);
+    info!(id_rtu = r.id_rtu, "{msg}");
 
     let use_report = matches!(r.acquisition_mode.as_str(), "REPORT" | "HYBRID");
     let use_poll = matches!(r.acquisition_mode.as_str(), "POLLING" | "HYBRID");
@@ -257,7 +347,10 @@ fn session(ctx: &Arc<RtuCtx>) -> Result<(), String> {
         for (rcb_ref, settings) in &ctx.rcbs {
             match setup_rcb(&ied, ctx, rcb_ref, settings, &mut report_ctxs) {
                 Ok(rcb) => rcbs.push(rcb),
-                Err(e) => warn!(id_rtu = r.id_rtu, "RCB {rcb_ref} dilewati: {e}"),
+                Err(e) => {
+                    warn!(id_rtu = r.id_rtu, "RCB {rcb_ref} dilewati: {e}");
+                    producer.send_log(&r.ip_address, r.id_rtu, "WARN", &format!("RCB {rcb_ref} gagal: {e}"));
+                }
             }
         }
     }
@@ -285,7 +378,8 @@ fn session(ctx: &Arc<RtuCtx>) -> Result<(), String> {
         }
     }
 
-    let gi_every = Duration::from_secs(r.general_interrogation_interval);
+    // 0 = hanya GI awal (tanpa GI berkala)
+    let gi_every = (r.general_interrogation_interval > 0).then(|| Duration::from_secs(r.general_interrogation_interval));
     let interval = Duration::from_millis(r.poll_interval_ms);
     let integrity = Duration::from_millis(r.integrity_period_ms);
     let mut last_gi: Option<Instant> = None;
@@ -294,7 +388,8 @@ fn session(ctx: &Arc<RtuCtx>) -> Result<(), String> {
     let mut sent: Vec<Option<PointState>> = vec![None; ctx.points.len()];
 
     loop {
-        if !rcbs.is_empty() && last_gi.is_none_or(|t| t.elapsed() >= gi_every) {
+        let gi_due = last_gi.is_none_or(|t| gi_every.is_some_and(|every| t.elapsed() >= every));
+        if !rcbs.is_empty() && gi_due {
             for rcb in &rcbs {
                 if let Err(e) = rcb.gi(&ied) {
                     warn!(id_rtu = r.id_rtu, "GI {} gagal: {e}", rcb.reference);
@@ -317,14 +412,23 @@ fn session(ctx: &Arc<RtuCtx>) -> Result<(), String> {
         }
 
         if !ied.is_connected() {
-            return Ok(());
+            return Ok(End::Disconnected);
         }
         let wait = if groups.is_empty() {
             Duration::from_millis(200)
         } else {
             next_poll.saturating_duration_since(Instant::now()).min(Duration::from_millis(200))
         };
-        std::thread::sleep(wait);
+        match rx.recv_timeout(wait) {
+            Ok(Ctl::Stop) | Err(RecvTimeoutError::Disconnected) => return Ok(End::Stopped),
+            Ok(Ctl::Gi) => {
+                info!(id_rtu = r.id_rtu, "GI diminta");
+                last_gi = None;
+                last_integrity = None;
+                next_poll = Instant::now();
+            }
+            Ok(Ctl::Wake) | Err(RecvTimeoutError::Timeout) => {}
+        }
     }
 }
 
@@ -417,6 +521,29 @@ mod tests {
         assert!(state_changed(&s(json!(1), None), &s(json!(2), None), 0.0)); // DPS off->on
         assert!(!state_changed(&s(json!(2), None), &s(json!(2), None), 0.0));
         assert!(state_changed(&s(Value::Null, None), &s(json!(1), None), 0.0));
+    }
+
+    #[test]
+    fn gate_membatasi_koneksi_serentak() {
+        let gate = Arc::new(ConnectGate::new(2));
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let (gate, active, peak) = (Arc::clone(&gate), Arc::clone(&active), Arc::clone(&peak));
+                std::thread::spawn(move || {
+                    let _p = gate.acquire();
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(20));
+                    active.fetch_sub(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
     }
 
     #[test]

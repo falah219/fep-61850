@@ -231,3 +231,42 @@ docker compose -f docker-compose.dev.yml exec dev cargo clippy --all-targets
 # butuh Postgres (migrasi + seed) & Kafka lokal; salin .env.example -> .env lalu sesuaikan
 docker compose -f docker-compose.dev.yml exec dev cargo run
 ```
+
+## Fase 8 — Connection manager, status, consumer event
+
+> Ditulis **tanpa uji ke Kafka/Postgres**. Yang bisa diuji sekarang: `cargo test`, `cargo clippy`.
+
+File baru: [src/manager.rs](src/manager.rs), [src/handlers.rs](src/handlers.rs), [src/kafka/consumer.rs](src/kafka/consumer.rs), [src/kafka/models.rs](src/kafka/models.rs).
+
+- **Satu thread per IED** dengan saluran kontrol `Stop` / `Gi` / `Wake` (`acquisition.rs`).
+  Jeda reconnect = `reconnect_time_ms`, `reconnect_retry_count` 0 = tanpa batas.
+- **`MAX_CONCURRENT_CONNECTS`**: gate yang membatasi percobaan konek serentak.
+- **`RTU_STATUS`**: 1 saat sesi MMS aktif, 0 saat putus/gagal (sekali per rangkaian gagal);
+  heartbeat tiap `STATUS_HEARTBEAT_INTERVAL_SECS`; status sistem 1 saat start, 0 saat stop;
+  status per channel dari ping ICMP (hanya IP literal, butuh root/CAP_NET_RAW).
+- **`RTU_LOGGING`**: konek, putus, gagal konek, RCB gagal (`[LEVEL] pesan`).
+- **Consumer** (`GROUP_ID` default `IEC61850_GROUP`), pesan dengan `protocol` ≠ `IEC61850` diabaikan:
+
+| Topik / event | Aksi |
+|---|---|
+| `RTU_EVENTS` `UPDATE`/`CREATE`/`ADD` | baca ulang RTU dari DB, restart thread |
+| `RTU_EVENTS` `DELETE`/`REMOVE` | hentikan thread |
+| `RTU_EVENTS` `STATE` | `false`: hentikan + status 0; `true`: baca ulang + konek |
+| `RTU_EVENTS` `RESET` | status 0, restart |
+| `RTU_EVENTS` `GI` | GI ke semua RCB; mode polling: siklus integrity sekarang |
+| `RTU_EVENTS` `CHANNEL` | dicatat (sama dengan IEC 104) |
+| `RTU_EVENTS` `COMMAND` | belum (fase 9) |
+| `MASTER_DATAPOINT_EVENT` | update TagResolver + restart IED (mapping bisa berubah) |
+| `MASTER_DATA_OBJECT_EVENT` | muat ulang group |
+| `MASTER_RTU_EVENTS` `UPDATE_ID_RTU` | hentikan id lama, jalankan id baru |
+| `RTU_COMMAND_CONFIG_REQUEST` | dicatat (sama dengan IEC 104) |
+| `CAPTURE_DATA_CHANGE` | `formulas`, `master_data_objects`, `master_general_actions` → muat ulang resolver; `iec61850s`, `iec61850_report_controls`, `master_datapoint_iec61850s` → restart IED terkait |
+| `MANUAL_SET_EVENT` | toggle manual set + `MANUAL_SET_EVENT_RESPONSE` (key `IEC61850`) |
+
+Uji (di kantor, Postgres + Kafka dev):
+1. `cargo run` → `RTU_STATUS` berisi `{"ip_address":"system","id_rtu":0,...,"status":1}` lalu status 1 untuk RTU 9001 & 9002.
+2. `docker compose -f docker-compose.dev.yml stop ied-sim-1` → status 0 RTU 9001 + log `koneksi MMS terputus` di `RTU_LOGGING`.
+3. `docker compose -f docker-compose.dev.yml start ied-sim-1` → status 1 lagi dalam ±`reconnect_time_ms`.
+4. Kirim ke `RTU_EVENTS`: `{"event":"GI","protocol":"IEC61850","ip_address":"ied-sim-1","id_rtu":9001}` → data `GENERAL_INTERROGATION`.
+5. Kirim `{"event":"STATE","protocol":"IEC61850","ip_address":"ied-sim-1","id_rtu":9001,"state_rtu":false}` → status 0, tidak reconnect.
+6. Kirim event yang sama dengan `"protocol":"IEC104"` → harus diabaikan.

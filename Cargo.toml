@@ -19,6 +19,9 @@ chrono = "0.4"
 dashmap = "6.0"
 tokio = { version = "1.42", features = ["full"] }
 tokio-postgres = "0.7"
+deadpool-postgres = "0.14"
+surge-ping = "0.8"
+futures = "0.3.31"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 dotenv = "0.15"

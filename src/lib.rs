@@ -1,7 +1,9 @@
 pub mod config;
 pub mod ffi;
+pub mod handlers;
 pub mod iec61850;
 pub mod kafka;
+pub mod manager;
 pub mod publisher;
 pub mod repository;
 pub mod resolver;

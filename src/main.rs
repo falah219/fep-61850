@@ -1,18 +1,15 @@
-//! FEP IEC 61850 (fase 7): muat konfigurasi dari Postgres, akuisisi tiap IED, publish ke
-//! Kafka RTU_DATAS + DATAPOINTS dengan format yang sama seperti FEP IEC 104.
-//!
-//! Belum ada (fase 8): consumer RTU_EVENTS dkk., RTU_STATUS/RTU_LOGGING, ping, health check,
-//! batas koneksi serentak.
+//! FEP IEC 61850: muat konfigurasi dari Postgres, satu thread per IED (report / polling),
+//! publish ke Kafka dengan format yang sama seperti FEP IEC 104, dan dengarkan event Kafka.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio_postgres::NoTls;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
-use fep_iec61850::config::{DatabaseConfig, KafkaConfig};
-use fep_iec61850::iec61850::acquisition::{run_ied, RtuCtx};
-use fep_iec61850::kafka::KafkaProducer;
+use fep_iec61850::config::{DatabaseConfig, KafkaConfig, RuntimeConfig};
+use fep_iec61850::handlers;
+use fep_iec61850::kafka::{consumer, KafkaProducer};
+use fep_iec61850::manager::Manager;
 use fep_iec61850::publisher::Publisher;
 use fep_iec61850::repository as repo;
 use fep_iec61850::resolver::{FormulaResolver, GeneralActionResolver, GroupResolver, TagResolver};
@@ -34,34 +31,25 @@ async fn main() {
 }
 
 async fn run() -> Result<(), String> {
-    let db = DatabaseConfig::from_env()?;
-    let mut pg = tokio_postgres::Config::new();
-    pg.host(&db.host).port(db.port).user(&db.user).password(&db.password).dbname(&db.dbname);
-    let (client, conn) = pg.connect(NoTls).await.map_err(|e| format!("gagal konek DB {}:{}: {e}", db.host, db.port))?;
-    tokio::spawn(async move {
-        if let Err(e) = conn.await {
-            error!("koneksi DB error: {e}");
-        }
-    });
-
-    let rtus = repo::load_rtus(&client).await?;
-    let rcbs = repo::load_rcbs(&client).await?;
-    let points = repo::load_points(&client).await?;
+    info!("FEP IEC 61850 (MMS client) mulai");
+    let kafka_cfg = KafkaConfig::from_env()?;
+    let runtime = RuntimeConfig::from_env();
+    let pool = repo::create_pool(&DatabaseConfig::from_env()?)?;
 
     let tags = TagResolver::new();
-    tags.load(repo::load_tags(&client).await?);
-    tags.load_manual_set(repo::load_manual_sets(&client).await?);
     let formulas = FormulaResolver::new();
-    formulas.load(repo::load_formulas(&client).await?);
     let groups = GroupResolver::new();
-    groups.load(repo::load_groups(&client).await?);
     let general_actions = GeneralActionResolver::new();
-    general_actions.load(repo::load_general_actions(&client).await?);
+    {
+        let c = pool.get().await.map_err(|e| format!("gagal konek DB: {e}"))?;
+        tags.load(repo::load_tags(&c).await?);
+        tags.load_manual_set(repo::load_manual_sets(&c).await?);
+        formulas.load(repo::load_formulas(&c).await?);
+        groups.load(repo::load_groups(&c).await?);
+        general_actions.load(repo::load_general_actions(&c).await?);
+    }
     info!(
-        "termuat: {} IED, {} RCB, {} titik, {} tag, {} formula, {} group, {} general action",
-        rtus.len(),
-        rcbs.len(),
-        points.len(),
+        "resolver termuat: {} tag, {} formula, {} group, {} general action",
         tags.get_count(),
         formulas.get_count(),
         groups.get_count(),
@@ -69,34 +57,51 @@ async fn run() -> Result<(), String> {
     );
 
     let publisher = Arc::new(Publisher {
-        producer: KafkaProducer::new(&KafkaConfig::from_env()?)?,
+        producer: KafkaProducer::new(&kafka_cfg)?,
         tags,
         formulas,
         groups,
         general_actions,
     });
 
-    for rtu in rtus {
-        let id = rtu.id_rtu;
-        let rtu_points: Vec<_> = points.rtu_points(id).cloned().collect();
-        if rtu_points.is_empty() {
-            warn!(id_rtu = id, "tidak ada titik termapping, IED tetap dikoneksikan");
-        }
-        let rtu_rcbs = rcbs
-            .iter()
-            .filter(|(r, _, _)| *r == id)
-            .map(|(_, rcb, s)| (rcb.clone(), s.clone()))
-            .collect();
-        let ctx = Arc::new(RtuCtx::new(rtu, rtu_rcbs, rtu_points, Arc::clone(&publisher)));
-        // Satu thread OS per IED: API libIEC61850 blocking, tidak boleh jalan di task async.
-        std::thread::Builder::new()
-            .name(format!("ied-{id}"))
-            .spawn(move || run_ied(ctx))
-            .map_err(|e| format!("gagal membuat thread IED {id}: {e}"))?;
-    }
+    let mut events = consumer::start(&kafka_cfg, &runtime.subscribe_topics)?;
+    let mgr = Arc::new(Manager::new(pool, Arc::clone(&publisher), runtime));
+    let started = mgr.start_all().await?;
+    info!("{started} IED dijalankan");
 
-    tokio::signal::ctrl_c().await.map_err(|e| e.to_string())?;
-    info!("berhenti, flush Kafka...");
+    tokio::spawn(Arc::clone(&mgr).heartbeat_loop());
+    tokio::spawn(Arc::clone(&mgr).ping_loop());
+    let event_mgr = Arc::clone(&mgr);
+    let event_task = tokio::spawn(async move {
+        while let Some(ev) = events.recv().await {
+            handlers::handle(&event_mgr, ev).await;
+        }
+    });
+
+    publisher.producer.send_system_status(1);
+    info!("FEP berjalan, menunggu sinyal berhenti");
+    shutdown_signal().await;
+
+    info!("berhenti...");
+    event_task.abort();
+    mgr.stop_all();
+    publisher.producer.send_system_status(0);
     publisher.producer.flush(Duration::from_secs(5));
     Ok(())
+}
+
+/// Ctrl+C atau SIGTERM (Kubernetes).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
