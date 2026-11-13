@@ -153,10 +153,14 @@ Catatan: AnIn1..4 berubah tiap 100 ms, jadi dengan `dchg` aktif report measureme
 > Jangan jalankan ke DB produksi/kantor.
 
 - [migrations/0001_iec61850.up.sql](migrations/0001_iec61850.up.sql) / [down](migrations/0001_iec61850.down.sql):
-  - `iec61850s` (koneksi IED), `iec61850_report_controls` (RCB), `master_datapoint_iec61850s` (ekstensi 1:1).
+  - `iec61850s`: kolom form **"Add Client" IEC 61850 di GRITA** + konvensi `iec104s` (PK `id` uuid,
+    `status_rtu` 'green'/'red', `longitude_x`/`latitude_y`, FK `master_stations`/`data_gi`).
+  - `iec61850_report_controls` (RCB), `master_datapoint_iec61850s` (ekstensi 1:1).
   - Unik `(id_rtu, object_reference, FC)` lewat trigger (id_rtu ada di `master_datapoints`).
   - Index unik parsial `master_datapoints (id_rtu, ioa) WHERE protocol='IEC61850' AND is_deleted=false`.
   - Daftar hal yang perlu dikonfirmasi ada di header file.
+- [migrations/0002_iec61850_telco_status.sql](migrations/0002_iec61850_telco_status.sql): trigger ke `telco_statuses`
+  (perlu `'iec61850s'` ditambahkan ke `sync_telco_status()` di repo backend).
 - [migrations/seed_simulator.sql](migrations/seed_simulator.sql): data contoh untuk `ied-sim-1` (RTU 9001, REPORT)
   dan `ied-sim-2` (RTU 9002, POLLING). Rentang IOA: 1001.. status, 2001.. measurement, 3001.. kontrol.
 - [iec61850-hello/src/mapping.rs](iec61850-hello/src/mapping.rs): `PointMap`

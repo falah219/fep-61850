@@ -3,37 +3,95 @@
 -- HARUS DI-REVIEW TIM sebelum dipakai di lingkungan bersama.
 -- Belum diuji ke Postgres mana pun.
 --
--- Hal yang perlu dikonfirmasi saat review:
---   1. iec61850s.id_rtu dijadikan PRIMARY KEY. Apakah id_rtu di iec104s juga unik / PK,
---      atau mengacu ke tabel master RTU lain?
---   2. Tipe state_rtu (boolean), status_rtu & channel_state (text) disamakan dengan
---      cara FEP IEC 104 membacanya; cek tipe asli di iec104s.
---   3. Index unik parsial baru di master_datapoints (tabel bersama).
---   4. Tabel baru perlu ikut dipantau CDC (CAPTURE_DATA_CHANGE).
+-- Konvensi diambil dari model Sequelize iec104s (iconics-configuration-master):
+--   PK `id` uuid, `id_rtu` integer, `protocol`, `longitude_x`/`latitude_y` varchar,
+--   `status_rtu` varchar ('green'/'red'), `channel_state` boolean, `id_station` -> master_stations,
+--   `id_loc_rtu` -> data_gi, `rtu_online_at`/`rtu_offline_at` varchar, timestamp underscored.
+--
+-- Keputusan (dikonfirmasi):
+--   - Belum ada tabel backend untuk form "Add Client" IEC 61850 -> tabel baru iec61850s.
+--   - reconnect_retry_count = 0 berarti reconnect tanpa batas.
+--   - Kolom di luar form GRITA (acquisition_mode, poll_interval_ms,
+--     general_interrogation_interval, request_timeout_ms) tetap jadi kolom DB dengan default.
+--
+-- Masih terbuka:
+--   1. Cara simpan password ACSE belum ditentukan -> hanya kolom password_ref (referensi, BUKAN password).
+--   2. Lokasi file SCL (DB / object storage / volume) -> hanya simpan nama file.
+--   3. AE/AP Invoke ID: libIEC61850 v1.6.2.1 TIDAK punya setter -> disimpan, tidak dikirim ke IED.
+--   4. id_rtu dibuat UNIQUE (target FK iec61850_report_controls). RTU yang di-soft-delete tetap
+--      memakai id_rtu-nya.
+--   5. Index unik parsial baru di master_datapoints (tabel bersama).
+--   6. Tabel baru perlu ikut dipantau CDC (CAPTURE_DATA_CHANGE) dan telco_statuses
+--      (lihat 0002_iec61850_telco_status.sql).
 -- =====================================================================
 
 BEGIN;
 
--- 3.1 Koneksi IED (padanan iec104s)
+-- 3.1 Koneksi IED (form "Add Client" IEC 61850 di GRITA, padanan iec104s)
 CREATE TABLE iec61850s (
-    id_rtu                          INTEGER PRIMARY KEY,
-    ip_address                      VARCHAR(64)  NOT NULL,
-    port                            INTEGER      NOT NULL DEFAULT 102 CHECK (port BETWEEN 1 AND 65535),
-    state_rtu                       BOOLEAN,
-    status_rtu                      VARCHAR(32),
-    channel_number                  INTEGER,
-    channel_state                   VARCHAR(32),
+    id                              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    id_rtu                          INTEGER      NOT NULL UNIQUE,                       -- RTU ID
+    protocol                        VARCHAR(255) NOT NULL DEFAULT 'IEC61850',
+    id_station                      UUID         REFERENCES master_stations (id),       -- Station Name
+    id_loc_rtu                      UUID         REFERENCES data_gi (id),
+    loc_name_rtu                    VARCHAR(255),
+    longitude_x                     VARCHAR(255),                                       -- RTU Location
+    latitude_y                      VARCHAR(255),                                       -- RTU Location
+    state_rtu                       BOOLEAN      NOT NULL DEFAULT TRUE,                 -- RTU State
+    ip_address                      VARCHAR(255) NOT NULL,                              -- Server IP Address
+    port                            INTEGER      NOT NULL DEFAULT 102                   -- Server Port Number
+                                    CHECK (port BETWEEN 1 AND 65535),
+    local_ip_address                VARCHAR(255) NOT NULL DEFAULT '0.0.0.0',            -- Client IP Address
+
+    -- Parameter ACSE / OSI
+    ae_invoke_id                    INTEGER      NOT NULL DEFAULT 10,                   -- AE Invoke ID
+    ae_qualifier                    INTEGER      NOT NULL DEFAULT 12,                   -- AE Qualifier
+    ap_invoke_id                    INTEGER      NOT NULL DEFAULT 10,                   -- AP Invoke ID
+    ap_title                        VARCHAR(64)  NOT NULL DEFAULT '1.1.999.1'           -- Application ID
+                                    CHECK (ap_title ~ '^[0-9]+(\.[0-9]+)+$'),
+    p_selector                      VARCHAR(32)  NOT NULL DEFAULT '00 00 00 01'         -- Presentation Selector
+                                    CHECK (p_selector ~* '^[0-9a-f]{2}( [0-9a-f]{2}){0,15}$'),
+    s_selector                      VARCHAR(32)  NOT NULL DEFAULT '00 01'               -- Session Selector
+                                    CHECK (s_selector ~* '^[0-9a-f]{2}( [0-9a-f]{2}){0,15}$'),
+    t_selector                      VARCHAR(32)  NOT NULL DEFAULT '00 01'               -- Transport Selector
+                                    CHECK (t_selector ~* '^[0-9a-f]{2}( [0-9a-f]{2}){0,3}$'),
+
+    goose_interface                 VARCHAR(64),                                        -- GOOSE Adapter (fitur lanjutan)
+    scl_file_name                   VARCHAR(255),                                       -- SCL File
+    use_scl_file                    BOOLEAN      NOT NULL DEFAULT FALSE,                -- Use SCL File
+    ied_name                        VARCHAR(64),                                        -- IED Name (dalam SCL)
+
+    reconnect_time_ms               INTEGER      NOT NULL DEFAULT 5000                  -- Reconnect Time (ms)
+                                    CHECK (reconnect_time_ms > 0),
+    reconnect_retry_count           INTEGER      NOT NULL DEFAULT 0                     -- Reconnect Re-try Count
+                                    CHECK (reconnect_retry_count >= 0),                 -- 0 = tanpa batas
+    connect_timeout_ms              INTEGER      NOT NULL DEFAULT 10000                 -- Connect Timeout (ms)
+                                    CHECK (connect_timeout_ms > 0),
+
+    use_password                    BOOLEAN      NOT NULL DEFAULT FALSE,                -- Security -> Password
+    password_ref                    VARCHAR(255),                                       -- referensi secret, BUKAN password
+    use_certificate                 BOOLEAN      NOT NULL DEFAULT FALSE,                -- Security -> Certificate (fitur lanjutan)
+
+    -- Tidak ada di form GRITA (kolom DB + default)
     acquisition_mode                VARCHAR(16)  NOT NULL DEFAULT 'REPORT'
                                     CHECK (acquisition_mode IN ('REPORT', 'POLLING', 'HYBRID')),
-    poll_interval_ms                INTEGER      DEFAULT 2000  CHECK (poll_interval_ms > 0),
-    general_interrogation_interval  INTEGER      DEFAULT 300   CHECK (general_interrogation_interval > 0),
-    connect_timeout_ms              INTEGER      DEFAULT 10000 CHECK (connect_timeout_ms > 0),
-    request_timeout_ms              INTEGER      DEFAULT 5000  CHECK (request_timeout_ms > 0),
-    -- nama secret Kubernetes, BUKAN password asli
-    auth_password_ref               VARCHAR(128),
+    poll_interval_ms                INTEGER      NOT NULL DEFAULT 2000  CHECK (poll_interval_ms > 0),
+    general_interrogation_interval  INTEGER      NOT NULL DEFAULT 300   CHECK (general_interrogation_interval > 0),
+    request_timeout_ms              INTEGER      NOT NULL DEFAULT 5000  CHECK (request_timeout_ms > 0),
+
+    -- Sama seperti iec104s, supaya handler RTU_EVENTS & telco_statuses bisa dipakai ulang
+    status_rtu                      VARCHAR(255) NOT NULL DEFAULT 'red',
+    channel_number                  INTEGER      NOT NULL DEFAULT 1,
+    channel_state                   BOOLEAN      NOT NULL DEFAULT TRUE,
+    rtu_online_at                   VARCHAR(255),
+    rtu_offline_at                  VARCHAR(255),
+
     is_deleted                      BOOLEAN      NOT NULL DEFAULT FALSE,
     created_at                      TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    updated_at                      TIMESTAMPTZ  NOT NULL DEFAULT now()
+    updated_at                      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+
+    CHECK (NOT use_password OR password_ref IS NOT NULL),
+    CHECK (NOT use_scl_file OR scl_file_name IS NOT NULL)
 );
 
 -- 3.2 Report Control Block (hanya mode REPORT / HYBRID).

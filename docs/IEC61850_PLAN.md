@@ -110,21 +110,51 @@ Prinsip: **hanya pengaturan akuisisi/protokol IEC 61850.** Hal berikut sudah diu
 `master_datapoints` dipakai bersama oleh semua protokol, jadi kolom khusus IEC 61850 **tidak** ditambahkan ke sana. Kolom itu ditaruh di tabel ekstensi 1:1 (bagian 3.3). Titik IEC 61850 tetap punya baris di `master_datapoints` dengan `protocol = 'IEC61850'`, `id_rtu`, `ioa` (IOA virtual), dan `tag`, sehingga tag resolver, formula, alarm, dan tabular tetap jalan tanpa perubahan.
 
 ### 3.1 Tabel `iec61850s` (koneksi IED, padanan `iec104s`)
-| Kolom | Wajib | Default | Keterangan |
-|---|---|---|---|
-| `id_rtu` | ya | | Sama konsepnya dengan `iec104s.id_rtu` |
-| `ip_address` | ya | | |
-| `port` | ya | 102 | Port MMS |
-| `state_rtu`, `status_rtu`, `channel_number`, `channel_state` | | | Sama seperti `iec104s`, supaya handler `RTU_EVENTS` (STATE, CHANNEL, UPDATE, dll.) bisa dipakai ulang |
-| `acquisition_mode` | ya | `REPORT` | `REPORT` / `POLLING` / `HYBRID` |
-| `poll_interval_ms` | | 2000 | Dipakai jika mode `POLLING`/`HYBRID` |
-| `general_interrogation_interval` | | 300 | Detik; GI berkala ke semua RCB |
-| `connect_timeout_ms` | | 10000 | |
-| `request_timeout_ms` | | 5000 | |
-| `auth_password_ref` | | null | Nama secret Kubernetes kalau IED pakai password ACSE; **bukan** password asli |
-| `is_deleted`, `created_at`, `updated_at` | | | |
 
-Catatan: `iec104s` punya kolom dengan ejaan `general_interragation_interval` dan `orginator_address`. Untuk tabel baru pakai ejaan yang benar, kecuali tim minta disamakan.
+Kolom mengikuti form **"Add Client" IEC 61850 di UI GRITA** (Configure → Front End Processor → IEC61850). Nama label UI ditulis di kolom kedua.
+
+| Kolom | Label di UI GRITA | Default | Keterangan |
+|---|---|---|---|
+| `id_rtu` | RTU ID | | Sama konsepnya dengan `iec104s.id_rtu` |
+| `id_station` | Station Name | | FK ke `master_stations` |
+| `state_rtu` | RTU State (Enable/Disable) | true | Sama seperti `iec104s` |
+| `ip_address` | Server IP Address | | IP IED |
+| `port` | Server Port Number | 102 | Port MMS |
+| `local_ip_address` | Client IP Address | `0.0.0.0` | IP/interface lokal FEP untuk konek. `0.0.0.0` = otomatis |
+| `latitude`, `longitude` | RTU Location | null | Cek dulu apakah sudah ada di tabel RTU lain; jangan diduplikasi |
+| `ae_invoke_id` | AE Invoke ID | 10 | Parameter ACSE/OSI. Cek apakah libIEC61850 menyediakan setter-nya; kalau tidak, simpan saja dan catat ke saya |
+| `ae_qualifier` | AE Qualifier | 12 | `IsoConnectionParameters` (AP-title + AE-qualifier) |
+| `ap_invoke_id` | AP Invoke ID | 10 | Sama seperti `ae_invoke_id` |
+| `ap_title` | Application ID | `1.1.999.1` | AP-title (format OID) |
+| `p_selector` | Presentation Selector | `00 00 00 01` | Hex, disimpan sebagai string |
+| `s_selector` | Session Selector | `00 01` | Hex |
+| `t_selector` | Transport Selector | `00 01` | Hex |
+| `goose_interface` | GOOSE Adapter | null | Nama network interface (misal `eth1`). Untuk subscribe GOOSE, **fitur lanjutan**, bukan fase awal |
+| `scl_file_name` | SCL File | null | File ICD/CID/SCD IED. Lokasi penyimpanan file (DB/object storage/volume) ditanyakan ke saya |
+| `use_scl_file` | Use SCL File | false | true = model dan mapping diambil dari SCL; false = FEP browse model langsung ke IED |
+| `ied_name` | IED Name | null | Nama IED di dalam file SCL (wajib jika `use_scl_file` = true dan file berisi banyak IED, mis. SCD) |
+| `reconnect_time_ms` | Reconnect Time (ms) | 5000 | Jeda antar percobaan reconnect. Override nilai env global |
+| `reconnect_retry_count` | Reconnect Re-try Count | 0 | **Tanyakan arti 0 ke saya** (kemungkinan 0 = tanpa batas) |
+| `connect_timeout_ms` | Connect Timeout (ms) | 10000 | |
+| `use_password` | Security → Password | false | Autentikasi ACSE password |
+| `password_ref` | (isi password) | null | **Jangan simpan password asli dalam teks biasa.** Tanyakan ke saya cara tim menyimpan secret (enkripsi kolom / Kubernetes secret) |
+| `use_certificate` | Security → Certificate | false | TLS (IEC 62351-4). Detail dari "Security Setup": **fitur lanjutan** |
+| `status_rtu`, `channel_number`, `channel_state` | (tidak di form) | | Sama seperti `iec104s`, supaya handler `RTU_EVENTS` bisa dipakai ulang |
+| `is_deleted`, `created_at`, `updated_at` | | | Audit |
+
+Kolom tambahan dari rencana ini yang **tidak ada di form** GRITA. Tanyakan ke saya apakah perlu ditambahkan ke UI, atau cukup default/env:
+
+| Kolom | Default | Keterangan |
+|---|---|---|
+| `acquisition_mode` | `REPORT` | `REPORT` / `POLLING` / `HYBRID` |
+| `poll_interval_ms` | 2000 | Untuk mode polling |
+| `general_interrogation_interval` | 300 | Detik |
+| `request_timeout_ms` | 5000 | Timeout tiap request MMS |
+
+Catatan:
+- `iec104s` punya kolom dengan ejaan `general_interragation_interval` dan `orginator_address`. Untuk tabel baru pakai ejaan yang benar, kecuali tim minta disamakan.
+- UI GRITA juga punya menu **"Add Server" (Server/Slave)**, yaitu FEP bertindak sebagai IED/server IEC 61850 ke sistem lain. Itu **di luar lingkup** rencana ini dan dicatat sebagai pengembangan berikutnya.
+- Sebelum membuat migrasi, tanyakan ke saya apakah tim backend sudah punya tabel untuk form ini (mungkin UI-nya sudah tersambung ke tabel tertentu). Kalau sudah ada, **ikuti tabel itu**, jangan buat baru.
 
 ### 3.2 Tabel `iec61850_report_controls` (hanya untuk mode `REPORT`/`HYBRID`)
 | Kolom | Wajib | Keterangan |

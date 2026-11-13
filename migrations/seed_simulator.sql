@@ -5,9 +5,9 @@
 --   2001..  measurement (FC MX)
 --   3001..  kontrol     (FC CO)
 --
--- CATATAN: insert ke master_datapoints hanya mengisi kolom yang dipakai FEP
--- (id, id_rtu, ioa, tag, protocol, is_deleted). Kalau tabel aslinya punya kolom NOT NULL lain
--- (id_station, dll.), tambahkan di sini.
+-- CATATAN: insert ke master_datapoints hanya mengisi kolom yang dipakai FEP. Kolom hierarki
+-- (id_station, id_level_voltage, ...) dibiarkan NULL. created_at/updated_at diisi manual karena
+-- tabel buatan Sequelize tidak punya default untuk kolom itu.
 
 BEGIN;
 
@@ -47,8 +47,8 @@ CROSS JOIN (VALUES
 ) AS p (ioa, suffix, object_reference, fc, cdc, deadband);
 
 -- Dua statement terpisah (bukan CTE) supaya trigger unik bisa melihat baris master_datapoints.
-INSERT INTO master_datapoints (id, id_rtu, ioa, tag, protocol, is_deleted)
-SELECT gen_random_uuid(), id_rtu, ioa, tag, 'IEC61850', FALSE FROM seed_points;
+INSERT INTO master_datapoints (id, id_rtu, ioa, tag, protocol, is_deleted, created_at, updated_at)
+SELECT gen_random_uuid(), id_rtu, ioa, tag, 'IEC61850', FALSE, now(), now() FROM seed_points;
 
 INSERT INTO master_datapoint_iec61850s (id_master_datapoint, object_reference, functional_constraint, cdc, deadband)
 SELECT md.id, s.object_reference, s.fc, s.cdc, s.deadband
