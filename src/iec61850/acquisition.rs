@@ -16,7 +16,7 @@ use serde_json::Value;
 use tracing::{error, info, warn};
 
 use super::client::{
-    control_model_from_str, fc_from_str, octet_bytes, osi_params, ConnectParams, Control, Ied, Liveness, OsiParams,
+    control_model_from_str, fc_from_str, is_connection_error, octet_bytes, osi_params, ConnectParams, Control, Ied, Liveness, OsiParams,
     OwnedValue, Rcb, RcbSettings, Spec,
 };
 use crate::command::{ctl_value, CommandAction, CommandJob, CommandReq, CtlVal};
@@ -518,12 +518,13 @@ fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End, String> {
             next_rcb_retry = Instant::now() + rcb_retry;
         }
 
+        let mut poll_timed_out = false;
         if !groups.is_empty() && Instant::now() >= next_poll {
             let is_integrity = last_integrity.is_none_or(|t| t.elapsed() >= integrity);
             if is_integrity {
                 last_integrity = Some(Instant::now());
             }
-            poll_cycle(&ied, ctx, &groups, &mut sent, is_integrity);
+            poll_timed_out = poll_cycle(&ied, ctx, &groups, &mut sent, is_integrity);
             let (next, skipped) = next_deadline(next_poll, Instant::now(), interval);
             if skipped > 0 {
                 warn!(id_rtu = r.id_rtu, "polling terlambat, {skipped} siklus dilewati");
@@ -531,14 +532,20 @@ fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End, String> {
             next_poll = next;
         }
 
-        if !ied.lost() && ied.idle() >= liveness {
-            if let Some(probe) = &probe_ref {
-                if let Err(e) = ied.probe(probe) {
-                    let msg = format!("tidak ada respons IED {}s, cek {probe:?} gagal: {e}; reconnect", liveness.as_secs());
-                    warn!(id_rtu = r.id_rtu, "{msg}");
-                    producer.send_log(&r.ip_address, r.id_rtu, "WARN", &msg);
-                    return Ok(End::Disconnected);
-                }
+        // Polling timeout: cek liveness SEKARANG, tidak menunggu LIVENESS_SECS. Total waktu deteksi
+        // IED hang = 1 read timeout + 1 probe timeout = 2 x request_timeout_ms.
+        if !ied.lost() && (poll_timed_out || ied.idle() >= liveness) {
+            let reason = if poll_timed_out { "polling timeout".to_string() } else { format!("tidak ada respons IED {}s", liveness.as_secs()) };
+            let result = match &probe_ref {
+                Some(probe) => ied.probe(probe).map_err(|e| format!("cek {probe:?} gagal: {e}")),
+                None if poll_timed_out => Err("tidak ada target cek liveness".to_string()),
+                None => Ok(()),
+            };
+            if let Err(e) = result {
+                let msg = format!("{reason}, {e}; reconnect");
+                warn!(id_rtu = r.id_rtu, "{msg}");
+                producer.send_log(&r.ip_address, r.id_rtu, "WARN", &msg);
+                return Ok(End::Disconnected);
             }
         }
 
@@ -696,26 +703,55 @@ fn setup_rcb(ied: &Ied, ctx: &Arc<RtuCtx>, rcb_ref: &str, settings: &RcbSettings
     Ok(rcb)
 }
 
-fn poll_cycle(ied: &Ied, ctx: &RtuCtx, groups: &[PollGroup], sent: &mut [Option<PointState>], is_integrity: bool) {
-    // Satu siklus berurutan: satu request MMS per (LN, FC). Dibaca dulu TANPA lock supaya
-    // callback report (mode HYBRID) tidak tertahan selama request berjalan.
-    let values: Vec<_> = groups
-        .iter()
-        .take_while(|_| !ied.lost())
-        .filter_map(|g| match ied.read_object(&g.reference, g.fc) {
-            Ok(v) => Some((g, v)),
-            Err(e) => {
-                warn!(id_rtu = ctx.rtu.id_rtu, "polling {:?} gagal: {e}", g.reference);
-                None
-            }
-        })
-        .collect();
+/// Baca `n` grup polling berurutan. Berhenti di TIMEOUT / error koneksi pertama: IED yang hang
+/// membuat setiap grup berikutnya menunggu request_timeout_ms juga (20 grup = 20x).
+/// Error lain (mis. objek tidak ada) hanya melewati grup itu.
+/// Kembalikan hasil yang berhasil + (indeks, error) tempat berhenti.
+pub fn read_until_stuck<T>(
+    n: usize,
+    mut read: impl FnMut(usize) -> Result<T, ffi::IedClientError>,
+) -> (Vec<(usize, T)>, Option<(usize, ffi::IedClientError)>) {
+    let mut ok = Vec::new();
+    for i in 0..n {
+        match read(i) {
+            Ok(v) => ok.push((i, v)),
+            Err(e) if e == ffi::IED_ERROR_TIMEOUT || is_connection_error(e) => return (ok, Some((i, e))),
+            Err(_) => {}
+        }
+    }
+    (ok, None)
+}
 
-    let Ok(mut state) = ctx.state.lock() else { return };
+/// Satu siklus polling. true = ada request TIMEOUT: session() harus langsung cek liveness.
+fn poll_cycle(ied: &Ied, ctx: &RtuCtx, groups: &[PollGroup], sent: &mut [Option<PointState>], is_integrity: bool) -> bool {
+    let id_rtu = ctx.rtu.id_rtu;
+    // Satu request MMS per (LN, FC). Dibaca dulu TANPA lock supaya callback report (mode HYBRID)
+    // tidak tertahan selama request berjalan.
+    let (values, stuck) = read_until_stuck(groups.len(), |i| {
+        if ied.lost() {
+            return Err(ffi::IED_ERROR_CONNECTION_LOST);
+        }
+        let g = &groups[i];
+        ied.read_object(&g.reference, g.fc).map_err(|e| {
+            let code = ied.last_error();
+            if code != ffi::IED_ERROR_TIMEOUT {
+                warn!(id_rtu, "polling {:?} gagal: {e}", g.reference);
+            }
+            code
+        })
+    });
+    let timed_out = matches!(stuck, Some((_, e)) if e == ffi::IED_ERROR_TIMEOUT);
+    if let Some((i, _)) = stuck.filter(|_| timed_out) {
+        // WARN sekali per siklus, bukan per grup
+        let skipped = groups.len() - i - 1;
+        warn!(id_rtu, "polling {:?} timeout, {skipped} grup sisa dilewati; cek liveness sekarang", groups[i].reference);
+    }
+
+    let Ok(mut state) = ctx.state.lock() else { return timed_out };
     let mut touched = Vec::new();
-    for (g, v) in &values {
+    for (i, v) in &values {
         // SAFETY: nilai hasil readObject sesuai spec LN+FC yang sama
-        unsafe { decode(&g.plan, v.as_ptr(), &ctx.points, &mut state, &mut touched) };
+        unsafe { decode(&groups[*i].plan, v.as_ptr(), &ctx.points, &mut state, &mut touched) };
     }
     for i in touched {
         let cur = &state[i];
@@ -729,6 +765,7 @@ fn poll_cycle(ied: &Ied, ctx: &RtuCtx, groups: &[PollGroup], sent: &mut [Option<
         ctx.publish(i, cur, action, None);
         sent[i] = Some(cur.clone());
     }
+    timed_out
 }
 
 #[cfg(test)]
@@ -803,6 +840,38 @@ mod tests {
         assert_eq!(pending, vec![2]);
         assert!(retry_pending(&mut pending, &mut setup).is_empty());
         assert_eq!(attempts, [1, 2, 3]);
+    }
+
+    #[test]
+    fn ied_hang_terdeteksi_dalam_dua_kali_request_timeout() {
+        let request_timeout = Duration::from_millis(100);
+        let mut reads = 0;
+        let t = Instant::now();
+        // 20 grup polling, IED hang: setiap read menunggu request_timeout lalu TIMEOUT.
+        let (ok, stuck) = read_until_stuck::<()>(20, |_| {
+            reads += 1;
+            std::thread::sleep(request_timeout);
+            Err(ffi::IED_ERROR_TIMEOUT)
+        });
+        assert!(ok.is_empty());
+        assert_eq!(stuck, Some((0, ffi::IED_ERROR_TIMEOUT)));
+        assert_eq!(reads, 1, "grup sisa tidak boleh dibaca");
+        // session() lalu langsung probe, yang juga hang 1 x request_timeout lalu gagal -> Disconnected
+        std::thread::sleep(request_timeout);
+        let elapsed = t.elapsed();
+        assert!(elapsed < 2 * request_timeout + Duration::from_millis(80), "{elapsed:?}; tanpa perbaikan 20 x = 2 detik");
+    }
+
+    #[test]
+    fn polling_error_lain_tidak_menghentikan_siklus() {
+        // grup 1 tidak ada di IED (IED menjawab error) -> dilewati, grup lain tetap dibaca
+        let (ok, stuck) = read_until_stuck(5, |i| if i == 1 { Err(ffi::IED_ERROR_OBJECT_DOES_NOT_EXIST) } else { Ok(i) });
+        assert_eq!(ok.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0, 2, 3, 4]);
+        assert_eq!(stuck, None);
+        // error koneksi -> berhenti juga (sesi diakhiri)
+        let (ok, stuck) = read_until_stuck(5, |i| if i == 2 { Err(ffi::IED_ERROR_CONNECTION_LOST) } else { Ok(i) });
+        assert_eq!(ok.len(), 2);
+        assert_eq!(stuck, Some((2, ffi::IED_ERROR_CONNECTION_LOST)));
     }
 
     #[test]

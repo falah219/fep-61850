@@ -265,6 +265,8 @@ File baru: [src/manager.rs](src/manager.rs), [src/handlers.rs](src/handlers.rs),
 - **Liveness**: tanpa request sukses / report masuk selama `LIVENESS_SECS` (default 30), FEP membaca
   `<LD pertama>/LLN0.Mod.stVal` [ST]. Gagal (timeout / koneksi mati) -> sesi diakhiri, reconnect.
   IED yang menjawab dengan error (mis. objek tidak ada) tetap dianggap hidup.
+- **Polling timeout**: satu `readObject` TIMEOUT -> sisa grup di siklus itu dilewati (WARN sekali) dan
+  liveness dicek saat itu juga; gagal -> reconnect. IED hang terdeteksi dalam 2 x `request_timeout_ms`.
 - **COMMAND**: dimasukkan ke antrean IED langsung saat event diterima (urutan kedatangan);
   hanya menunggu hasil + respons `RTU_COMMAND` yang jalan di task terpisah.
 

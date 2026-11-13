@@ -220,6 +220,8 @@ pub struct Ied {
     con: ffi::IedConnection,
     /// Ada request yang gagal karena koneksi mati (getState bisa tetap CONNECTED).
     lost: Cell<bool>,
+    /// Kode error request terakhir (mis. untuk membedakan TIMEOUT)
+    last_err: Cell<ffi::IedClientError>,
     alive: Arc<Liveness>,
 }
 
@@ -233,7 +235,7 @@ impl Ied {
         let c_local = p.local_ip.filter(|ip| *ip != "0.0.0.0" && !ip.is_empty()).map(cstring).transpose()?;
         let mut err = ffi::IED_ERROR_OK;
         // SAFETY: handle baru; kalau konek gagal, Drop tetap memanggil destroy.
-        let ied = Ied { con: unsafe { ffi::IedConnection_create() }, lost: Cell::new(false), alive: Arc::default() };
+        let ied = Ied { con: unsafe { ffi::IedConnection_create() }, lost: Cell::new(false), last_err: Cell::new(ffi::IED_ERROR_OK), alive: Arc::default() };
         // SAFETY: handle valid; setter hanya mengubah konfigurasi lokal
         unsafe {
             ffi::IedConnection_setConnectTimeout(ied.con, p.connect_timeout_ms);
@@ -254,6 +256,7 @@ impl Ied {
 
     /// Catat hasil satu request: sukses / dijawab IED = tanda hidup; error koneksi = sesi mati.
     fn note(&self, err: ffi::IedClientError) {
+        self.last_err.set(err);
         if err == ffi::IED_ERROR_OK || is_server_response(err) {
             self.alive.touch();
         } else if is_connection_error(err) {
@@ -269,6 +272,11 @@ impl Ied {
     /// true kalau ada request yang gagal karena koneksi mati: sesi harus diakhiri.
     pub fn lost(&self) -> bool {
         self.lost.get()
+    }
+
+    /// Kode error request MMS terakhir.
+    pub fn last_error(&self) -> ffi::IedClientError {
+        self.last_err.get()
     }
 
     pub fn mark_lost(&self) {

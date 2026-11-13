@@ -36,6 +36,9 @@ Hal yang **belum diputuskan / belum dikonfirmasi tim**. Perbarui file ini setiap
   3. Liveness `LIVENESS_SECS` (30): tanpa tanda hidup -> baca `LLN0.Mod.stVal`; gagal -> reconnect.
   4. `BRCB_RESV_TMS_SECS` default 20 (< `RCB_RETRY_SECS` 30), supaya reservasi BRCB dari sesi mati
      sudah lepas saat RCB dicoba ulang.
+  5. Polling: read yang TIMEOUT menghentikan sisa grup di siklus itu lalu langsung cek liveness.
+     IED hang terdeteksi dalam 2 x `request_timeout_ms` (bukan jumlah grup x). Uji: `kill -STOP`
+     simulator mode POLLING, ukur waktu sampai log "koneksi ke IED terputus". **Belum dijalankan.**
 - **Uji penerimaan**: 20 simulator di port berbeda, FEP di-start 10 kali; dalam 60 detik tidak boleh
   ada IED yang `RTU_STATUS=1` tanpa RCB aktif. **Belum dijalankan.** Perangkat:
   `docker-compose.sim20.yml` (20 simulator, port host 10201..10220), `migrations/seed_sim20.sql`
