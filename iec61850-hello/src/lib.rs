@@ -82,6 +82,100 @@ impl Drop for Ied {
     }
 }
 
+/// Satu nilai anggota dataset. `text` untuk tampilan & perbandingan, `num` hanya untuk float (deadband).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sample {
+    pub text: String,
+    pub num: Option<f64>,
+}
+
+/// Pembaca dataset berulang. ClientDataSet dipakai ulang tiap siklus (tidak alokasi ulang).
+pub struct DataSetReader {
+    reference: CString,
+    ds: ffi::ClientDataSet,
+}
+
+impl DataSetReader {
+    pub fn new(reference: &str) -> Result<Self, String> {
+        Ok(Self { reference: cstring(reference)?, ds: std::ptr::null_mut() })
+    }
+
+    /// Baca SEMUA anggota dataset dalam satu request MMS.
+    pub fn read(&mut self, ied: &Ied) -> Result<Vec<Sample>, String> {
+        let mut err = ffi::IED_ERROR_OK;
+        // SAFETY: koneksi valid; self.ds null (buat baru) atau milik kita dari panggilan sebelumnya.
+        let ds = unsafe {
+            ffi::IedConnection_readDataSetValues(ied.0, &mut err, self.reference.as_ptr(), self.ds)
+        };
+        if !ds.is_null() {
+            self.ds = ds;
+        }
+        check(err)?;
+        if self.ds.is_null() {
+            return Err("dataset kosong".into());
+        }
+        // SAFETY: values dimiliki ClientDataSet, hanya dibaca di sini (tidak disimpan).
+        unsafe {
+            let values = ffi::ClientDataSet_getValues(self.ds);
+            if values.is_null() {
+                return Err("dataset tidak berisi nilai".into());
+            }
+            let n = ffi::MmsValue_getArraySize(values);
+            Ok((0..n).map(|i| sample(ffi::MmsValue_getElement(values, i as i32))).collect())
+        }
+    }
+}
+
+impl Drop for DataSetReader {
+    fn drop(&mut self) {
+        if !self.ds.is_null() {
+            // SAFETY: ds milik kita, dihancurkan sekali
+            unsafe { ffi::ClientDataSet_destroy(self.ds) };
+        }
+    }
+}
+
+/// SAFETY: `v` null atau MmsValue valid selama pemanggilan.
+unsafe fn sample(v: *mut ffi::MmsValue) -> Sample {
+    if v.is_null() {
+        return Sample { text: "<null>".into(), num: None };
+    }
+    let mut buf = [0 as std::os::raw::c_char; 256];
+    // SAFETY: buffer lokal, ukurannya dikirim ke library
+    let text = unsafe {
+        ffi::MmsValue_printToBuffer(v, buf.as_mut_ptr(), buf.len() as i32);
+        CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned()
+    };
+    let num = (unsafe { ffi::MmsValue_getType(v) } == ffi::MMS_FLOAT)
+        .then(|| unsafe { ffi::MmsValue_toDouble(v) });
+    Sample { text, num }
+}
+
+/// Apakah `cur` perlu dikirim dibanding nilai terakhir yang DIKIRIM (`prev`)?
+/// Float: hanya jika selisih > deadband. Lainnya (status, quality, struktur): jika teksnya berubah.
+pub fn changed(prev: &Sample, cur: &Sample, deadband: f64) -> bool {
+    match (prev.num, cur.num) {
+        (Some(a), Some(b)) if !a.is_nan() && !b.is_nan() => (b - a).abs() > deadband,
+        _ => prev.text != cur.text,
+    }
+}
+
+/// Jadwal siklus tetap. Kembalikan deadline berikutnya + jumlah siklus yang dilewati
+/// karena siklus sebelumnya terlambat (siklus tidak ditumpuk).
+pub fn next_deadline(
+    deadline: std::time::Instant,
+    now: std::time::Instant,
+    interval: std::time::Duration,
+) -> (std::time::Instant, u32) {
+    let mut next = deadline + interval;
+    let mut skipped = 0;
+    while next <= now {
+        next += interval;
+        skipped += 1;
+    }
+    (next, skipped)
+}
+
 pub fn check(err: ffi::IedClientError) -> Result<(), String> {
     if err == ffi::IED_ERROR_OK {
         return Ok(());
@@ -115,4 +209,46 @@ fn take(list: ffi::LinkedList, err: ffi::IedClientError) -> Result<Vec<String>, 
         }
     }
     check(err).map(|_| out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn f(v: f64) -> Sample {
+        Sample { text: v.to_string(), num: Some(v) }
+    }
+    fn t(s: &str) -> Sample {
+        Sample { text: s.into(), num: None }
+    }
+
+    #[test]
+    fn deadband_float() {
+        assert!(!changed(&f(1.0), &f(1.05), 0.1));
+        assert!(changed(&f(1.0), &f(1.2), 0.1));
+        assert!(changed(&f(1.0), &f(0.8), 0.1));
+        assert!(!changed(&f(1.0), &f(1.0), 0.0));
+        assert!(changed(&f(1.0), &f(1.0001), 0.0));
+    }
+
+    #[test]
+    fn nan_tetap_terdeteksi() {
+        assert!(changed(&f(1.0), &f(f64::NAN), 10.0));
+    }
+
+    #[test]
+    fn status_dan_quality_pakai_teks() {
+        assert!(!changed(&t("true"), &t("true"), 100.0));
+        assert!(changed(&t("true"), &t("false"), 100.0));
+        assert!(changed(&t("0000000000000"), &t("0100000000000"), 100.0));
+    }
+
+    #[test]
+    fn jadwal_lewati_siklus_terlambat() {
+        let i = Duration::from_millis(100);
+        let d = Instant::now();
+        assert_eq!(next_deadline(d, d + Duration::from_millis(50), i), (d + i, 0));
+        assert_eq!(next_deadline(d, d + Duration::from_millis(250), i), (d + 3 * i, 2));
+    }
 }

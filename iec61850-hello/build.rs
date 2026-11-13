@@ -20,7 +20,7 @@ fn main() {
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         // Konstanta enum pakai nama aslinya dari C, mis. IED_ERROR_OK, IEC61850_FC_MX
         .prepend_enum_name(false)
-        .allowlist_function("IedConnection_.*|IedClientError_.*|MmsValue_.*|LinkedList_.*")
+        .allowlist_function("IedConnection_.*|IedClientError_.*|MmsValue_.*|LinkedList_.*|ClientDataSet_.*")
         .wrap_unsafe_ops(true)
         .generate()
         .expect("gagal generate binding libIEC61850");

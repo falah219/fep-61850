@@ -93,3 +93,28 @@ LD  simpleIOGenericIO
             simpleIOGenericIO/GGIO1.SPCSO1.stVal[ST]
       RCB simpleIOGenericIO/LLN0.RP.EventsRCB01
 ```
+
+## Fase 4 — Polling dataset
+
+Binary `poll` di [iec61850-hello/src/bin/poll.rs](iec61850-hello/src/bin/poll.rs),
+logika di [iec61850-hello/src/lib.rs](iec61850-hello/src/lib.rs):
+- `DataSetReader`: baca **seluruh dataset dalam satu request MMS** (`IedConnection_readDataSetValues`),
+  `ClientDataSet` dipakai ulang tiap siklus.
+- `changed()`: float → kirim jika selisih dari nilai terakhir yang dikirim > `DEADBAND`;
+  status/quality/struktur → kirim jika berubah.
+- Setiap `INTEGRITY_PERIOD_MS` semua nilai dicetak ulang dengan action `INTEGRITY`.
+- `next_deadline()`: jadwal tetap; kalau siklus terlambat, siklus yang terlewat **dilewati** + warning.
+
+Default dataset: `simpleIOGenericIO/LLN0.Measurements` (AnIn1..4) dan `simpleIOGenericIO/LLN0.Events2` (SPCSO1..4).
+
+```powershell
+# unit test (deadband, perubahan status/quality, jadwal)
+docker compose -f docker-compose.dev.yml exec -w /work/iec61850-hello dev cargo test
+docker compose -f docker-compose.dev.yml exec -w /work/iec61850-hello dev cargo clippy --all-targets
+
+# polling (Ctrl+C untuk berhenti)
+docker compose -f docker-compose.dev.yml exec -w /work/iec61850-hello dev cargo run --bin poll
+
+# uji deadband: nilai sinus hanya -1..1, jadi DEADBAND=5 → hanya muncul saat INTEGRITY
+docker compose -f docker-compose.dev.yml exec -e DEADBAND=5 -e INTEGRITY_PERIOD_MS=10000 -w /work/iec61850-hello dev cargo run --bin poll
+```
