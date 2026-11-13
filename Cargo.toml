@@ -1,0 +1,31 @@
+[package]
+name = "fep-iec61850"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "fep_iec61850"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fep-iec61850"
+path = "src/main.rs"
+
+# Versi disamakan dengan FEP IEC 104
+[dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+chrono = "0.4"
+dashmap = "6.0"
+tokio = { version = "1.42", features = ["full"] }
+tokio-postgres = "0.7"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+dotenv = "0.15"
+rdkafka = { version = "0.36", features = ["cmake-build", "ssl", "sasl", "tokio"] }
+
+[build-dependencies]
+bindgen = "0.73"
+
+[profile.release]
+lto = "thin"

@@ -181,3 +181,53 @@ docker compose -f docker-compose.dev.yml exec -e POSTGRE_HOST=host.docker.intern
   -e DB_USERNAME=postgres -e DB_PASSWORD=... -e DB_DATABASE=ICONICS_DEV `
   -w /work/iec61850-hello dev cargo run --bin mapping
 ```
+
+## Fase 7 — Crate FEP + publish ke Kafka (`RTU_DATAS`, `DATAPOINTS`)
+
+> Ditulis **tanpa uji ke Kafka/Postgres** (keduanya tidak ada di compose). Yang bisa diuji sekarang: `cargo test`, `cargo clippy`.
+
+Crate utama di root repo (`fep-iec61850`). `iec61850-hello/` tetap sebagai sandbox belajar.
+
+```
+src/
+  main.rs            muat konfigurasi DB -> 1 thread per IED -> publish
+  config.rs          env Kafka & DB (nama env sama dengan FEP IEC 104)
+  kafka/mod.rs       DataMessage (salinan persis IEC 104) + producer
+  publisher.rs       padanan message_builder.rs: RTU_DATAS selalu, DATAPOINTS jika ada tag & bukan manual set
+  repository.rs      query iec61850s, report controls, mapping, tag, formula, group, general action
+  resolver/          SALINAN dari FEP IEC 104 (tag, formula, group, general_action)
+  iec61850/
+    client.rs        koneksi (timeout, IP lokal), RCB, dataset, variable spec, readObject
+    mapping.rs       PointMap (fase 6)
+    mapper.rs        quality/flag/reason/nilai -> field Kafka
+    acquisition.rs   report + polling per IED, gabung value/q/t per titik, reconnect
+```
+
+Aturan yang dipakai (hasil konfirmasi):
+
+| Field | Isi |
+|---|---|
+| `protocol` / `ca` / `asdu` | `"IEC61850"` / `0` / `0` |
+| `address` | IOA virtual |
+| `type` | CDC (`DPS`, `MV`, ...) |
+| `value` | angka; boolean → 0/1; DPS → 0..3 apa adanya (1=OFF, 2=ON) |
+| `action` | `GENERAL_INTERROGATION` > `INTEGRITY` > `DATA_CHANGE` > `QUALITY_CHANGE` > `DATA_UPDATE`; polling: `POLLING` / `INTEGRITY` |
+| `quality` | urutan IEC 104: `INVALID` > `SUBSTITUTED` > `QUESTIONABLE` > `GOOD` |
+| `flag` | detailQual + `SUBSTITUTED`/`TEST`/`OPERATOR_BLOCKED` + `CLOCK_NOT_SYNC`, dipisah `\|`, kosong = `GOOD` |
+| `group` | `master_data_objects.initial` = CDC |
+| `general_action` | `master_general_actions` dengan `protocol='IEC61850'`, kunci = action |
+| `time` / `time_desc` | atribut `t` (sudah UTC, **tidak** dikoreksi `TIMEZONE`) / `RTU`; tanpa `t` → waktu server / `SERVER` |
+
+Akuisisi per mode (`iec61850s.acquisition_mode`):
+- `REPORT`: RCB dari `iec61850_report_controls`; GI setelah konek + tiap `general_interrogation_interval`.
+- `POLLING`: satu `readObject` per **(LN, FC)** yang punya titik termapping, tiap `poll_interval_ms`;
+  kirim jika berubah (deadband per titik), kirim ulang semua tiap `INTEGRITY_PERIOD_MS` (env).
+- `HYBRID`: report untuk RCB + polling hanya titik `MX`.
+
+```powershell
+docker compose -f docker-compose.dev.yml exec dev cargo test
+docker compose -f docker-compose.dev.yml exec dev cargo clippy --all-targets
+
+# butuh Postgres (migrasi + seed) & Kafka lokal; salin .env.example -> .env lalu sesuaikan
+docker compose -f docker-compose.dev.yml exec dev cargo run
+```
