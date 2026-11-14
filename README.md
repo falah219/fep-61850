@@ -341,8 +341,9 @@ Alur: event `COMMAND` di `RTU_EVENTS` → cari IED (`id_rtu` atau IP) → job di
 - `orCat = remote-control`, `orIdent` = field `user` di payload (default `FEP-IEC61850`).
 - `interlock_check` / `synchro_check` dari `iec61850_command_formulas` (join `id_master_datapoint`, `is_deleted = false`; tanpa baris = false).
 - IOA dari field `ioa`, atau dari akhiran tag `NAMA_123` (sama dengan IEC 104).
-- Nilai: `SPC` value≠0 → true; `INC` angka; **`DPC` 2 → CLOSE (true), 1 → OPEN (false)** — pemetaan standar DCS IEC 104,
-  **belum dikonfirmasi tim** (lihat `ctl_value` di `command.rs`). `APC`/`BSC` belum didukung.
+- Nilai (`value` boleh integer, float, atau string angka): `SPC` value≠0 → true; `INC`/`ENC` bilangan bulat; **`DPC` 2 → CLOSE (true), 1 → OPEN (false)** — pemetaan standar DCS IEC 104,
+  **belum dikonfirmasi tim** (lihat `ctl_value` di `domain/command.rs`). `BSC` Tcmd: 0 stop, 1 lower, 2 higher;
+  `APC` float (`ctlVal.f`). `command_value` di respons tetap integer kalau nilainya bulat.
 - Respons `RTU_COMMAND` sama dengan IEC 104: `{hostname, port, protocol, tag, command_type, command_value, qualifier,
   event: SELECT|OPERATE|CANCEL, status: active|inactive, msg, key, time}`, key = `key` payload.
 - Hasil command juga dicatat ke `RTU_LOGGING`.

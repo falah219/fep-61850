@@ -463,6 +463,23 @@ impl OwnedValue {
         Self(unsafe { ffi::MmsValue_newBoolean(v) })
     }
 
+    pub fn float(v: f32) -> Self {
+        // SAFETY: membuat nilai baru, jadi milik kita
+        Self(unsafe { ffi::MmsValue_newFloat(v) })
+    }
+
+    /// Tcmd BSC: BIT STRING 2 bit, urutan bit sama dengan `Dbpos_toMmsValue` libIEC61850.
+    pub fn tcmd(v: u8) -> Self {
+        // SAFETY: membuat nilai baru (milik kita); set bit hanya kalau alokasi berhasil
+        unsafe {
+            let m = ffi::MmsValue_newBitString(2);
+            if !m.is_null() {
+                ffi::MmsValue_setBitStringFromIntegerBigEndian(m, u32::from(v & 0b11));
+            }
+            Self(m)
+        }
+    }
+
     pub fn int32(v: i32) -> Self {
         // SAFETY: membuat nilai baru, jadi milik kita
         Self(unsafe { ffi::MmsValue_newIntegerFromInt32(v) })

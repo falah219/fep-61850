@@ -34,7 +34,7 @@ impl CommandAction {
 pub struct CommandReq {
     pub action: CommandAction,
     pub ioa: i32,
-    pub value: Option<i32>,
+    pub value: Option<f64>,
     pub or_ident: String,
 }
 
@@ -47,20 +47,38 @@ pub struct CommandJob {
 pub enum CtlVal {
     Bool(bool),
     Int(i32),
+    /// APC (AnalogueValue.f); libIEC61850 membungkus ke struktur sendiri
+    Float(f32),
+    /// BSC Tcmd (BIT STRING 2 bit): 0 = stop, 1 = lower, 2 = higher
+    Tcmd(u8),
+}
+
+fn whole(cdc: &str, v: f64) -> Result<i32, String> {
+    if v.fract() == 0.0 && v >= f64::from(i32::MIN) && v <= f64::from(i32::MAX) {
+        Ok(v as i32)
+    } else {
+        Err(format!("value {cdc} harus bilangan bulat, bukan {v}"))
+    }
 }
 
 /// value payload -> ctlVal sesuai CDC titik kontrol.
-pub fn ctl_value(cdc: &str, value: i32) -> Result<CtlVal, String> {
+pub fn ctl_value(cdc: &str, value: f64) -> Result<CtlVal, String> {
     match cdc {
-        "SPC" => Ok(CtlVal::Bool(value != 0)),
+        "SPC" => Ok(CtlVal::Bool(value != 0.0)),
         // ponytail: pemetaan standar DCS IEC 104 (2=ON/CLOSE, 1=OFF/OPEN). BELUM dikonfirmasi tim,
         // dokumen COMMAND_TEST_PAYLOADS IEC 104 menulis sebaliknya. Ubah di sini kalau perlu.
-        "DPC" => match value {
+        "DPC" => match whole(cdc, value)? {
             2 => Ok(CtlVal::Bool(true)),
             1 => Ok(CtlVal::Bool(false)),
             v => Err(format!("value DPC harus 1 (OPEN) atau 2 (CLOSE), bukan {v}")),
         },
-        "INC" => Ok(CtlVal::Int(value)),
+        "INC" | "ENC" => whole(cdc, value).map(CtlVal::Int),
+        "BSC" => match whole(cdc, value)? {
+            v @ 0..=2 => Ok(CtlVal::Tcmd(v as u8)),
+            v => Err(format!("value BSC harus 0 (stop), 1 (lower), atau 2 (higher), bukan {v}")),
+        },
+        "APC" if value.is_finite() => Ok(CtlVal::Float(value as f32)),
+        "APC" => Err(format!("value APC tidak valid: {value}")),
         other => Err(format!("CDC {other} belum didukung untuk command")),
     }
 }
@@ -80,12 +98,36 @@ mod tests {
 
     #[test]
     fn nilai_ctl() {
-        assert_eq!(ctl_value("SPC", 1), Ok(CtlVal::Bool(true)));
-        assert_eq!(ctl_value("SPC", 0), Ok(CtlVal::Bool(false)));
-        assert_eq!(ctl_value("DPC", 2), Ok(CtlVal::Bool(true)));
-        assert_eq!(ctl_value("DPC", 1), Ok(CtlVal::Bool(false)));
-        assert!(ctl_value("DPC", 0).is_err());
-        assert_eq!(ctl_value("INC", 5), Ok(CtlVal::Int(5)));
-        assert!(ctl_value("APC", 1).is_err());
+        assert_eq!(ctl_value("SPC", 1.0), Ok(CtlVal::Bool(true)));
+        assert_eq!(ctl_value("SPC", 0.0), Ok(CtlVal::Bool(false)));
+        assert_eq!(ctl_value("DPC", 2.0), Ok(CtlVal::Bool(true)));
+        assert_eq!(ctl_value("DPC", 1.0), Ok(CtlVal::Bool(false)));
+        assert!(ctl_value("DPC", 0.0).is_err());
+        assert!(ctl_value("DPC", 1.5).is_err());
+        assert_eq!(ctl_value("INC", 5.0), Ok(CtlVal::Int(5)));
+        assert!(ctl_value("XYZ", 1.0).is_err());
+    }
+
+    #[test]
+    fn nilai_enc() {
+        assert_eq!(ctl_value("ENC", 3.0), Ok(CtlVal::Int(3)));
+        assert_eq!(ctl_value("ENC", -1.0), Ok(CtlVal::Int(-1)));
+        assert!(ctl_value("ENC", 2.5).is_err());
+    }
+
+    #[test]
+    fn nilai_bsc() {
+        assert_eq!(ctl_value("BSC", 0.0), Ok(CtlVal::Tcmd(0))); // stop
+        assert_eq!(ctl_value("BSC", 1.0), Ok(CtlVal::Tcmd(1))); // lower
+        assert_eq!(ctl_value("BSC", 2.0), Ok(CtlVal::Tcmd(2))); // higher
+        assert!(ctl_value("BSC", 3.0).is_err()); // reserved
+        assert!(ctl_value("BSC", -1.0).is_err());
+    }
+
+    #[test]
+    fn nilai_apc() {
+        assert_eq!(ctl_value("APC", 12.5), Ok(CtlVal::Float(12.5)));
+        assert_eq!(ctl_value("APC", 7.0), Ok(CtlVal::Float(7.0)));
+        assert!(ctl_value("APC", f64::NAN).is_err());
     }
 }

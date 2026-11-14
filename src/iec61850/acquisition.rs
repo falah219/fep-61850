@@ -479,6 +479,8 @@ fn execute_command(ied: &Ied, ctx: &RtuCtx, controls: &mut HashMap<i32, Control>
         Ok(match ctl_value(&p.cdc, v)? {
             CtlVal::Bool(b) => OwnedValue::boolean(b),
             CtlVal::Int(i) => OwnedValue::int32(i),
+            CtlVal::Float(f) => OwnedValue::float(f),
+            CtlVal::Tcmd(t) => OwnedValue::tcmd(t),
         })
     };
     let result = match req.action {

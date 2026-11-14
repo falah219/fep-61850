@@ -51,6 +51,25 @@ fn as_i32(v: Option<&Value>) -> Option<i32> {
     }
 }
 
+/// value payload: angka (bulat/float), string angka, atau bool (kompatibel payload lama).
+fn as_f64(v: Option<&Value>) -> Option<f64> {
+    match v? {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.trim().parse().ok(),
+        Value::Bool(b) => Some(f64::from(u8::from(*b))),
+        _ => None,
+    }
+}
+
+/// command_value di respons: bilangan bulat tetap dikirim sebagai integer (format lama).
+fn value_json(v: Option<f64>) -> Value {
+    match v {
+        Some(f) if f.fract() == 0.0 && f.abs() < 9.0e15 => Value::from(f as i64),
+        Some(f) => Value::from(f),
+        None => Value::Null,
+    }
+}
+
 /// Utamakan objek `data`; kalau tidak ada, pakai field datar (sama dengan IEC 104).
 fn parse_command_data(m: &RtuEventMessage) -> CommandData {
     if let Some(Ok(mut cd)) = m.data.as_ref().filter(|d| d.is_object()).map(CommandData::deserialize) {
@@ -88,7 +107,7 @@ pub fn submit(mgr: &Arc<Manager>, m: RtuEventMessage) -> Option<impl Future<Outp
         warn!("[COMMAND] action tidak dikenal: {:?}", cd.action);
         return None;
     };
-    let value = as_i32(cd.value.as_ref());
+    let value = as_f64(cd.value.as_ref());
     let ioa = as_i32(cd.ioa.as_ref()).or_else(|| cd.tag.as_deref().and_then(ioa_from_tag));
     info!("[COMMAND] {} ip={} id_rtu={:?} ioa={ioa:?} value={value:?} key={:?}", action.as_str(), cd.ip_address, cd.id_rtu, cd.key);
 
@@ -107,7 +126,7 @@ pub fn submit(mgr: &Arc<Manager>, m: RtuEventMessage) -> Option<impl Future<Outp
     })
 }
 
-fn respond(mgr: &Manager, cd: &CommandData, action: CommandAction, ioa: Option<i32>, value: Option<i32>, result: &Result<(), String>) {
+fn respond(mgr: &Manager, cd: &CommandData, action: CommandAction, ioa: Option<i32>, value: Option<f64>, result: &Result<(), String>) {
     match result {
         Ok(()) => info!("[COMMAND] {} sukses ioa={ioa:?}", action.as_str()),
         Err(e) => error!("[COMMAND] {} gagal ioa={ioa:?}: {e}", action.as_str()),
@@ -125,7 +144,7 @@ fn respond(mgr: &Manager, cd: &CommandData, action: CommandAction, ioa: Option<i
         "protocol": PROTOCOL,
         "tag": cd.tag.clone().unwrap_or_default(),
         "command_type": cd.command_type.clone().unwrap_or_default(),
-        "command_value": value,
+        "command_value": value_json(value),
         "qualifier": 0,
         "event": action.as_str(),
         "status": status,
@@ -152,7 +171,7 @@ fn enqueue(
     cd: &CommandData,
     action: CommandAction,
     ioa: Option<i32>,
-    value: Option<i32>,
+    value: Option<f64>,
 ) -> Result<oneshot::Receiver<Result<(), String>>, String> {
     let id = cd.id_rtu.or_else(|| mgr.id_by_ip(&cd.ip_address)).ok_or("RTU tidak ditemukan untuk IP ini")?;
     let ioa = ioa.ok_or("ioa atau tag dengan IOA wajib diisi")?;
@@ -204,7 +223,7 @@ mod tests {
         assert_eq!(cd.action, "OPERATE_RTU");
         assert_eq!(cd.ip_address, "ied-sim-1");
         assert_eq!(as_i32(cd.ioa.as_ref()), Some(3001));
-        assert_eq!(as_i32(cd.value.as_ref()), Some(1));
+        assert_eq!(as_f64(cd.value.as_ref()), Some(1.0));
         assert_eq!(cd.user.as_deref(), Some("op1"));
 
         let flat: RtuEventMessage = serde_json::from_str(
@@ -215,6 +234,20 @@ mod tests {
         let cd = parse_command_data(&flat);
         assert_eq!(cd.action, "SELECT_RTU");
         assert_eq!(as_i32(cd.ioa.as_ref()), Some(3001));
-        assert_eq!(as_i32(cd.value.as_ref()), Some(1));
+        assert_eq!(as_f64(cd.value.as_ref()), Some(1.0));
+    }
+
+    #[test]
+    fn value_float_dan_lama() {
+        use serde_json::json;
+        assert_eq!(as_f64(Some(&json!(2))), Some(2.0));
+        assert_eq!(as_f64(Some(&json!(12.5))), Some(12.5));
+        assert_eq!(as_f64(Some(&json!(" 3.25 "))), Some(3.25));
+        assert_eq!(as_f64(Some(&json!("2"))), Some(2.0));
+        assert_eq!(as_f64(Some(&json!(true))), Some(1.0));
+        assert_eq!(as_f64(Some(&json!("x"))), None);
+        assert_eq!(value_json(Some(2.0)), json!(2)); // tetap integer di respons
+        assert_eq!(value_json(Some(12.5)), json!(12.5));
+        assert_eq!(value_json(None), Value::Null);
     }
 }
