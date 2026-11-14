@@ -28,6 +28,8 @@ pub struct RtuConfig {
     pub liveness_secs: u64,
     /// Tidak ada di DB: default tunggu CommandTermination (env OPER_TIMEOUT_MS)
     pub oper_timeout_ms: u64,
+    /// Tidak ada di DB: value payload DPC untuk CLOSE, 1 atau 2 (env DPC_CLOSE_VALUE)
+    pub dpc_close_value: i32,
     /// Tidak ada di DB: env OSI_PARAMS_SIDE
     pub osi_side: OsiSide,
     pub ap_title: String,

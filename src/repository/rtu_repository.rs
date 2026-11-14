@@ -41,6 +41,7 @@ pub async fn load_rtus(c: &Client, id: Option<i32>) -> DbResult<Vec<RtuConfig>> 
     let brcb_resv_tms_secs = env_u64("BRCB_RESV_TMS_SECS", DEFAULT_BRCB_RESV_TMS_SECS).min(i16::MAX as u64) as i16;
     let liveness_secs = env_u64("LIVENESS_SECS", 30).max(1);
     let oper_timeout_ms = env_u64("OPER_TIMEOUT_MS", 10_000).max(1);
+    let dpc_close_value = crate::domain::dpc_close_value(std::env::var("DPC_CLOSE_VALUE").ok().as_deref());
     let osi_side = osi_side_from_env();
     let rows = c
         .query(
@@ -74,6 +75,7 @@ pub async fn load_rtus(c: &Client, id: Option<i32>) -> DbResult<Vec<RtuConfig>> 
                 brcb_resv_tms_secs,
                 liveness_secs,
                 oper_timeout_ms,
+                dpc_close_value,
                 osi_side,
                 ap_title: r.try_get(13)?,
                 ae_qualifier: r.try_get(14)?,

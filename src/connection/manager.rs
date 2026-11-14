@@ -337,6 +337,7 @@ pub(crate) mod testing {
             brcb_resv_tms_secs: 20,
             liveness_secs: 30,
             oper_timeout_ms: 10_000,
+            dpc_close_value: 2,
             osi_side: crate::iec61850::client::OsiSide::None,
             ap_title: "1.1.999.1".into(),
             ae_qualifier: 12,

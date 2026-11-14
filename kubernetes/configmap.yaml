@@ -30,6 +30,8 @@ data:
   BRCB_RESV_TMS_SECS: "20"
   # Tunggu CommandTermination (ms); harus < command_timeout remote_controls
   OPER_TIMEOUT_MS: "10000"
+  # value DPC untuk CLOSE (1 atau 2), OPEN = lainnya. Menunggu konfirmasi tim.
+  DPC_CLOSE_VALUE: "2"
   # Tunggu thread IED berhenti saat shutdown (detik); harus < terminationGracePeriodSeconds
   SHUTDOWN_WAIT_SECS: "5"
   # none | local | remote. BELUM dikonfirmasi tim (docs/CATATAN_TERBUKA.md)

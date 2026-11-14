@@ -476,7 +476,7 @@ fn execute_command(ied: &Ied, ctx: &RtuCtx, controls: &mut HashMap<i32, Control>
 
     let value = || -> Result<OwnedValue> {
         let v = req.value.ok_or("value wajib diisi")?;
-        Ok(match ctl_value(&p.cdc, v)? {
+        Ok(match ctl_value(&p.cdc, v, ctx.rtu.dpc_close_value)? {
             CtlVal::Bool(b) => OwnedValue::boolean(b),
             CtlVal::Int(i) => OwnedValue::int32(i),
             CtlVal::Float(f) => OwnedValue::float(f),
