@@ -207,6 +207,9 @@ impl Manager {
         if points.is_empty() {
             warn!(id_rtu = id, "tidak ada titik termapping, IED tetap dikoneksikan");
         }
+        if matches!(rtu.acquisition_mode.as_str(), "REPORT" | "HYBRID") && rcbs.is_empty() {
+            warn!(id_rtu = id, mode = %rtu.acquisition_mode, "tidak ada RCB enabled di iec61850_report_controls, report tidak akan masuk");
+        }
         let mut ctx = RtuCtx::new(rtu, rcbs, points, Arc::clone(&self.publisher), Arc::clone(&self.gate));
         ctx.unmapped_ioas = unmapped_ioas;
         let ctx = Arc::new(ctx);

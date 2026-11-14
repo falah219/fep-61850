@@ -102,7 +102,11 @@ pub async fn load_unmapped_ioas(c: &Client, id: Option<i32>) -> DbResult<Vec<(i3
         )
         .await
         .map_err(db_err("query datapoint tanpa mapping"))?;
-    Ok(rows.iter().filter_map(|r| Some((r.try_get(0).ok()?, r.try_get(1).ok()?))).collect())
+    let out: Vec<(i32, i32)> = rows.iter().filter_map(|r| Some((r.try_get(0).ok()?, r.try_get(1).ok()?))).collect();
+    for (id_rtu, ioa) in &out {
+        warn!(id_rtu, ioa, "datapoint IEC61850 tanpa baris master_datapoint_iec61850s, dilewati");
+    }
+    Ok(out)
 }
 
 pub async fn load_rcbs(c: &Client, id: Option<i32>) -> DbResult<Vec<(i32, String, RcbSettings)>> {
@@ -185,6 +189,9 @@ pub async fn load_points(c: &Client, id: Option<i32>) -> DbResult<PointMap> {
     let mut map = PointMap::default();
     for row in &rows {
         match to_point(row) {
+            Ok(p) if p.object_reference.trim().is_empty() => {
+                warn!(id_rtu = p.id_rtu, ioa = p.ioa, "datapoint IEC61850 tanpa object_reference, dilewati");
+            }
             Ok(p) => {
                 if let Err(e) = map.insert(p) {
                     warn!("mapping dilewati: {e}");
