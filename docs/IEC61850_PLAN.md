@@ -49,8 +49,9 @@ FEP adalah jembatan antara IED dan service backend lain. Backend tidak berbicara
 | `RTU_LOGGING` | Log komunikasi per IED | `kafka/publisher/rtu_logging_sender.rs` |
 | Topik respons command | Hasil SELECT/OPERATE/CANCEL | `kafka/handlers/rtu_event/command/response.rs` |
 | `MANUAL_SET_EVENT_RESPONSE` | Hasil manual set | `kafka/handlers/manual_set.rs` |
+| `IEC61850_BROWSE_RESPONSE` | Hasil event BROWSE (khusus IEC 61850): `{key, id_rtu, status, message, objects, part, total_parts}` | `kafka/handlers/rtu_event/browse.rs` |
 
-**Di-consume FEP** (dikirim service backend lain): `RTU_EVENTS` (COMMAND, GI, UPDATE, CREATE, DELETE, STATE, RESET, CHANNEL), `RTU_COMMAND_CONFIG_REQUEST`, `MASTER_DATAPOINT_EVENT`, `MASTER_DATA_OBJECT_EVENT`, `MASTER_RTU_EVENTS`, `CAPTURE_DATA_CHANGE`, `MANUAL_SET_EVENT`. Daftar diambil dari env `SUBSCRIBE_TOPICS`, sama seperti `src/main.rs`.
+**Di-consume FEP** (dikirim service backend lain): `RTU_EVENTS` (COMMAND, BROWSE, GI, UPDATE, CREATE, DELETE, STATE, RESET, CHANNEL), `RTU_COMMAND_CONFIG_REQUEST`, `MASTER_DATAPOINT_EVENT`, `MASTER_DATA_OBJECT_EVENT`, `MASTER_RTU_EVENTS`, `CAPTURE_DATA_CHANGE`, `MANUAL_SET_EVENT`. Daftar diambil dari env `SUBSCRIBE_TOPICS`, sama seperti `src/main.rs`.
 
 Aturan:
 - Nama topik, key, dan format JSON **harus identik** dengan versi IEC 104. Bedanya hanya `protocol: "IEC61850"`.
@@ -178,11 +179,6 @@ Kolom yang null **tidak ditulis** ke IED, supaya FEP tidak merusak konfigurasi R
 | `functional_constraint` | ya | `ST` (status), `MX` (measurement), `CO` (kontrol), `SP` (setpoint). Jenis titik diturunkan dari sini |
 | `cdc` | ya | `SPS`, `DPS`, `INS`, `ENS`, `ENC`, `ACT`, `ACD`, `MV`, `CMV`, `BCR`, `SPC`, `DPC`, `INC`, `APC`, `BSC` |
 | `value_attribute` | | Null = default dari CDC (`stVal` untuk SPS/DPS/INS/ENS/ENC, `general` untuk ACT/ACD, `mag.f` untuk MV, `cVal.mag.f` untuk CMV, `actVal` untuk BCR) |
-| `ctl_model` | | Hanya titik kontrol. Null = **dibaca otomatis dari IED** (`ctlModel` di FC CF) saat konek |
-| `sbo_timeout_ms` | | Hanya titik kontrol. Null = default IED. **Tidak** dipakai untuk menunggu CommandTermination |
-| `oper_timeout_ms` | | Hanya titik kontrol. Batas tunggu CommandTermination (enhanced security). Null = env `OPER_TIMEOUT_MS` (10000) |
-| `interlock_check` | | Default false. Bit `Check.interlock-check` saat operate |
-| `synchro_check` | | Default false. Bit `Check.synchrocheck` saat operate |
 | `deadband` | | Hanya measurement di mode polling: perubahan lebih kecil dari ini tidak dikirim |
 
 Constraint:
@@ -190,6 +186,21 @@ Constraint:
 - `master_datapoints`: `UNIQUE (id_rtu, ioa)` untuk `protocol = 'IEC61850'`
 
 Supaya FEP tetap sinkron saat konfigurasi berubah (lewat `CAPTURE_DATA_CHANGE` / `MASTER_DATAPOINT_EVENT`), tabel `iec61850s`, `iec61850_report_controls`, dan `master_datapoint_iec61850s` harus ikut dipantau CDC. Konfirmasi ke saya cara CDC di tim (Debezium atau lainnya) sebelum mengimplementasikan.
+
+### 3.3b Tabel `iec61850_command_formulas` (pola `iec104_command_formulas` remote control GRITA)
+| Kolom | Wajib | Keterangan |
+|---|---|---|
+| `id` | ya | uuid |
+| `id_master_datapoint` | ya | FK `master_datapoints.id`; maks satu baris `is_deleted = false` per titik |
+| `type` | ya | `SPC`, `DPC`, `INC`, `ENC`, `BSC`, `APC` |
+| `ctl_model` | | Null = **dibaca otomatis dari IED** (`ctlModel` di FC CF) |
+| `value` | | varchar, untuk backend (FEP memakai value dari payload COMMAND) |
+| `interlock_check` | | Default false. Bit `Check.interlock-check` saat operate |
+| `synchro_check` | | Default false. Bit `Check.synchrocheck` saat operate |
+| `is_deleted`, `created_at`, `updated_at` | ya | |
+
+`sbo_timeout_ms` tidak disimpan (pakai sboTimeout IED). Batas tunggu CommandTermination (enhanced security) = env `OPER_TIMEOUT_MS` (10000).
+Semua tabel IEC 61850 dipasang trigger `notify_table_change()` (AFTER INSERT OR DELETE OR UPDATE, FOR EACH ROW).
 
 ### 3.4 Quality (IEC 61850-7-3) → field Kafka
 - `quality` (grup, sama seperti sekarang): `GOOD` / `INVALID` / `QUESTIONABLE` dari `q.validity`.

@@ -116,11 +116,9 @@ mod tests {
             cdc: cdc.into(),
             value_attribute: default_value_attribute(cdc).unwrap_or_default().into(),
             ctl_model: None,
-            sbo_timeout_ms: None,
             interlock_check: false,
             synchro_check: false,
             deadband: None,
-            oper_timeout_ms: None,
         }
     }
 

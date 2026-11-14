@@ -300,6 +300,25 @@ impl Ied {
         check(err)
     }
 
+    /// Nama Logical Device di IED.
+    pub fn logical_devices(&self) -> Result<Vec<String>> {
+        let mut err = ffi::IED_ERROR_OK;
+        // SAFETY: koneksi valid selama &self hidup; list jadi milik kita (dibebaskan take_strings)
+        let list = unsafe { ffi::IedConnection_getLogicalDeviceList(self.con, &mut err) };
+        self.note(err);
+        take_strings(list, err)
+    }
+
+    /// Nama Logical Node di dalam satu LD.
+    pub fn logical_nodes(&self, ld: &str) -> Result<Vec<String>> {
+        let c = cstring(ld)?;
+        let mut err = ffi::IED_ERROR_OK;
+        // SAFETY: koneksi valid, c hidup selama pemanggilan; list jadi milik kita
+        let list = unsafe { ffi::IedConnection_getLogicalDeviceDirectory(self.con, &mut err, c.as_ptr()) };
+        self.note(err);
+        take_strings(list, err)
+    }
+
     /// Anggota dataset, contoh `LD/GGIO1.AnIn1.mag.f[MX]`. `ds_ref` contoh `LD/LLN0.Events`.
     pub fn dataset_directory(&self, ds_ref: &str) -> Result<Vec<String>> {
         let c = cstring(ds_ref)?;
@@ -369,6 +388,61 @@ impl Spec {
         // SAFETY: syarat pemanggil; hasil dimiliki `value`
         unsafe { ffi::MmsVariableSpecification_getChildValue(self.0, value, path.as_ptr()) }
     }
+}
+
+/// Salinan struktur MmsVariableSpecification (untuk browse, tanpa pointer).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpecNode {
+    pub name: String,
+    pub ty: SpecType,
+    pub children: Vec<SpecNode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SpecType {
+    Bool,
+    BitString,
+    Int,
+    Struct,
+    Other,
+}
+
+impl Spec {
+    pub fn tree(&self) -> SpecNode {
+        // SAFETY: self.0 non-null (dicek di variable_spec) dan milik kita selama &self hidup
+        unsafe { spec_node(self.0) }
+    }
+}
+
+/// # Safety
+/// `s` harus MmsVariableSpecification valid (child-nya dimiliki parent, tidak dibebaskan di sini).
+unsafe fn spec_node(s: *mut ffi::MmsVariableSpecification) -> SpecNode {
+    // SAFETY: syarat pemanggil; nama = string milik spec, disalin
+    let name = unsafe {
+        let n = ffi::MmsVariableSpecification_getName(s);
+        if n.is_null() { String::new() } else { CStr::from_ptr(n).to_string_lossy().into_owned() }
+    };
+    // SAFETY: syarat pemanggil
+    let ty = match unsafe { ffi::MmsVariableSpecification_getType(s) } {
+        ffi::MMS_STRUCTURE => SpecType::Struct,
+        ffi::MMS_BOOLEAN => SpecType::Bool,
+        ffi::MMS_BIT_STRING => SpecType::BitString,
+        ffi::MMS_INTEGER | ffi::MMS_UNSIGNED => SpecType::Int,
+        _ => SpecType::Other,
+    };
+    let mut children = Vec::new();
+    if ty == SpecType::Struct {
+        // SAFETY: struktur -> getSize = jumlah elemen; child valid selama parent hidup
+        let n = unsafe { ffi::MmsVariableSpecification_getSize(s) };
+        for i in 0..n.max(0) {
+            let c = unsafe { ffi::MmsVariableSpecification_getChildSpecificationByIndex(s, i) };
+            if !c.is_null() {
+                // SAFETY: c child valid dari s
+                children.push(unsafe { spec_node(c) });
+            }
+        }
+    }
+    SpecNode { name, ty, children }
 }
 
 impl Drop for Spec {

@@ -24,8 +24,8 @@ pub(crate) async fn capture_data_change(mgr: &Arc<Manager>, m: CaptureDataChange
             let state = if m.operation == "DELETE" { Some(false) } else { None };
             mgr.reload_later(data_id_rtu(data), state);
         }
-        "master_datapoint_iec61850s" => {
-            // id_rtu tidak ada di tabel ekstensi; cari lewat master_datapoints, kalau gagal reload semua.
+        "master_datapoint_iec61850s" | "iec61850_command_formulas" => {
+            // id_rtu tidak ada di kedua tabel ini; cari lewat master_datapoints, kalau gagal reload semua.
             let dp = data.and_then(|d| d.get("id_master_datapoint")).and_then(Value::as_str);
             let id = match (dp, mgr.pool.get().await) {
                 (Some(dp), Ok(c)) => repo::rtu_of_datapoint(&c, dp).await.ok().flatten(),

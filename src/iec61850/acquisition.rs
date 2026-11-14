@@ -21,6 +21,7 @@ use super::callbacks::report::{on_report, ReportCtx};
 use super::mapper::{mms_quality, mms_time, mms_to_json};
 use super::mapping::split_fc;
 use crate::connection::ConnectGate;
+use super::browse::{browse, BrowseObject};
 use crate::domain::{ctl_value, CommandAction, CommandJob, CommandReq, CtlVal, Point, PointState, RtuConfig};
 use crate::error::Result;
 use crate::ffi;
@@ -83,11 +84,6 @@ pub fn next_deadline(deadline: Instant, now: Instant, interval: Duration) -> (In
         skipped += 1;
     }
     (next, skipped)
-}
-
-/// Batas tunggu CommandTermination: kolom oper_timeout_ms titik, NULL = env OPER_TIMEOUT_MS.
-pub fn oper_wait(point_ms: Option<i32>, default_ms: u64) -> Duration {
-    Duration::from_millis(point_ms.filter(|&v| v > 0).map_or(default_ms, |v| v as u64))
 }
 
 /// Target cek liveness: `LD/LLN0.Mod.stVal` dari LD pertama (titik termapping, lalu RCB).
@@ -251,7 +247,11 @@ pub enum Ctl {
     Wake,
     /// Select / operate / cancel (event COMMAND). Hasil dikirim lewat `reply`.
     Command(Box<CommandJob>),
+    /// Browse model IED (event BROWSE). Thread IED tertahan selama browse (report tetap masuk antrean library).
+    Browse(BrowseReply),
 }
+
+pub type BrowseReply = tokio::sync::oneshot::Sender<std::result::Result<Vec<BrowseObject>, String>>;
 
 pub(crate) enum End {
     /// Diminta berhenti lewat Ctl::Stop
@@ -422,6 +422,10 @@ pub(crate) fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End> {
                 producer.send_log(&r.ip_address, r.id_rtu, if result.is_ok() { "INFO" } else { "WARN" }, &msg);
                 let _ = job.reply.send(result.map_err(|e| e.to_string()));
             }
+            Ok(Ctl::Browse(reply)) => {
+                info!(id_rtu = r.id_rtu, "browse model IED");
+                let _ = reply.send(browse(&ied).map_err(|e| e.to_string()));
+            }
             Ok(Ctl::Wake) | Err(RecvTimeoutError::Timeout) => {}
         }
     }
@@ -457,7 +461,7 @@ fn execute_command(ied: &Ied, ctx: &RtuCtx, controls: &mut HashMap<i32, Control>
     };
     let result = match req.action {
         CommandAction::Select => ctl.select(&value()?),
-        CommandAction::Operate => ctl.operate(&value()?, oper_wait(p.oper_timeout_ms, ctx.rtu.oper_timeout_ms)),
+        CommandAction::Operate => ctl.operate(&value()?, Duration::from_millis(ctx.rtu.oper_timeout_ms)),
         CommandAction::Cancel => ctl.cancel(),
     };
     if result.is_ok() {
@@ -710,11 +714,9 @@ mod tests {
             cdc: "SPS".into(),
             value_attribute: default_value_attribute("SPS").unwrap_or_default().into(),
             ctl_model: None,
-            sbo_timeout_ms: None,
             interlock_check: false,
             synchro_check: false,
             deadband: None,
-            oper_timeout_ms: None,
         };
         let rcb = |r: &str| (r.to_string(), RcbSettings::default());
         assert_eq!(probe_reference(&[pt("BAY1LD0/XCBR1.Pos")], &[rcb("X/LLN0.BR.b")]).as_deref(), Some("BAY1LD0/LLN0.Mod.stVal"));
@@ -722,13 +724,6 @@ mod tests {
         assert_eq!(probe_reference(&[], &[rcb("simpleIOGenericIO/LLN0.BR.EventsBRCB01")]).as_deref(), Some("simpleIOGenericIO/LLN0.Mod.stVal"));
         assert_eq!(probe_reference(&[pt("tanpa-slash")], &[]), None);
         assert_eq!(probe_reference(&[], &[]), None);
-    }
-
-    #[test]
-    fn tunggu_command_termination() {
-        assert_eq!(oper_wait(Some(3000), 10_000), Duration::from_millis(3000));
-        assert_eq!(oper_wait(None, 10_000), Duration::from_millis(10_000)); // NULL -> env
-        assert_eq!(oper_wait(Some(0), 7000), Duration::from_millis(7000));
     }
 
     #[tokio::test]

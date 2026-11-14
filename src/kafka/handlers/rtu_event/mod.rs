@@ -1,5 +1,7 @@
-//! RTU_EVENTS: UPDATE / CREATE / DELETE / STATE / RESET / GI / CHANNEL (+ COMMAND di `command.rs`).
+//! RTU_EVENTS: UPDATE / CREATE / DELETE / STATE / RESET / GI / CHANNEL (+ COMMAND di `command.rs`,
+//! BROWSE di `browse.rs`).
 
+pub mod browse;
 pub mod command;
 
 use std::sync::Arc;

@@ -13,13 +13,11 @@ pub struct Point {
     pub cdc: String,
     /// Sudah di-resolve: dari DB, atau default dari CDC
     pub value_attribute: String,
+    /// Dari iec61850_command_formulas (None = baca dari IED)
     pub ctl_model: Option<String>,
-    pub sbo_timeout_ms: Option<i32>,
     pub interlock_check: bool,
     pub synchro_check: bool,
     pub deadband: Option<f64>,
-    /// Tunggu CommandTermination (ms). None = env OPER_TIMEOUT_MS
-    pub oper_timeout_ms: Option<i32>,
 }
 
 /// Nilai terakhir satu titik (gabungan value + q + t dari anggota-anggota dataset).

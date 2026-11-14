@@ -28,7 +28,7 @@ data:
   RELOAD_DEBOUNCE_MS: "2000"
   # ResvTms BRCB (detik): RCB tetap dipesan untuk FEP selama koneksi putus
   BRCB_RESV_TMS_SECS: "20"
-  # Default tunggu CommandTermination (ms) kalau kolom oper_timeout_ms NULL
+  # Tunggu CommandTermination (ms); harus < command_timeout remote_controls
   OPER_TIMEOUT_MS: "10000"
   # Tunggu thread IED berhenti saat shutdown (detik); harus < terminationGracePeriodSeconds
   SHUTDOWN_WAIT_SECS: "5"

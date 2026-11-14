@@ -118,6 +118,10 @@ Perhatian saat ke IED sungguhan:
   - `iec61850s`: kolom form **"Add Client" IEC 61850 di GRITA** + konvensi `iec104s` (PK `id` uuid,
     `status_rtu` 'green'/'red', `longitude_x`/`latitude_y`, FK `master_stations`/`data_gi`).
   - `iec61850_report_controls` (RCB), `master_datapoint_iec61850s` (ekstensi 1:1).
+  - `iec61850_command_formulas`: setting kontrol per titik (`ctl_model`, `interlock_check`, `synchro_check`),
+    pola `iec104_command_formulas` remote control GRITA. Maks satu baris aktif per titik.
+  - Trigger CDC `notify_table_change()` (milik backend / cdc_listener) di keempat tabel. Test env:
+    jalankan dulu [test-env/sql/00_stub_backend.sql](test-env/sql/00_stub_backend.sql) (stub kosong).
   - Unik `(id_rtu, object_reference, FC)` lewat trigger (id_rtu ada di `master_datapoints`).
   - Index unik parsial `master_datapoints (id_rtu, ioa) WHERE protocol='IEC61850' AND is_deleted=false`.
   - Daftar hal yang perlu dikonfirmasi ada di header file.
@@ -278,12 +282,13 @@ docker compose -f docker-compose.dev.yml exec -w /work dev scripts/uji_konek_ser
 | `RTU_EVENTS` `RESET` | status 0, restart |
 | `RTU_EVENTS` `GI` | GI ke semua RCB; mode polling: siklus integrity sekarang |
 | `RTU_EVENTS` `CHANNEL` | dicatat (sama dengan IEC 104) |
-| `RTU_EVENTS` `COMMAND` | belum (fase 9) |
+| `RTU_EVENTS` `COMMAND` | select / operate / cancel (fase 9) |
+| `RTU_EVENTS` `BROWSE` | browse model IED di thread IED → `IEC61850_BROWSE_RESPONSE` (lihat di bawah) |
 | `MASTER_DATAPOINT_EVENT` | update TagResolver + restart IED (mapping bisa berubah) |
 | `MASTER_DATA_OBJECT_EVENT` | muat ulang group |
 | `MASTER_RTU_EVENTS` `UPDATE_ID_RTU` | hentikan id lama, jalankan id baru |
 | `RTU_COMMAND_CONFIG_REQUEST` | dicatat (sama dengan IEC 104) |
-| `CAPTURE_DATA_CHANGE` | `formulas`, `master_data_objects`, `master_general_actions` → muat ulang resolver; `iec61850s`, `iec61850_report_controls`, `master_datapoint_iec61850s` → restart IED terkait |
+| `CAPTURE_DATA_CHANGE` | `formulas`, `master_data_objects`, `master_general_actions` → muat ulang resolver; `iec61850s`, `iec61850_report_controls`, `master_datapoint_iec61850s`, `iec61850_command_formulas` → restart IED terkait |
 | `MANUAL_SET_EVENT` | toggle manual set + `MANUAL_SET_EVENT_RESPONSE` (key `IEC61850`) |
 
 Uji (di kantor, Postgres + Kafka dev):
@@ -293,6 +298,27 @@ Uji (di kantor, Postgres + Kafka dev):
 4. Kirim ke `RTU_EVENTS`: `{"event":"GI","protocol":"IEC61850","ip_address":"ied-sim-1","id_rtu":9001}` → data `GENERAL_INTERROGATION`.
 5. Kirim `{"event":"STATE","protocol":"IEC61850","ip_address":"ied-sim-1","id_rtu":9001,"state_rtu":false}` → status 0, tidak reconnect.
 6. Kirim event yang sama dengan `"protocol":"IEC104"` → harus diabaikan.
+
+### Event `BROWSE`
+
+Payload: `{"event":"BROWSE","protocol":"IEC61850","id_rtu":9001,"key":"k1"}`. Dijalankan di thread IED
+(antrean `Ctl` seperti COMMAND): LD → LN → DO → FC (`ST`/`MX`/`CO`/`SP`), satu `getVariableSpecification`
+per LN + FC. Kode: [src/iec61850/browse.rs](src/iec61850/browse.rs).
+
+Respons ke `IEC61850_BROWSE_RESPONSE` (key = `key`):
+
+```json
+{"key":"k1","id_rtu":9001,"status":"SUCCESS","message":"152 objek","part":1,"total_parts":1,
+ "objects":[{"object_reference":"simpleIOGenericIO/GGIO1.SPCSO1","fc":"ST","cdc":"SPC"}]}
+```
+
+- IED tidak terkoneksi / thread tidak jalan → `FAILED`, `"IED tidak terkoneksi"`, `objects: []`.
+- Lebih dari ~900 KB → beberapa pesan, `part` 1..`total_parts` (key sama).
+- `cdc` ditebak dari struktur DO (7-3): `stVal` boolean/bitstring/integer → SPS/DPS/INS (+`Oper` → SPC/DPC/INC),
+  `general` → ACT/ACD, `actVal` → BCR, `valWTr`+`Oper` → BSC, `mxVal`+`Oper` → APC, `mag` → MV, `cVal` → CMV
+  (sub-DO seperti `WYE.phsA` dicari sampai 3 level). ENS/ENC tidak bisa dibedakan dari INS/INC lewat MMS.
+  Tidak dikenali → `null`.
+- Selama browse, polling IED itu tertahan (report tetap diterima).
 
 ## Fase 9 — Command (select / operate / cancel)
 
@@ -306,12 +332,12 @@ Alur: event `COMMAND` di `RTU_EVENTS` → cari IED (`id_rtu` atau IP) → job di
 | `action` | IEC 61850 |
 |---|---|
 | `SELECT_RTU` | SBO normal: `select`; SBO enhanced: `selectWithValue`; direct: tidak ada aksi (sukses) |
-| `OPERATE_RTU` | `operate`; enhanced security: tunggu `CommandTermination` (maks `oper_timeout_ms`, NULL = env `OPER_TIMEOUT_MS`, default 10 s) |
+| `OPERATE_RTU` | `operate`; enhanced security: tunggu `CommandTermination` (maks env `OPER_TIMEOUT_MS`, default 10 s) |
 | `CANCEL_RTU` | `cancel` |
 
-- `ctlModel`: dibaca dari IED, ditimpa kolom `ctl_model` kalau diisi.
+- `ctlModel`: dibaca dari IED, ditimpa `iec61850_command_formulas.ctl_model` kalau diisi.
 - `orCat = remote-control`, `orIdent` = field `user` di payload (default `FEP-IEC61850`).
-- `interlock_check` / `synchro_check` dari tabel mapping.
+- `interlock_check` / `synchro_check` dari `iec61850_command_formulas` (join `id_master_datapoint`, `is_deleted = false`; tanpa baris = false).
 - IOA dari field `ioa`, atau dari akhiran tag `NAMA_123` (sama dengan IEC 104).
 - Nilai: `SPC` value≠0 → true; `INC` angka; **`DPC` 2 → CLOSE (true), 1 → OPEN (false)** — pemetaan standar DCS IEC 104,
   **belum dikonfirmasi tim** (lihat `ctl_value` di `command.rs`). `APC`/`BSC` belum didukung.

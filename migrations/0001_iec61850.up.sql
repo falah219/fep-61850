@@ -125,21 +125,36 @@ CREATE TABLE master_datapoint_iec61850s (
                                           'SPC','DPC','INC','APC','BSC')),
     -- NULL = default dari CDC (stVal / general / mag.f / cVal.mag.f / actVal)
     value_attribute        VARCHAR(64),
-    -- hanya titik kontrol; NULL = dibaca otomatis dari IED (ctlModel, FC CF)
-    ctl_model              VARCHAR(40)
-                           CHECK (ctl_model IN ('status-only', 'direct-with-normal-security', 'sbo-with-normal-security',
-                                                'direct-with-enhanced-security', 'sbo-with-enhanced-security')),
-    sbo_timeout_ms         INTEGER      CHECK (sbo_timeout_ms > 0),
-    -- batas tunggu CommandTermination (enhanced security); NULL = env OPER_TIMEOUT_MS (default 10000).
-    -- < 30000 karena handler COMMAND menunggu hasil maks 30 detik.
-    oper_timeout_ms        INTEGER      CHECK (oper_timeout_ms > 0 AND oper_timeout_ms < 30000),
-    interlock_check        BOOLEAN      NOT NULL DEFAULT FALSE,
-    synchro_check          BOOLEAN      NOT NULL DEFAULT FALSE,
     -- hanya measurement di mode polling
     deadband               DOUBLE PRECISION CHECK (deadband >= 0),
     created_at             TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at             TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
+
+-- 3.3b Setting kontrol per titik, pola iec104_command_formulas (remote control backend GRITA).
+-- Pengganti kolom ctl_model/interlock_check/synchro_check di master_datapoint_iec61850s.
+-- sboTimeout tidak disimpan (pakai nilai IED); batas tunggu CommandTermination = env OPER_TIMEOUT_MS.
+CREATE TABLE iec61850_command_formulas (
+    id                   UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    id_master_datapoint  UUID         NOT NULL REFERENCES master_datapoints (id),
+    type                 VARCHAR(8)   NOT NULL CHECK (type IN ('SPC', 'DPC', 'INC', 'ENC', 'BSC', 'APC')),
+    -- NULL = dibaca otomatis dari IED (ctlModel, FC CF)
+    ctl_model            VARCHAR(40)
+                         CHECK (ctl_model IN ('status-only', 'direct-with-normal-security', 'sbo-with-normal-security',
+                                              'direct-with-enhanced-security', 'sbo-with-enhanced-security')),
+    -- disimpan untuk backend; FEP memakai value dari payload COMMAND
+    value                VARCHAR(64),
+    interlock_check      BOOLEAN      NOT NULL DEFAULT FALSE,
+    synchro_check        BOOLEAN      NOT NULL DEFAULT FALSE,
+    is_deleted           BOOLEAN      NOT NULL DEFAULT FALSE,
+    created_at           TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+-- Maks satu formula aktif per titik (FEP join by id_master_datapoint).
+CREATE UNIQUE INDEX ux_iec61850_command_formulas_datapoint
+    ON iec61850_command_formulas (id_master_datapoint)
+    WHERE is_deleted = FALSE;
 
 -- UNIQUE (id_rtu, object_reference, functional_constraint): id_rtu ada di master_datapoints,
 -- jadi tidak bisa pakai constraint biasa. Dicek lewat trigger + join.
@@ -172,5 +187,20 @@ CREATE TRIGGER trg_iec61850_unique_reference
 CREATE UNIQUE INDEX ux_master_datapoints_iec61850_rtu_ioa
     ON master_datapoints (id_rtu, ioa)
     WHERE protocol = 'IEC61850' AND is_deleted = FALSE;
+
+-- CDC (iconics_configuration_cdc_listener): notify_table_change() milik backend, harus sudah ada.
+-- Nama trigger sama dengan yang dibuat listener (<tabel>_notify_trigger) supaya tidak dobel.
+CREATE TRIGGER iec61850s_notify_trigger
+    AFTER INSERT OR DELETE OR UPDATE ON iec61850s
+    FOR EACH ROW EXECUTE FUNCTION notify_table_change();
+CREATE TRIGGER iec61850_report_controls_notify_trigger
+    AFTER INSERT OR DELETE OR UPDATE ON iec61850_report_controls
+    FOR EACH ROW EXECUTE FUNCTION notify_table_change();
+CREATE TRIGGER master_datapoint_iec61850s_notify_trigger
+    AFTER INSERT OR DELETE OR UPDATE ON master_datapoint_iec61850s
+    FOR EACH ROW EXECUTE FUNCTION notify_table_change();
+CREATE TRIGGER iec61850_command_formulas_notify_trigger
+    AFTER INSERT OR DELETE OR UPDATE ON iec61850_command_formulas
+    FOR EACH ROW EXECUTE FUNCTION notify_table_change();
 
 COMMIT;

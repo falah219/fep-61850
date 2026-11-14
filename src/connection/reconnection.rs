@@ -54,6 +54,9 @@ pub fn run_ied(ctx: Arc<RtuCtx>, rx: Receiver<Ctl>) {
             Ok(Ctl::Command(job)) => {
                 let _ = job.reply.send(Err("IED tidak terkoneksi".into()));
             }
+            Ok(Ctl::Browse(reply)) => {
+                let _ = reply.send(Err("IED tidak terkoneksi".into()));
+            }
             Ok(Ctl::Gi | Ctl::Wake) | Err(RecvTimeoutError::Timeout) => {}
         }
     }

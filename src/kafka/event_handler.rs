@@ -13,7 +13,7 @@ use super::handlers::capture_data_change::{capture_data_change, reload_groups};
 use super::handlers::manual_set::manual_set;
 use super::handlers::master_datapoint::master_datapoint;
 use super::handlers::master_rtu_event::master_rtu;
-use super::handlers::rtu_event::{command, rtu_event};
+use super::handlers::rtu_event::{browse, command, rtu_event};
 use super::models::PROTOCOL;
 use crate::connection::Manager;
 
@@ -34,6 +34,10 @@ pub async fn handle(mgr: &Arc<Manager>, event: KafkaEvent) {
             if let Some(wait_and_respond) = command::submit(mgr, *m) {
                 tokio::spawn(wait_and_respond);
             }
+        }
+        // BROWSE: sama dengan COMMAND, masuk antrean IED sekarang, tunggu hasil di task sendiri.
+        KafkaEvent::RtuEvent(m) if is_ours(&m.protocol) && m.event == "BROWSE" => {
+            tokio::spawn(browse::submit(mgr, *m));
         }
         KafkaEvent::RtuEvent(m) if is_ours(&m.protocol) => rtu_event(mgr, *m).await,
         KafkaEvent::MasterDatapoint(m) if is_ours(&m.protocol) => master_datapoint(mgr, m).await,

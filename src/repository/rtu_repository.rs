@@ -140,11 +140,9 @@ fn to_point(row: &Row) -> Result<Point, tokio_postgres::Error> {
         cdc,
         value_attribute,
         ctl_model: row.try_get(7)?,
-        sbo_timeout_ms: row.try_get(8)?,
-        interlock_check: row.try_get(9)?,
-        synchro_check: row.try_get(10)?,
-        deadband: row.try_get(11)?,
-        oper_timeout_ms: row.try_get(12)?,
+        interlock_check: row.try_get(8)?,
+        synchro_check: row.try_get(9)?,
+        deadband: row.try_get(10)?,
     })
 }
 
@@ -152,10 +150,12 @@ pub async fn load_points(c: &Client, id: Option<i32>) -> DbResult<PointMap> {
     let rows = c
         .query(
             "SELECT md.id_rtu, md.ioa, md.tag, x.object_reference, x.functional_constraint, x.cdc,
-                    x.value_attribute, x.ctl_model, x.sbo_timeout_ms, x.interlock_check, x.synchro_check, x.deadband,
-                    x.oper_timeout_ms
+                    x.value_attribute, cf.ctl_model, COALESCE(cf.interlock_check, FALSE),
+                    COALESCE(cf.synchro_check, FALSE), x.deadband
              FROM master_datapoint_iec61850s x
              JOIN master_datapoints md ON md.id = x.id_master_datapoint
+             LEFT JOIN iec61850_command_formulas cf
+                    ON cf.id_master_datapoint = x.id_master_datapoint AND cf.is_deleted = FALSE
              JOIN iec61850s r          ON r.id_rtu = md.id_rtu
              WHERE md.is_deleted = FALSE AND r.is_deleted = FALSE AND md.protocol = 'IEC61850'
                AND ($1::INT IS NULL OR md.id_rtu = $1)
