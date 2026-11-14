@@ -117,9 +117,11 @@ fn respond(mgr: &Manager, cd: &CommandData, action: CommandAction, ioa: Option<i
         Err(e) => ("inactive", format!("{} failed: {e} - RTU status is Inactive", action.as_str())),
     };
     let key = cd.key.clone().unwrap_or_default();
+    let cfg = cd.id_rtu.or_else(|| mgr.id_by_ip(&cd.ip_address)).and_then(|id| mgr.endpoint_of(id));
+    let (hostname, port) = response_endpoint(&cd.ip_address, cd.port, cfg);
     let response = json!({
-        "hostname": cd.ip_address,
-        "port": cd.port,
+        "hostname": hostname,
+        "port": port,
         "protocol": PROTOCOL,
         "tag": cd.tag.clone().unwrap_or_default(),
         "command_type": cd.command_type.clone().unwrap_or_default(),
@@ -133,6 +135,15 @@ fn respond(mgr: &Manager, cd: &CommandData, action: CommandAction, ioa: Option<i
     });
     let topic_key = if key.is_empty() { "unknown" } else { key.as_str() };
     mgr.publisher.producer.send_raw(TOPIC_RTU_COMMAND, topic_key, &response);
+}
+
+/// hostname/port respons: port dari konfigurasi IED (payload sering tanpa port -> 0),
+/// hostname dari payload, konfigurasi kalau payload kosong. IED tidak dikenal -> isi payload.
+fn response_endpoint(ip: &str, port: u16, cfg: Option<(String, i32)>) -> (String, i32) {
+    match cfg {
+        Some((cfg_ip, cfg_port)) => (if ip.is_empty() { cfg_ip } else { ip.to_string() }, cfg_port),
+        None => (ip.to_string(), i32::from(port)),
+    }
 }
 
 /// Validasi + kirim ke antrean thread IED (tanpa menunggu).
@@ -171,6 +182,15 @@ mod tests {
         assert_eq!(ioa_from_tag("SIM1_SPCSO1_CO"), None);
         assert_eq!(ioa_from_tag("NO_IOA"), None);
         assert_eq!(ioa_from_tag("X_"), None);
+    }
+
+    #[test]
+    fn hostname_port_respons() {
+        let cfg = Some(("10.0.0.5".to_string(), 102));
+        assert_eq!(response_endpoint("", 0, cfg.clone()), ("10.0.0.5".into(), 102));
+        assert_eq!(response_endpoint("ied-a", 0, cfg.clone()), ("ied-a".into(), 102));
+        assert_eq!(response_endpoint("ied-a", 9999, cfg), ("ied-a".into(), 102)); // konfigurasi menang
+        assert_eq!(response_endpoint("ied-x", 103, None), ("ied-x".into(), 103)); // IED tidak dikenal
     }
 
     #[test]

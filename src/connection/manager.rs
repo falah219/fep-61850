@@ -270,6 +270,11 @@ impl Manager {
         self.rtus.contains_key(&id)
     }
 
+    /// (ip_address, port) IED dari konfigurasi yang sedang berjalan.
+    pub fn endpoint_of(&self, id: i32) -> Option<(String, i32)> {
+        self.rtus.get(&id).map(|h| (h.ctx.rtu.ip_address.clone(), h.ctx.rtu.port))
+    }
+
     pub fn ip_of(&self, id: i32) -> Option<String> {
         self.rtus.get(&id).map(|h| h.ctx.rtu.ip_address.clone())
     }
