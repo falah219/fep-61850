@@ -121,7 +121,9 @@ Perhatian saat ke IED sungguhan:
   - `iec61850_command_formulas`: setting kontrol per titik (`ctl_model`, `interlock_check`, `synchro_check`),
     pola `iec104_command_formulas` remote control GRITA. Maks satu baris aktif per titik.
   - Trigger CDC `notify_table_change()` (milik backend / cdc_listener) di keempat tabel. Test env:
-    jalankan dulu [test-env/sql/00_stub_backend.sql](test-env/sql/00_stub_backend.sql) (stub kosong).
+    jalankan dulu [test-env/sql/00_stub_backend.sql](test-env/sql/00_stub_backend.sql) (tabel tiruan backend +
+    fungsi trigger kosong, HANYA DB uji kosong). Uji urutan stub → 0001 → 0002 → seed → down → up:
+    `scripts/uji_migrasi.sh` (container `postgres:16` sementara).
   - Unik `(id_rtu, object_reference, FC)` lewat trigger (id_rtu ada di `master_datapoints`).
   - Index unik parsial `master_datapoints (id_rtu, ioa) WHERE protocol='IEC61850' AND is_deleted=false`.
   - Daftar hal yang perlu dikonfirmasi ada di header file.
