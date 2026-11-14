@@ -1,0 +1,21 @@
+# Simulator IED OPSIONAL (server_example_basic_io libIEC61850) untuk dev & uji lokal.
+# Tidak perlu kalau sudah memakai service simulator sendiri.
+#
+#   docker compose -f docker-compose.sim.yml up -d --build
+#
+# Satu folder = satu project compose, jadi container `dev` (docker-compose.dev.yml) bisa
+# menjangkau simulator lewat nama host ied-sim-1 / ied-sim-2 port 102.
+x-ied-sim: &ied-sim
+  build: { context: ., dockerfile: docker/Dockerfile.dev, target: ied-sim }
+  image: fep61850-ied-sim
+  restart: unless-stopped
+  stop_signal: SIGINT   # simulator hanya menangani SIGINT
+
+services:
+  ied-sim-1:
+    <<: *ied-sim
+    ports: ["10102:102"]
+
+  ied-sim-2:
+    <<: *ied-sim
+    ports: ["10103:102"]

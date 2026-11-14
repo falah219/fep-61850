@@ -10,8 +10,11 @@ Isi:
   (tanpa unduh dari internet; versi, sumber & perubahan di [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)), lalu dipakai oleh:
   - stage `dev`: Rust + clang/bindgen + libIEC61850 (untuk fase 2 dst.)
   - stage `ied-sim`: contoh server `server_example_basic_io` sebagai IED simulasi
-- `docker-compose.dev.yml` — service `dev`, `ied-sim-1`, `ied-sim-2` (jaringan bridge).
-  Kafka & Postgres tidak disertakan.
+- `docker-compose.yml` — jalankan FEP dari image produksi (pola sama dengan FEP IEC 104): `.env`,
+  `network_mode: host`, `docker compose up -d --build`.
+- `docker-compose.dev.yml` — hanya service `dev` (toolchain). Kafka, Postgres, dan simulator tidak disertakan.
+- `docker-compose.sim.yml` — **opsional**: simulator `ied-sim-1`, `ied-sim-2`. Tidak perlu kalau sudah memakai
+  service simulator sendiri (sesuaikan `ip_address`/`port` di seed). `docker-compose.sim20.yml` = 20 simulator.
 
 Model simulator (`server_example_basic_io`):
 - LD `simpleIOGenericIO`, LN `GGIO1`
@@ -22,9 +25,10 @@ Model simulator (`server_example_basic_io`):
 ### Cara uji
 
 ```powershell
-docker compose -f docker-compose.dev.yml up -d --build
-docker compose -f docker-compose.dev.yml ps
-docker compose -f docker-compose.dev.yml logs ied-sim-1
+docker compose -f docker-compose.dev.yml up -d --build      # toolchain saja
+docker compose -f docker-compose.sim.yml up -d --build      # opsional: 2 simulator
+docker compose -f docker-compose.sim.yml ps
+docker compose -f docker-compose.sim.yml logs ied-sim-1
 ```
 
 Cek dari dalam container `dev` (pakai `mms_utility` bawaan libIEC61850):
@@ -40,6 +44,7 @@ Matikan:
 
 ```powershell
 docker compose -f docker-compose.dev.yml down
+docker compose -f docker-compose.sim.yml down
 ```
 
 ## Alat bantu — `tools/iec61850-cli` (commissioning IED)
@@ -226,9 +231,9 @@ File baru: [src/manager.rs](src/manager.rs), [src/handlers.rs](src/handlers.rs),
 
 Uji koneksi serentak (20 simulator, FEP start 10 kali, RCB harus aktif dalam 60 detik):
 ```bash
-docker compose -f docker-compose.dev.yml -f docker-compose.sim20.yml up -d
+docker compose -f docker-compose.sim20.yml up -d --build
 psql ... -f migrations/seed_sim20.sql      # DB dev, RTU 9101..9120
-docker compose -f docker-compose.dev.yml -f docker-compose.sim20.yml exec -w /work dev scripts/uji_konek_serentak.sh 10 90
+docker compose -f docker-compose.dev.yml exec -w /work dev scripts/uji_konek_serentak.sh 10 90
 ```
 - **`RTU_STATUS`**: 1 saat sesi MMS aktif, 0 saat putus/gagal (sekali per rangkaian gagal);
   heartbeat tiap `STATUS_HEARTBEAT_INTERVAL_SECS`; status sistem 1 saat start, 0 saat stop;
@@ -254,8 +259,8 @@ docker compose -f docker-compose.dev.yml -f docker-compose.sim20.yml exec -w /wo
 
 Uji (di kantor, Postgres + Kafka dev):
 1. `cargo run` → `RTU_STATUS` berisi `{"ip_address":"system","id_rtu":0,...,"status":1}` lalu status 1 untuk RTU 9001 & 9002.
-2. `docker compose -f docker-compose.dev.yml stop ied-sim-1` → status 0 RTU 9001 + log `koneksi MMS terputus` di `RTU_LOGGING`.
-3. `docker compose -f docker-compose.dev.yml start ied-sim-1` → status 1 lagi dalam ±`reconnect_time_ms`.
+2. `docker compose -f docker-compose.sim.yml stop ied-sim-1` → status 0 RTU 9001 + log `koneksi MMS terputus` di `RTU_LOGGING`.
+3. `docker compose -f docker-compose.sim.yml start ied-sim-1` → status 1 lagi dalam ±`reconnect_time_ms`.
 4. Kirim ke `RTU_EVENTS`: `{"event":"GI","protocol":"IEC61850","ip_address":"ied-sim-1","id_rtu":9001}` → data `GENERAL_INTERROGATION`.
 5. Kirim `{"event":"STATE","protocol":"IEC61850","ip_address":"ied-sim-1","id_rtu":9001,"state_rtu":false}` → status 0, tidak reconnect.
 6. Kirim event yang sama dengan `"protocol":"IEC104"` → harus diabaikan.

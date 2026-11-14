@@ -1,8 +1,9 @@
 # Uji koneksi serentak: 20 simulator tambahan (ied-sim-101..120, port host 10201..10220).
-# Pakai bersama docker-compose.dev.yml:
-#   docker compose -f docker-compose.dev.yml -f docker-compose.sim20.yml up -d
+# OPSIONAL, terpisah dari docker-compose.dev.yml:
+#   docker compose -f docker-compose.sim20.yml up -d --build
 # Seed DB: migrations/seed_sim20.sql. Skrip uji: scripts/uji_konek_serentak.sh
 x-ied-sim: &ied-sim
+  build: { context: ., dockerfile: docker/Dockerfile.dev, target: ied-sim }
   image: fep61850-ied-sim
   restart: unless-stopped
   stop_signal: SIGINT

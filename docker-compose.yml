@@ -1,0 +1,25 @@
+# Jalankan FEP IEC 61850 dari image produksi (Dockerfile), pola sama dengan docker-compose.yml
+# FEP IEC 104. Konfigurasi dari .env (salin dari .env.example).
+#
+#   docker compose up -d --build
+#   docker compose logs -f fep-iec61850
+#
+# Untuk development (cargo run/test) pakai docker-compose.dev.yml.
+services:
+  fep-iec61850:
+    build: .
+    container_name: iec61850-rust-client
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - RUST_LOG=info
+    # Sama dengan IEC 104: IED, Kafka, dan Postgres dijangkau langsung dari jaringan host.
+    # Simulator dari docker-compose.sim.yml lalu dijangkau lewat 127.0.0.1:10102 / 10103.
+    network_mode: host
+    # Ping ICMP (status per channel) butuh raw socket
+    cap_add:
+      - NET_RAW
+    # Shutdown: tunggu thread IED (SHUTDOWN_WAIT_SECS, default 5) + flush Kafka (5 detik).
+    # Default Docker 10 detik terlalu mepet -> SIGKILL sebelum RTU_STATUS=0 terkirim.
+    stop_grace_period: 30s

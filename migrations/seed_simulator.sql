@@ -1,4 +1,4 @@
--- Data contoh untuk 2 simulator IED (docker-compose.dev.yml). HANYA untuk DB lokal/dev.
+-- Data contoh untuk 2 simulator IED (docker-compose.sim.yml). HANYA untuk DB lokal/dev.
 --
 -- Rentang IOA virtual per jenis titik (usulan):
 --   1001..  status      (FC ST)
