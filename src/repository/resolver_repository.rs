@@ -64,7 +64,7 @@ pub async fn load_groups(c: &Client) -> DbResult<Vec<(String, String)>> {
     let rows = c
         .query(
             "SELECT initial, id_group::TEXT FROM master_data_objects
-             WHERE is_deleted = FALSE AND initial IS NOT NULL AND id_group IS NOT NULL",
+             WHERE protocol = 'IEC61850' AND is_deleted = FALSE AND initial IS NOT NULL AND id_group IS NOT NULL",
             &[],
         )
         .await

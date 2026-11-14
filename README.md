@@ -206,7 +206,7 @@ Aturan yang dipakai (hasil konfirmasi):
 | `action` | `GENERAL_INTERROGATION` > `INTEGRITY` > `DATA_CHANGE` > `QUALITY_CHANGE` > `DATA_UPDATE`; polling: `POLLING` / `INTEGRITY` |
 | `quality` | urutan IEC 104: `INVALID` > `SUBSTITUTED` > `QUESTIONABLE` > `GOOD` |
 | `flag` | detailQual + `SUBSTITUTED`/`TEST`/`OPERATOR_BLOCKED` + `CLOCK_NOT_SYNC`, dipisah `\|`, kosong = `GOOD` |
-| `group` | `master_data_objects.initial` = CDC |
+| `group` | `master_data_objects.initial` = CDC, `protocol = 'IEC61850'` |
 | `general_action` | `master_general_actions` dengan `protocol='IEC61850'`, kunci = action |
 | `time` / `time_desc` | atribut `t` (sudah UTC, **tidak** dikoreksi `TIMEZONE`) / `RTU`; tanpa `t` → waktu server / `SERVER` |
 
