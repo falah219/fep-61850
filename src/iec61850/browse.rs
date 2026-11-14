@@ -44,7 +44,9 @@ pub fn browse(ied: &Ied) -> Result<Vec<BrowseObject>> {
     Ok(out)
 }
 
+/// Satu DO (atau sub-DO) dilihat dari tiap FC: (fc, struktur di FC itu).
 type Parts<'a> = Vec<(&'a str, &'a SpecNode)>;
+type PartsRef<'a> = [(&'a str, &'a SpecNode)];
 
 /// `specs` = struktur LN per FC (child = DO).
 pub fn ln_objects(ln_ref: &str, specs: &[(&str, SpecNode)]) -> Vec<BrowseObject> {
@@ -67,7 +69,7 @@ pub fn ln_objects(ln_ref: &str, specs: &[(&str, SpecNode)]) -> Vec<BrowseObject>
     out
 }
 
-fn walk(r: &str, parts: &Parts, depth: usize) -> Vec<BrowseObject> {
+fn walk(r: &str, parts: &PartsRef, depth: usize) -> Vec<BrowseObject> {
     if let Some(cdc) = classify(parts) {
         return objects(r, parts, Some(cdc));
     }
@@ -83,19 +85,19 @@ fn walk(r: &str, parts: &Parts, depth: usize) -> Vec<BrowseObject> {
     subs.into_iter().flat_map(|(name, p)| walk(&format!("{r}.{name}"), &p, depth + 1)).collect()
 }
 
-fn objects(r: &str, parts: &Parts, cdc: Option<&str>) -> Vec<BrowseObject> {
+fn objects(r: &str, parts: &PartsRef, cdc: Option<&str>) -> Vec<BrowseObject> {
     parts
         .iter()
         .map(|(fc, _)| BrowseObject { object_reference: r.to_string(), fc: fc.to_string(), cdc: cdc.map(String::from) })
         .collect()
 }
 
-fn attr<'a>(parts: &Parts<'a>, fc: &str, name: &str) -> Option<&'a SpecNode> {
+fn attr<'a>(parts: &PartsRef<'a>, fc: &str, name: &str) -> Option<&'a SpecNode> {
     parts.iter().filter(|(f, _)| *f == fc).find_map(|(_, n)| n.children.iter().find(|c| c.name == name))
 }
 
 /// Tebak CDC dari atribut wajib IEC 61850-7-3.
-fn classify(parts: &Parts) -> Option<&'static str> {
+fn classify(parts: &PartsRef) -> Option<&'static str> {
     let oper = attr(parts, "CO", "Oper").is_some();
     if let Some(st) = attr(parts, "ST", "stVal") {
         return match (st.ty, oper) {

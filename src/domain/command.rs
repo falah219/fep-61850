@@ -54,7 +54,7 @@ pub enum CtlVal {
 }
 
 fn whole(cdc: &str, v: f64) -> Result<i32, String> {
-    if v.fract() == 0.0 && v >= f64::from(i32::MIN) && v <= f64::from(i32::MAX) {
+    if v.fract() == 0.0 && (f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&v) {
         Ok(v as i32)
     } else {
         Err(format!("value {cdc} harus bilangan bulat, bukan {v}"))
