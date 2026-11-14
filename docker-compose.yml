@@ -14,6 +14,12 @@ services:
       - .env
     environment:
       - RUST_LOG=info
+    # Log file harian (logs/iec61850.YYYY-MM-DD, LOG_TO_FILE / LOG_MAX_FILES), sama dengan IEC 104.
+    volumes:
+      - ./logs:/app/logs
+    # Root seperti FEP IEC 104 & StatefulSet Kubernetes: folder ./logs yang dibuat Docker milik root,
+    # user non-root image (appuser) tidak bisa menulis ke sana.
+    user: "0:0"
     # Sama dengan IEC 104: IED, Kafka, dan Postgres dijangkau langsung dari jaringan host.
     # Simulator dari docker-compose.sim.yml lalu dijangkau lewat 127.0.0.1:10102 / 10103.
     network_mode: host

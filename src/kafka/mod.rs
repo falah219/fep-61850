@@ -2,6 +2,7 @@
 //! Format JSON identik dengan FEP IEC 104 (`kafka/models.rs`).
 
 pub mod consumer;
+pub mod context;
 pub mod event_handler;
 pub mod handlers;
 pub mod models;

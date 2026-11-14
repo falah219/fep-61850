@@ -50,4 +50,6 @@ data:
   PING_CONCURRENCY: "500"
 
   RUST_LOG: "info"
+  # Di Kubernetes log dibaca dari stdout (kubectl logs); file di dalam pod tidak dipakai
+  LOG_TO_FILE: "false"
   RUST_BACKTRACE: "0"

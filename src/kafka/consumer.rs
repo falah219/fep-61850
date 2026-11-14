@@ -8,6 +8,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
+use super::context::KafkaLogContext;
 use super::models::*;
 use crate::config::KafkaConfig;
 
@@ -41,7 +42,8 @@ pub fn start(config: &KafkaConfig, topics: &[String]) -> Result<mpsc::Receiver<K
     for (k, v) in config.to_consumer_config() {
         cc.set(k, v);
     }
-    let consumer: StreamConsumer = cc.create().map_err(|e| format!("gagal membuat consumer: {e}"))?;
+    let consumer: StreamConsumer<KafkaLogContext> =
+        cc.create_with_context(KafkaLogContext).map_err(|e| format!("gagal membuat consumer: {e}"))?;
     let topic_refs: Vec<&str> = topics.iter().map(String::as_str).collect();
     consumer.subscribe(&topic_refs).map_err(|e| format!("gagal subscribe: {e}"))?;
     info!("Kafka consumer group={} subscribe {:?}", config.group_id, topics);
@@ -60,7 +62,7 @@ pub fn start(config: &KafkaConfig, topics: &[String]) -> Result<mpsc::Receiver<K
     Ok(rx)
 }
 
-async fn run(consumer: StreamConsumer, tx: mpsc::Sender<KafkaEvent>) {
+async fn run(consumer: StreamConsumer<KafkaLogContext>, tx: mpsc::Sender<KafkaEvent>) {
     let mut last_commit = tokio::time::Instant::now();
     loop {
         let message = match consumer.recv().await {

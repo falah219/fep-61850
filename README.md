@@ -147,6 +147,15 @@ docker compose -f docker-compose.dev.yml exec -w /work dev cargo test mapping
 
 Crate utama di root repo (`fep-iec61850`). Alat bantu commissioning ada di `tools/iec61850-cli/`.
 
+Log (`src/logger.rs`, format sama dengan FEP IEC 104):
+- Console selalu; warna hanya kalau stdout terminal (tidak ada kode warna di `docker logs` / `kubectl logs`).
+- File harian `logs/iec61850.YYYY-MM-DD` kalau `LOG_TO_FILE=true` (default). `LOG_MAX_FILES` (default 14)
+  = jumlah file yang disimpan, lebih lama dihapus, 0 = tanpa batas. Di Kubernetes `LOG_TO_FILE=false`.
+  Folder `logs/` tidak bisa ditulis -> hanya console + satu WARN, FEP tetap jalan.
+- Log & error librdkafka (broker tidak terjangkau, SASL gagal, ...) ikut masuk lewat
+  `src/kafka/context.rs` dengan target `librdkafka`.
+- `docker-compose.yml` me-mount `./logs:/app/logs`.
+
 Struktur folder mengikuti `iconics-fep-iec104`:
 
 ```
@@ -170,6 +179,7 @@ src/
     mapper.rs            quality/flag/reason/nilai -> field Kafka
   kafka/
     producer.rs          producer
+    context.rs           log & error librdkafka -> tracing
     consumer.rs          consumer
     models.rs            DataMessage + pesan status/logging/event (salinan bentuk IEC 104)
     event_handler.rs     pembagi event ke handler (abaikan protocol selain IEC61850)

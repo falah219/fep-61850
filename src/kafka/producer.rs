@@ -7,12 +7,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 
+use super::context::KafkaLogContext;
 use super::models::{DataMessage, RtuLoggingMessage, RtuStatusMessage};
 use super::{TOPIC_RTU_LOGGING, TOPIC_RTU_STATUS};
 use crate::config::KafkaConfig;
 
 pub struct KafkaProducer {
-    producer: Arc<BaseProducer>,
+    producer: Arc<BaseProducer<KafkaLogContext>>,
 }
 
 impl KafkaProducer {
@@ -21,7 +22,8 @@ impl KafkaProducer {
         for (k, v) in config.to_producer_config() {
             cc.set(k, v);
         }
-        let producer: BaseProducer = cc.create().map_err(|e| format!("gagal membuat producer: {e}"))?;
+        let producer: BaseProducer<KafkaLogContext> =
+            cc.create_with_context(KafkaLogContext).map_err(|e| format!("gagal membuat producer: {e}"))?;
         let producer = Arc::new(producer);
 
         // Thread poll di belakang, sama seperti FEP IEC 104 (delivery report & callback)
