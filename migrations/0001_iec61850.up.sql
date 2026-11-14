@@ -1,7 +1,7 @@
 -- =====================================================================
 -- USULAN skema FEP IEC 61850 (docs/IEC61850_PLAN.md bagian 3).
 -- HARUS DI-REVIEW TIM sebelum dipakai di lingkungan bersama.
--- Belum diuji ke Postgres mana pun.
+-- Diuji di PostgreSQL 16 kosong bersama stub backend (test-env/sql/00_stub_backend.sql -> 0001).
 --
 -- Konvensi diambil dari model Sequelize iec104s (iconics-configuration-master):
 --   PK `id` uuid, `id_rtu` integer, `protocol`, `longitude_x`/`latitude_y` varchar,
@@ -116,7 +116,7 @@ CREATE TABLE iec61850_report_controls (
 
 -- 3.3 Ekstensi 1:1 master_datapoints untuk titik IEC 61850
 CREATE TABLE master_datapoint_iec61850s (
-    id_master_datapoint    UUID         PRIMARY KEY REFERENCES master_datapoints (id),
+    id_master_datapoint    UUID         PRIMARY KEY REFERENCES master_datapoints (id) ON DELETE CASCADE,
     -- level Data Object, contoh BAY1LD0/XCBR1.Pos
     object_reference       VARCHAR(255) NOT NULL,
     functional_constraint  VARCHAR(2)   NOT NULL CHECK (functional_constraint IN ('ST', 'MX', 'CO', 'SP')),
@@ -136,7 +136,7 @@ CREATE TABLE master_datapoint_iec61850s (
 -- sboTimeout tidak disimpan (pakai nilai IED); batas tunggu CommandTermination = env OPER_TIMEOUT_MS.
 CREATE TABLE iec61850_command_formulas (
     id                   UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-    id_master_datapoint  UUID         NOT NULL REFERENCES master_datapoints (id),
+    id_master_datapoint  UUID         NOT NULL REFERENCES master_datapoints (id) ON DELETE CASCADE,
     type                 VARCHAR(8)   NOT NULL CHECK (type IN ('SPC', 'DPC', 'INC', 'ENC', 'BSC', 'APC')),
     -- NULL = dibaca otomatis dari IED (ctlModel, FC CF)
     ctl_model            VARCHAR(40)
