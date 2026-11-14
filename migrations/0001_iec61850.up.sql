@@ -99,7 +99,7 @@ CREATE TABLE iec61850s (
 -- Kolom NULL = TIDAK ditulis ke IED (pakai konfigurasi dari engineering tool vendor).
 CREATE TABLE iec61850_report_controls (
     id                 BIGSERIAL    PRIMARY KEY,
-    id_rtu             INTEGER      NOT NULL REFERENCES iec61850s (id_rtu),
+    id_rtu             INTEGER      NOT NULL REFERENCES iec61850s (id_rtu) ON UPDATE CASCADE ON DELETE CASCADE,
     -- contoh BAY1LD0/LLN0.BR.brcbST01 (BRCB) atau BAY1LD0/LLN0.RP.urcbMX01 (URCB)
     rcb_reference      VARCHAR(255) NOT NULL CHECK (rcb_reference ~ '\.(BR|RP)\.'),
     dataset_reference  VARCHAR(255),

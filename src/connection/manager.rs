@@ -133,11 +133,13 @@ impl Manager {
         let rtus = repo::load_rtus(&c, None).await.map_err(Database)?;
         let rcbs = repo::load_rcbs(&c, None).await.map_err(Database)?;
         let points = repo::load_points(&c, None).await.map_err(Database)?;
+        let unmapped = repo::load_unmapped_ioas(&c, None).await.map_err(Database)?;
         let mut started = 0;
         for rtu in rtus.into_iter().filter(|r| r.state_rtu) {
             let id = rtu.id_rtu;
             let rtu_rcbs = rcbs.iter().filter(|(r, _, _)| *r == id).map(|(_, n, s)| (n.clone(), s.clone())).collect();
-            self.spawn(rtu, rtu_rcbs, points.rtu_points(id).cloned().collect()).await?;
+            let rtu_unmapped = unmapped.iter().filter(|(r, _)| *r == id).map(|(_, ioa)| *ioa).collect();
+            self.spawn(rtu, rtu_rcbs, points.rtu_points(id).cloned().collect(), rtu_unmapped).await?;
             started += 1;
         }
         Ok(started)
@@ -167,7 +169,8 @@ impl Manager {
         }
         let rcbs = repo::load_rcbs(&c, Some(id)).await.map_err(Database)?.into_iter().map(|(_, n, s)| (n, s)).collect();
         let points = repo::load_points(&c, Some(id)).await.map_err(Database)?.rtu_points(id).cloned().collect();
-        self.spawn(rtu, rcbs, points).await
+        let unmapped = repo::load_unmapped_ioas(&c, Some(id)).await.map_err(Database)?.into_iter().map(|(_, ioa)| ioa).collect();
+        self.spawn(rtu, rcbs, points, unmapped).await
     }
 
     /// Muat ulang semua RTU yang sedang berjalan (mis. mapping berubah tanpa tahu id_rtu-nya).
@@ -197,14 +200,16 @@ impl Manager {
         });
     }
 
-    async fn spawn(&self, rtu: RtuConfig, rcbs: Vec<(String, RcbSettings)>, points: Vec<Point>) -> Result<()> {
+    async fn spawn(&self, rtu: RtuConfig, rcbs: Vec<(String, RcbSettings)>, points: Vec<Point>, unmapped_ioas: Vec<i32>) -> Result<()> {
         let id = rtu.id_rtu;
         // Tunggu thread lama benar-benar selesai (koneksi MMS ditutup) sebelum konek lagi.
         self.stop_locked(id).await;
         if points.is_empty() {
             warn!(id_rtu = id, "tidak ada titik termapping, IED tetap dikoneksikan");
         }
-        let ctx = Arc::new(RtuCtx::new(rtu, rcbs, points, Arc::clone(&self.publisher), Arc::clone(&self.gate)));
+        let mut ctx = RtuCtx::new(rtu, rcbs, points, Arc::clone(&self.publisher), Arc::clone(&self.gate));
+        ctx.unmapped_ioas = unmapped_ioas;
+        let ctx = Arc::new(ctx);
         let thread_ctx = Arc::clone(&ctx);
         // Satu thread OS per IED: API libIEC61850 blocking, tidak boleh jalan di task async.
         self.start_thread(ctx, move |rx| run_ied(thread_ctx, rx))?;

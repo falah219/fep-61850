@@ -87,6 +87,22 @@ pub async fn load_rtus(c: &Client, id: Option<i32>) -> DbResult<Vec<RtuConfig>> 
 }
 
 /// (id_rtu, rcb_reference, settings). Baris dengan trg_ops tidak valid dilewati + warning.
+/// (id_rtu, ioa) datapoint IEC61850 yang tidak punya baris master_datapoint_iec61850s.
+pub async fn load_unmapped_ioas(c: &Client, id: Option<i32>) -> DbResult<Vec<(i32, i32)>> {
+    let rows = c
+        .query(
+            "SELECT md.id_rtu, md.ioa FROM master_datapoints md
+             WHERE md.protocol = 'IEC61850' AND md.is_deleted = FALSE
+               AND ($1::INT IS NULL OR md.id_rtu = $1)
+               AND NOT EXISTS (SELECT 1 FROM master_datapoint_iec61850s x WHERE x.id_master_datapoint = md.id)
+             ORDER BY md.id_rtu, md.ioa",
+            &[&id],
+        )
+        .await
+        .map_err(db_err("query datapoint tanpa mapping"))?;
+    Ok(rows.iter().filter_map(|r| Some((r.try_get(0).ok()?, r.try_get(1).ok()?))).collect())
+}
+
 pub async fn load_rcbs(c: &Client, id: Option<i32>) -> DbResult<Vec<(i32, String, RcbSettings)>> {
     let rows = c
         .query(

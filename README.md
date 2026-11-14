@@ -272,6 +272,8 @@ docker compose -f docker-compose.dev.yml exec -w /work dev scripts/uji_konek_ser
   heartbeat tiap `STATUS_HEARTBEAT_INTERVAL_SECS`; status sistem 1 saat start, 0 saat stop;
   status per channel dari ping ICMP (hanya IP literal, butuh root/CAP_NET_RAW).
 - **`RTU_LOGGING`**: konek, putus, gagal konek, RCB gagal (`[LEVEL] pesan`).
+- Peringatan konfigurasi (WARN, log + `RTU_LOGGING`, sekali per sesi setelah konek): mode REPORT/HYBRID tanpa RCB
+  `enabled`, dan datapoint `protocol = 'IEC61850'` tanpa baris `master_datapoint_iec61850s` (IOA disebut, maks 20).
 - **Consumer** (`GROUP_ID` default `IEC61850_GROUP`), pesan dengan `protocol` ≠ `IEC61850` diabaikan:
 
 | Topik / event | Aksi |

@@ -180,6 +180,8 @@ pub struct RtuCtx {
     /// EntryID report terakhir per RCB (BRCB). Hidup selama RtuCtx, jadi bertahan saat reconnect.
     // ponytail: hilang saat reload/restart FEP; simpan di DB kalau event selama restart FEP juga perlu
     entry_ids: Mutex<HashMap<String, Vec<u8>>>,
+    /// IOA datapoint IEC61850 RTU ini yang tidak punya baris master_datapoint_iec61850s (diisi Manager)
+    pub unmapped_ioas: Vec<i32>,
 }
 
 impl RtuCtx {
@@ -207,6 +209,7 @@ impl RtuCtx {
             osi,
             state,
             entry_ids: Mutex::default(),
+            unmapped_ioas: Vec::new(),
         }
     }
 
@@ -260,6 +263,21 @@ pub(crate) enum End {
     Disconnected,
 }
 
+/// Peringatan konfigurasi, dikirim sekali per sesi (setelah konek): log + RTU_LOGGING.
+pub fn config_warnings(ctx: &RtuCtx, use_report: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    if use_report && ctx.rcbs.is_empty() {
+        out.push(format!("mode {} tapi tidak ada RCB enabled di iec61850_report_controls", ctx.rtu.acquisition_mode));
+    }
+    let n = ctx.unmapped_ioas.len();
+    if n > 0 {
+        let ioas: Vec<String> = ctx.unmapped_ioas.iter().take(20).map(i32::to_string).collect();
+        let more = if n > 20 { ", ..." } else { "" };
+        out.push(format!("{n} datapoint IEC61850 tanpa baris master_datapoint_iec61850s (IOA {}{more})", ioas.join(", ")));
+    }
+    out
+}
+
 /// Satu sesi koneksi.
 pub(crate) fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End> {
     let r = &ctx.rtu;
@@ -289,6 +307,10 @@ pub(crate) fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End> {
 
     let use_report = matches!(r.acquisition_mode.as_str(), "REPORT" | "HYBRID");
     let use_poll = matches!(r.acquisition_mode.as_str(), "POLLING" | "HYBRID");
+    for w in config_warnings(ctx, use_report) {
+        warn!(id_rtu = r.id_rtu, "{w}");
+        producer.send_log(&r.ip_address, r.id_rtu, "WARN", &w);
+    }
 
     // RCB yang gagal (mis. masih di-reserve sesi lama / IED belum siap) dicoba ulang tiap RCB_RETRY_SECS.
     // Koneksi mati di tengah setup -> RCB berikutnya tidak dicoba di koneksi yang sama.
@@ -724,6 +746,22 @@ mod tests {
         assert_eq!(probe_reference(&[], &[rcb("simpleIOGenericIO/LLN0.BR.EventsBRCB01")]).as_deref(), Some("simpleIOGenericIO/LLN0.Mod.stVal"));
         assert_eq!(probe_reference(&[pt("tanpa-slash")], &[]), None);
         assert_eq!(probe_reference(&[], &[]), None);
+    }
+
+    #[tokio::test]
+    async fn peringatan_konfigurasi() {
+        let mgr = crate::connection::testing::manager();
+        let gate = || Arc::new(ConnectGate::new(1));
+        let mut ctx = RtuCtx::new(crate::connection::testing::rtu(1), vec![], vec![], Arc::clone(&mgr.publisher), gate());
+        let w = config_warnings(&ctx, true);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("tidak ada RCB enabled"));
+        assert!(config_warnings(&ctx, false).is_empty()); // POLLING: RCB tidak wajib
+
+        ctx.unmapped_ioas = (1..=25).collect();
+        let w = config_warnings(&ctx, false);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].starts_with("25 datapoint") && w[0].ends_with("20, ...)"));
     }
 
     #[tokio::test]
