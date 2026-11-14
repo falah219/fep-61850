@@ -1,8 +1,9 @@
-//! Fase 3: tampilkan model IED: LD -> LN -> DO (+atribut & FC), dataset, dan RCB.
+//! Tampilkan model IED: LD -> LN -> DO (+atribut & FC), dataset, dan RCB. Hanya membaca.
+//! Dipakai saat commissioning untuk mengisi object_reference, dataset, dan rcb_reference.
 //!
 //! Pemakaian: browse [host] [port]   (default: ied-sim-1 102)
 
-use iec61850_hello::{ffi, Ied};
+use iec61850_cli::{ffi, Ied};
 
 fn main() {
     if let Err(e) = run() {

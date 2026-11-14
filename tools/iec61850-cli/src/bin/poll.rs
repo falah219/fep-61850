@@ -1,4 +1,5 @@
-//! Fase 4: polling dataset berkala + deteksi perubahan (deadband) + integrity.
+//! Baca dataset berkala + deteksi perubahan (deadband) + integrity. Hanya membaca.
+//! Dipakai saat commissioning untuk memastikan dataset terbaca dan nilainya masuk akal.
 //!
 //! Pemakaian: poll [host] [port] [dataset_ref ...]
 //! Default  : ied-sim-1 102 simpleIOGenericIO/LLN0.Measurements simpleIOGenericIO/LLN0.Events2
@@ -10,7 +11,7 @@
 
 use std::time::{Duration, Instant};
 
-use iec61850_hello::{changed, next_deadline, DataSetReader, Ied, Sample};
+use iec61850_cli::{changed, next_deadline, DataSetReader, Ied, Sample};
 
 struct Polled {
     name: String,

@@ -1,0 +1,16 @@
+# Alat bantu commissioning IED (hanya MEMBACA dari IED). Bukan bagian dari image FEP.
+[package]
+name = "iec61850-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "browse"
+path = "src/bin/browse.rs"
+
+[[bin]]
+name = "poll"
+path = "src/bin/poll.rs"
+
+[build-dependencies]
+bindgen = "0.73"

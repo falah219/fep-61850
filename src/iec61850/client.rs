@@ -1,4 +1,4 @@
-//! Pembungkus aman tipis di atas libIEC61850 (berasal dari iec61850-hello fase 2-5).
+//! Pembungkus aman tipis di atas libIEC61850 (awalnya dari sandbox fase 2-5, kini tools/iec61850-cli).
 //!
 //! Semua fungsi di sini BLOCKING (request MMS). Jangan dipanggil langsung dari task async.
 

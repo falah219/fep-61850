@@ -41,111 +41,67 @@ Matikan:
 docker compose -f docker-compose.dev.yml down
 ```
 
-## Fase 2 — `iec61850-hello`: konek + baca satu nilai
+## Alat bantu — `tools/iec61850-cli` (commissioning IED)
 
-Proyek kecil di [iec61850-hello/](iec61850-hello/):
-- `build.rs` — link statis `libiec61850.a` + `libhal.a` dari `/usr/local/lib` (di image `dev`),
-  lalu bindgen dari `wrapper.h` → `bindings.rs` (pola sama dengan FEP IEC 104).
-- `src/ffi.rs` — include hasil bindgen.
-- `src/main.rs` — `IedConnection_connect` → `IedConnection_readFloatValue` (FC `MX`) → close.
+Crate terpisah di [tools/iec61850-cli/](tools/iec61850-cli/) (bukan bagian dari image FEP, tidak ikut
+`docker build`). Isinya dua binary yang **hanya membaca** dari IED (tidak menulis RCB, tidak mengirim
+command). Keduanya berasal dari fase 2–5 (konek, browse, polling); binary latihan (baca satu nilai,
+report, loader mapping) sudah dihapus karena fungsinya sudah ada di FEP.
 
-Image `dev` harus di-build ulang karena Dockerfile diperbaiki (build semua target libIEC61850):
+| Binary | Untuk apa |
+|---|---|
+| `browse` | Tampilkan model IED: LD → LN → DO (+ atribut & FC), dataset + anggotanya, RCB (`.BR.` buffered, `.RP.` unbuffered). Bahan untuk mengisi `object_reference`, `functional_constraint`, `dataset_reference`, `rcb_reference`. |
+| `poll` | Baca dataset berkala (satu request MMS per dataset), tampilkan nilai yang berubah (deadband) + integrity. Untuk memastikan dataset terbaca dan nilainya masuk akal sebelum dimapping. |
 
-```powershell
-docker compose -f docker-compose.dev.yml up -d --build
-docker compose -f docker-compose.dev.yml exec -w /work/iec61850-hello dev cargo run
-# argumen opsional: host port object_reference
-docker compose -f docker-compose.dev.yml exec -w /work/iec61850-hello dev cargo run -- ied-sim-2 102 simpleIOGenericIO/GGIO1.AnIn2.mag.f
-```
-
-Hasil yang diharapkan:
-
-```
-terkoneksi ke ied-sim-1:102
-simpleIOGenericIO/GGIO1.AnIn1.mag.f [MX] = 0.84147096
-```
-
-Jalankan beberapa kali: nilainya berubah karena simulator mengisi gelombang sinus.
-
-## Fase 3 — Browse model IED
-
-Binary baru `browse` di [iec61850-hello/src/bin/browse.rs](iec61850-hello/src/bin/browse.rs).
-Kode FFI bersama dipindah ke [iec61850-hello/src/lib.rs](iec61850-hello/src/lib.rs):
-`Ied` (koneksi, otomatis close/destroy saat keluar scope) + helper `LinkedList` → `Vec<String>`.
-
-Yang ditampilkan per LN: DO beserta atribut & FC-nya (`stVal[ST]`, `ctlModel[CF]`, ...),
-dataset beserta anggotanya, dan RCB (`.BR.` = buffered, `.RP.` = unbuffered).
+Dijalankan dari container `dev` (butuh libIEC61850 di image itu):
 
 ```powershell
-docker compose -f docker-compose.dev.yml exec -w /work/iec61850-hello dev cargo run --bin browse
-docker compose -f docker-compose.dev.yml exec -w /work/iec61850-hello dev cargo run --bin browse -- ied-sim-2 102
+# simulator lokal (default host ied-sim-1 port 102)
+docker compose -f docker-compose.dev.yml exec -w /work/tools/iec61850-cli dev cargo run --bin browse
+docker compose -f docker-compose.dev.yml exec -w /work/tools/iec61850-cli dev cargo run --bin poll
+
+# test & clippy
+docker compose -f docker-compose.dev.yml exec -w /work/tools/iec61850-cli dev cargo test
+docker compose -f docker-compose.dev.yml exec -w /work/tools/iec61850-cli dev cargo clippy --all-targets
 ```
 
-Contoh potongan hasil:
+### Ke IED sungguhan
+
+Container `dev` harus bisa menjangkau IP IED (port 102). Contoh IED `192.168.10.21`, LD `BAY1LD0`:
+
+```powershell
+# 1. Model IED -> simpan ke file untuk bahan mapping
+docker compose -f docker-compose.dev.yml exec -w /work/tools/iec61850-cli dev `
+  cargo run --release --bin browse -- 192.168.10.21 102 > browse-bay1.txt
+
+# 2. Pastikan dataset terbaca (nama dataset dari hasil browse, format LD/LN.Dataset)
+docker compose -f docker-compose.dev.yml exec -w /work/tools/iec61850-cli dev `
+  cargo run --release --bin poll -- 192.168.10.21 102 BAY1LD0/LLN0.dsStatus BAY1LD0/LLN0.dsMeas
+
+# deadband 0.5 untuk measurement, cetak ulang semua nilai tiap 10 detik
+docker compose -f docker-compose.dev.yml exec -e DEADBAND=0.5 -e INTEGRITY_PERIOD_MS=10000 `
+  -w /work/tools/iec61850-cli dev cargo run --release --bin poll -- 192.168.10.21 102 BAY1LD0/LLN0.dsMeas
+```
+
+Contoh potongan hasil `browse`:
 
 ```
-LD  simpleIOGenericIO
-  LN  GGIO1
-      DO  AnIn1        mag[MX] q[MX] t[MX]
-      DO  SPCSO1       stVal[ST] q[ST] Oper[CO] ctlModel[CF] t[ST]
+LD  BAY1LD0
+  LN  XCBR1
+      DO  Pos          stVal[ST] q[ST] t[ST] Oper[CO] ctlModel[CF]
   LN  LLN0
-      DS  Events (tetap, 4 anggota)
-            simpleIOGenericIO/GGIO1.SPCSO1.stVal[ST]
-      RCB simpleIOGenericIO/LLN0.RP.EventsRCB01
+      DS  dsStatus (tetap, 12 anggota)
+            BAY1LD0/XCBR1.Pos.stVal[ST]
+      RCB BAY1LD0/LLN0.BR.brcbST01
 ```
 
-## Fase 4 — Polling dataset
-
-Binary `poll` di [iec61850-hello/src/bin/poll.rs](iec61850-hello/src/bin/poll.rs),
-logika di [iec61850-hello/src/lib.rs](iec61850-hello/src/lib.rs):
-- `DataSetReader`: baca **seluruh dataset dalam satu request MMS** (`IedConnection_readDataSetValues`),
-  `ClientDataSet` dipakai ulang tiap siklus.
-- `changed()`: float → kirim jika selisih dari nilai terakhir yang dikirim > `DEADBAND`;
-  status/quality/struktur → kirim jika berubah.
-- Setiap `INTEGRITY_PERIOD_MS` semua nilai dicetak ulang dengan action `INTEGRITY`.
-- `next_deadline()`: jadwal tetap; kalau siklus terlambat, siklus yang terlewat **dilewati** + warning.
-
-Default dataset: `simpleIOGenericIO/LLN0.Measurements` (AnIn1..4) dan `simpleIOGenericIO/LLN0.Events2` (SPCSO1..4).
-
-```powershell
-# unit test (deadband, perubahan status/quality, jadwal)
-docker compose -f docker-compose.dev.yml exec -w /work/iec61850-hello dev cargo test
-docker compose -f docker-compose.dev.yml exec -w /work/iec61850-hello dev cargo clippy --all-targets
-
-# polling (Ctrl+C untuk berhenti)
-docker compose -f docker-compose.dev.yml exec -w /work/iec61850-hello dev cargo run --bin poll
-
-# uji deadband: nilai sinus hanya -1..1, jadi DEADBAND=5 → hanya muncul saat INTEGRITY
-docker compose -f docker-compose.dev.yml exec -e DEADBAND=5 -e INTEGRITY_PERIOD_MS=10000 -w /work/iec61850-hello dev cargo run --bin poll
-```
-
-## Fase 5 — Report (RCB)
-
-Binary `report` di [iec61850-hello/src/bin/report.rs](iec61850-hello/src/bin/report.rs),
-pembungkus RCB (`Rcb`) + `parse_trg_ops()` + `reason_action()` di [iec61850-hello/src/lib.rs](iec61850-hello/src/lib.rs).
-
-Alur per RCB:
-1. `getRCBValues` → ambil dataset yang terpasang di RCB (tidak diubah) + daftar anggotanya.
-2. `installReportHandler` → callback `on_report` (dibungkus `catch_unwind`, jalan di thread libIEC61850).
-3. `setRCBValues`: `RptEna=true` + `TrgOps` + `IntgPd` (+ `Resv` untuk URCB). Parameter kosong **tidak ditulis**.
-4. GI langsung setelah enable, lalu tiap `GI_INTERVAL_SECS`.
-
-Reason code → `action`: `GENERAL_INTERROGATION` > `INTEGRITY` > `DATA_CHANGE` > `QUALITY_CHANGE` > `DATA_UPDATE`.
-
-Default RCB: `LLN0.BR.EventsBRCB01` (dataset `Events`, SPCSO1..4.stVal) dan `LLN0.BR.Measurements01` (dataset `Measurements`).
-
-```powershell
-docker compose -f docker-compose.dev.yml exec -w /work/iec61850-hello dev cargo test
-docker compose -f docker-compose.dev.yml exec -w /work/iec61850-hello dev cargo run --bin report
-
-# lebih tenang: tanpa data-change, hanya integrity tiap 5 detik + GI
-docker compose -f docker-compose.dev.yml exec -e TRG_OPS=integrity,gi -e INTG_PD_MS=5000 -w /work/iec61850-hello dev cargo run --bin report
-
-# pakai setting TrgOps/IntgPd bawaan IED (tidak menulis apa pun selain RptEna)
-docker compose -f docker-compose.dev.yml exec -e TRG_OPS= -e INTG_PD_MS= -w /work/iec61850-hello dev cargo run --bin report
-```
-
-Catatan: AnIn1..4 berubah tiap 100 ms, jadi dengan `dchg` aktif report measurement akan sangat ramai.
+Perhatian saat ke IED sungguhan:
+- Setiap alat memakai **satu asosiasi MMS**. Banyak IED membatasi jumlah client (sering 2–6);
+  kalau FEP + SCADA lain sudah konek, alat bisa ditolak (`connection rejected`) atau malah merebut slot.
+- `browse` mengirim banyak request (satu per LN/DO). Jalankan sekali dan simpan hasilnya, jangan berulang
+  ke IED yang sedang beroperasi.
+- `poll` membaca dataset dengan `readDataSetValues`; dataset harus sudah ada di IED (dari SCL/engineering tool).
+- Untuk usulan mapping otomatis dari file SCL (ICD/CID/SCD) pakai `scl-import` (fase 10), bukan alat ini.
 
 ## Fase 6 — Migrasi SQL usulan + loader mapping IOA
 
@@ -163,30 +119,27 @@ Catatan: AnIn1..4 berubah tiap 100 ms, jadi dengan `dchg` aktif report measureme
   (perlu `'iec61850s'` ditambahkan ke `sync_telco_status()` di repo backend).
 - [migrations/seed_simulator.sql](migrations/seed_simulator.sql): data contoh untuk `ied-sim-1` (RTU 9001, REPORT)
   dan `ied-sim-2` (RTU 9002, POLLING). Rentang IOA: 1001.. status, 2001.. measurement, 3001.. kontrol.
-- [iec61850-hello/src/mapping.rs](iec61850-hello/src/mapping.rs): `PointMap`
+- [src/iec61850/mapping.rs](src/iec61850/mapping.rs): `PointMap`
   - `by_ioa(id_rtu, ioa)` → untuk command
   - `by_reference(id_rtu, ref, fc)` → untuk data masuk; menerima DO/SDO/DA, prefix terpanjang menang
     (`LD/GGIO1.AnIn1.mag.f` → titik `AnIn1`, sisa `mag.f`)
   - menolak IOA ganda dan `(reference, FC)` ganda per RTU
-- [iec61850-hello/src/bin/mapping.rs](iec61850-hello/src/bin/mapping.rs): muat dari Postgres lalu tampilkan.
+- Loader dari Postgres: `load_points` di [src/repository.rs](src/repository.rs) (dipakai FEP saat start/reload).
 
 ```powershell
 # unit test mapping (tanpa DB)
-docker compose -f docker-compose.dev.yml exec -w /work/iec61850-hello dev cargo test
+docker compose -f docker-compose.dev.yml exec -w /work dev cargo test mapping
 
 # urutan di DB lokal/dev (yang sudah punya tabel master_datapoints):
 #   psql -f migrations/0001_iec61850.up.sql
 #   psql -f migrations/seed_simulator.sql
-docker compose -f docker-compose.dev.yml exec -e POSTGRE_HOST=host.docker.internal -e POSTGRE_PORT=5432 `
-  -e DB_USERNAME=postgres -e DB_PASSWORD=... -e DB_DATABASE=ICONICS_DEV `
-  -w /work/iec61850-hello dev cargo run --bin mapping
 ```
 
 ## Fase 7 — Crate FEP + publish ke Kafka (`RTU_DATAS`, `DATAPOINTS`)
 
 > Ditulis **tanpa uji ke Kafka/Postgres** (keduanya tidak ada di compose). Yang bisa diuji sekarang: `cargo test`, `cargo clippy`.
 
-Crate utama di root repo (`fep-iec61850`). `iec61850-hello/` tetap sebagai sandbox belajar.
+Crate utama di root repo (`fep-iec61850`). Alat bantu commissioning ada di `tools/iec61850-cli/`.
 
 ```
 src/
