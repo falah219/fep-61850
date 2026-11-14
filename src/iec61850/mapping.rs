@@ -5,25 +5,7 @@
 
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Point {
-    pub id_rtu: i32,
-    pub ioa: i32,
-    pub tag: Option<String>,
-    /// Level Data Object, contoh `BAY1LD0/XCBR1.Pos`
-    pub object_reference: String,
-    pub fc: String,
-    pub cdc: String,
-    /// Sudah di-resolve: dari DB, atau default dari CDC
-    pub value_attribute: String,
-    pub ctl_model: Option<String>,
-    pub sbo_timeout_ms: Option<i32>,
-    pub interlock_check: bool,
-    pub synchro_check: bool,
-    pub deadband: Option<f64>,
-    /// Tunggu CommandTermination (ms). None = env OPER_TIMEOUT_MS
-    pub oper_timeout_ms: Option<i32>,
-}
+use crate::domain::Point;
 
 /// Atribut nilai default per CDC (dipakai kalau `value_attribute` NULL).
 pub fn default_value_attribute(cdc: &str) -> Option<&'static str> {

@@ -1,8 +1,7 @@
-//! Connection manager: satu thread per IED, start/stop/reload dari event Kafka,
-//! heartbeat RTU_STATUS, dan ping jaringan (pola sama dengan FEP IEC 104).
+//! Connection manager: satu thread per IED, start/stop/reload dari event Kafka
+//! (padanan `connection/manager.rs` FEP IEC 104). Heartbeat di `health_check.rs`, ping di `network_ping.rs`.
 
 use std::future::Future;
-use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
@@ -11,18 +10,18 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use deadpool_postgres::Pool;
-use futures::{stream, StreamExt};
-use surge_ping::{Client, Config, PingIdentifier, PingSequence};
-use tokio::time::{interval, MissedTickBehavior};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::config::RuntimeConfig;
-use crate::iec61850::acquisition::{run_ied, ConnectGate, Ctl, RtuCtx};
+use crate::error::{Iec61850Error::Database, Result};
+use super::network_ping::PingStatus;
+use super::{run_ied, ConnectGate};
+use crate::domain::{Point, RtuConfig};
+use crate::iec61850::acquisition::{Ctl, RtuCtx};
 use crate::iec61850::client::RcbSettings;
-use crate::iec61850::mapping::Point;
 use crate::kafka::models::safe_ip;
-use crate::publisher::Publisher;
-use crate::repository::{self as repo, RtuConfig};
+use crate::kafka::publisher::Publisher;
+use crate::repository as repo;
 
 /// Batas tunggu thread IED lama berhenti. Thread bisa sedang di panggilan MMS blocking
 /// (connect / read / operate), yang masing-masing dibatasi timeout-nya sendiri.
@@ -32,8 +31,8 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 /// Kunci debounce untuk `reload_all` (id_rtu tidak diketahui).
 const ALL_RTUS: i32 = i32::MIN;
 
-struct Handle {
-    ctx: Arc<RtuCtx>,
+pub(super) struct Handle {
+    pub(super) ctx: Arc<RtuCtx>,
     tx: Sender<Ctl>,
     join: JoinHandle<()>,
 }
@@ -92,18 +91,13 @@ impl Debouncer {
     }
 }
 
-struct PingStatus {
-    last_status: i32,
-    same_count: u32,
-}
-
 pub struct Manager {
     pub pool: Pool,
     pub publisher: Arc<Publisher>,
     pub runtime: RuntimeConfig,
     gate: Arc<ConnectGate>,
-    rtus: DashMap<i32, Handle>,
-    ping: DashMap<i32, PingStatus>,
+    pub(super) rtus: DashMap<i32, Handle>,
+    pub(super) ping: DashMap<i32, PingStatus>,
     /// Serialisasi stop/reload: thread lama selalu berhenti dulu sebelum thread baru dibuat,
     /// jadi tidak pernah ada dua sesi MMS ke IED yang sama (RCB rebutan).
     ops: tokio::sync::Mutex<()>,
@@ -128,17 +122,17 @@ impl Manager {
         }
     }
 
-    async fn client(&self) -> Result<deadpool_postgres::Client, String> {
-        self.pool.get().await.map_err(|e| format!("gagal ambil koneksi DB: {e}"))
+    async fn client(&self) -> Result<deadpool_postgres::Client> {
+        self.pool.get().await.map_err(|e| Database(format!("gagal ambil koneksi DB: {e}")))
     }
 
     /// Muat semua IED aktif (state_rtu = true) lalu jalankan.
-    pub async fn start_all(&self) -> Result<usize, String> {
+    pub async fn start_all(&self) -> Result<usize> {
         let _ops = self.ops.lock().await;
         let c = self.client().await?;
-        let rtus = repo::load_rtus(&c, None).await?;
-        let rcbs = repo::load_rcbs(&c, None).await?;
-        let points = repo::load_points(&c, None).await?;
+        let rtus = repo::load_rtus(&c, None).await.map_err(Database)?;
+        let rcbs = repo::load_rcbs(&c, None).await.map_err(Database)?;
+        let points = repo::load_points(&c, None).await.map_err(Database)?;
         let mut started = 0;
         for rtu in rtus.into_iter().filter(|r| r.state_rtu) {
             let id = rtu.id_rtu;
@@ -151,15 +145,15 @@ impl Manager {
 
     /// Baca ulang satu RTU dari DB lalu restart threadnya.
     /// `state` dari event (STATE) menimpa nilai DB, untuk berjaga-jaga DB belum ter-update.
-    pub async fn reload(&self, id: i32, state: Option<bool>) -> Result<(), String> {
+    pub async fn reload(&self, id: i32, state: Option<bool>) -> Result<()> {
         let _ops = self.ops.lock().await;
         if self.closed.load(Ordering::SeqCst) {
             return Ok(());
         }
         let c = self.client().await?;
-        let Some(mut rtu) = repo::load_rtus(&c, Some(id)).await?.into_iter().next() else {
+        let Some(mut rtu) = repo::load_rtus(&c, Some(id)).await.map_err(Database)?.into_iter().next() else {
             self.stop_locked(id).await;
-            return Err(format!("RTU {id} tidak ada di iec61850s"));
+            return Err(format!("RTU {id} tidak ada di iec61850s").into());
         };
         if let Some(s) = state {
             rtu.state_rtu = s;
@@ -171,8 +165,8 @@ impl Manager {
             info!(id_rtu = id, "RTU nonaktif, tidak dikoneksikan");
             return Ok(());
         }
-        let rcbs = repo::load_rcbs(&c, Some(id)).await?.into_iter().map(|(_, n, s)| (n, s)).collect();
-        let points = repo::load_points(&c, Some(id)).await?.rtu_points(id).cloned().collect();
+        let rcbs = repo::load_rcbs(&c, Some(id)).await.map_err(Database)?.into_iter().map(|(_, n, s)| (n, s)).collect();
+        let points = repo::load_points(&c, Some(id)).await.map_err(Database)?.rtu_points(id).cloned().collect();
         self.spawn(rtu, rcbs, points).await
     }
 
@@ -203,7 +197,7 @@ impl Manager {
         });
     }
 
-    async fn spawn(&self, rtu: RtuConfig, rcbs: Vec<(String, RcbSettings)>, points: Vec<Point>) -> Result<(), String> {
+    async fn spawn(&self, rtu: RtuConfig, rcbs: Vec<(String, RcbSettings)>, points: Vec<Point>) -> Result<()> {
         let id = rtu.id_rtu;
         // Tunggu thread lama benar-benar selesai (koneksi MMS ditutup) sebelum konek lagi.
         self.stop_locked(id).await;
@@ -218,7 +212,7 @@ impl Manager {
         Ok(())
     }
 
-    fn start_thread(&self, ctx: Arc<RtuCtx>, run: impl FnOnce(Receiver<Ctl>) + Send + 'static) -> Result<(), String> {
+    fn start_thread(&self, ctx: Arc<RtuCtx>, run: impl FnOnce(Receiver<Ctl>) + Send + 'static) -> Result<()> {
         let id = ctx.rtu.id_rtu;
         let (tx, rx) = channel();
         let join = std::thread::Builder::new()
@@ -280,94 +274,6 @@ impl Manager {
         self.rtus.iter().find(|e| e.ctx.rtu.ip_address == ip).map(|e| *e.key())
     }
 
-    /// Heartbeat RTU_STATUS tiap STATUS_HEARTBEAT_INTERVAL_SECS (seperti `health_check.rs` IEC 104).
-    pub async fn heartbeat_loop(self: Arc<Self>) {
-        let mut tick = interval(Duration::from_secs(self.runtime.status_heartbeat_interval_secs));
-        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        loop {
-            tick.tick().await;
-            let (mut up, mut down) = (0, 0);
-            for e in self.rtus.iter() {
-                let connected = e.ctx.connected.load(Ordering::SeqCst);
-                if connected { up += 1 } else { down += 1 }
-                self.publisher.producer.send_status(&e.ctx.rtu.ip_address, *e.key(), connected as i32);
-            }
-            info!(total = up + down, connection_up = up, connection_down = down, "ied health check");
-        }
-    }
-
-    /// Ping ICMP semua IED (seperti `network_ping.rs` IEC 104). Butuh CAP_NET_RAW / root.
-    pub async fn ping_loop(self: Arc<Self>) {
-        let client = match Client::new(&Config::default()) {
-            Ok(c) => c,
-            Err(e) => return error!("gagal membuat client ICMP, ping dimatikan: {e}"),
-        };
-        let mut tick = interval(Duration::from_millis(self.runtime.ping_interval_ms));
-        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        loop {
-            tick.tick().await;
-            let targets: Vec<(i32, String, i32)> = self
-                .rtus
-                .iter()
-                .map(|e| (*e.key(), e.ctx.rtu.ip_address.clone(), e.ctx.rtu.channel_number))
-                .collect();
-            stream::iter(targets)
-                .for_each_concurrent(self.runtime.ping_concurrency, |(id, ip, channel)| {
-                    let client = &client;
-                    let me = &self;
-                    async move {
-                        // Hostname (mis. ied-sim-1) tidak di-ping, sama seperti IEC 104.
-                        let Ok(addr) = ip.parse::<IpAddr>() else { return };
-                        let reachable = me.ping_host(client, addr).await;
-                        me.update_ping(id, &ip, channel, reachable);
-                    }
-                })
-                .await;
-        }
-    }
-
-    async fn ping_host(&self, client: &Client, addr: IpAddr) -> bool {
-        let rt = &self.runtime;
-        let mut pinger = client.pinger(addr, PingIdentifier(random_u16())).await;
-        pinger.timeout(Duration::from_millis(rt.ping_timeout_ms));
-        for seq in 0..rt.ping_attempts {
-            if pinger.ping(PingSequence(seq), &[]).await.is_ok() {
-                return true;
-            }
-            tokio::time::sleep(Duration::from_millis(rt.ping_retry_delay_ms)).await;
-        }
-        false
-    }
-
-    fn update_ping(&self, id: i32, ip: &str, channel: i32, reachable: bool) {
-        let status = reachable as i32;
-        let (changed, send) = {
-            let mut e = self.ping.entry(id).or_insert(PingStatus { last_status: -1, same_count: 0 });
-            let changed = e.last_status != status;
-            e.same_count = if changed { 0 } else { e.same_count + 1 };
-            let resend = e.same_count >= self.runtime.ping_resend_every;
-            if resend {
-                e.same_count = 0;
-            }
-            e.last_status = status;
-            (changed, changed || resend)
-        };
-        if changed && reachable {
-            info!(id_rtu = id, endpoint = ip, "ied reachable");
-            // Potong jeda reconnect supaya langsung konek.
-            self.send(id, Ctl::Wake);
-        } else if changed {
-            warn!(id_rtu = id, endpoint = ip, "ied unreachable");
-        }
-        if send {
-            self.publisher.producer.send_status_with_channel(ip, id, channel, status);
-        }
-    }
-}
-
-fn random_u16() -> u16 {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-    ((now.as_secs() ^ u64::from(now.subsec_nanos())) & 0xFFFF) as u16
 }
 
 /// Manager tanpa DB & broker sungguhan (pool lazy, producer ke port tertutup) untuk test.

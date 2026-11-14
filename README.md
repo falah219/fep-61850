@@ -147,19 +147,38 @@ docker compose -f docker-compose.dev.yml exec -w /work dev cargo test mapping
 
 Crate utama di root repo (`fep-iec61850`). Alat bantu commissioning ada di `tools/iec61850-cli/`.
 
+Struktur folder mengikuti `iconics-fep-iec104`:
+
 ```
 src/
-  main.rs            muat konfigurasi DB -> 1 thread per IED -> publish
-  config.rs          env Kafka & DB (nama env sama dengan FEP IEC 104)
-  kafka/mod.rs       DataMessage (salinan persis IEC 104) + producer
-  publisher.rs       padanan message_builder.rs: RTU_DATAS selalu, DATAPOINTS jika ada tag & bukan manual set
-  repository.rs      query iec61850s, report controls, mapping, tag, formula, group, general action
-  resolver/          SALINAN dari FEP IEC 104 (tag, formula, group, general_action)
+  main.rs                muat konfigurasi DB -> 1 thread per IED -> publish; shutdown
+  logger.rs              log console + file harian logs/iec61850.YYYY-MM-DD (format sama dengan IEC 104)
+  error.rs               Iec61850Error: Mms { code, msg } (kode IedClientError), InvalidConfiguration, Database, Other
+  config/                env Kafka, DB, runtime (nama env sama dengan FEP IEC 104)
+  domain/                RtuConfig, Point, PointState, command (CommandAction, CommandReq, ctl_value)
+  connection/
+    manager.rs           start/stop/reload IED, debounce reload, shutdown
+    health_check.rs      heartbeat RTU_STATUS
+    network_ping.rs      ping ICMP per IED
+    reconnection.rs      loop reconnect per IED (run_ied)
+    gate.rs              batas connect serentak (MAX_CONCURRENT_CONNECTS)
   iec61850/
-    client.rs        koneksi (timeout, IP lokal), RCB, dataset, variable spec, readObject
-    mapping.rs       PointMap (fase 6)
-    mapper.rs        quality/flag/reason/nilai -> field Kafka
-    acquisition.rs   report + polling per IED, gabung value/q/t per titik, reconnect
+    client.rs            koneksi (timeout, IP lokal, OSI), RCB, dataset, variable spec, readObject, control
+    acquisition.rs       sesi: report + polling, liveness, command; gabung value/q/t per titik
+    callbacks/report.rs  callback report libIEC61850 (EntryID, waktu entri)
+    mapping.rs           PointMap
+    mapper.rs            quality/flag/reason/nilai -> field Kafka
+  kafka/
+    producer.rs          producer
+    consumer.rs          consumer
+    models.rs            DataMessage + pesan status/logging/event (salinan bentuk IEC 104)
+    event_handler.rs     pembagi event ke handler (abaikan protocol selain IEC61850)
+    handlers/            rtu_event/ (+ command.rs), master_datapoint, master_rtu_event, manual_set, capture_data_change
+    publisher/           message_builder.rs: RTU_DATAS selalu, DATAPOINTS jika ada tag & bukan manual set
+  repository/            pool.rs, rtu_repository.rs (IED, RCB, mapping), resolver_repository.rs (tag, formula, ...)
+  resolver/              SALINAN dari FEP IEC 104 (tag, formula, group, general_action)
+  utils/timestamp.rs     waktu pesan (atribut t -> waktu entri report -> jam server)
+  scl.rs + bin/          scl-import (fase 10)
 ```
 
 Aturan yang dipakai (hasil konfirmasi):

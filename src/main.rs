@@ -7,30 +7,28 @@ use std::time::Duration;
 use tracing::{error, info};
 
 use fep_iec61850::config::{DatabaseConfig, KafkaConfig, RuntimeConfig};
-use fep_iec61850::handlers;
-use fep_iec61850::kafka::{consumer, KafkaProducer};
-use fep_iec61850::manager::Manager;
-use fep_iec61850::publisher::Publisher;
+use fep_iec61850::connection::Manager;
+use fep_iec61850::error::Result;
+use fep_iec61850::kafka::publisher::Publisher;
+use fep_iec61850::kafka::{consumer, event_handler, KafkaProducer};
+use fep_iec61850::logger;
 use fep_iec61850::repository as repo;
 use fep_iec61850::resolver::{FormulaResolver, GeneralActionResolver, GroupResolver, TagResolver};
 
 #[tokio::main]
 async fn main() {
     dotenv::dotenv().ok();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // Guard dipegang sampai akhir main: sisa log ditulis ke file saat di-drop.
+    let log_guard = logger::init_logger();
 
     if let Err(e) = run().await {
         error!("{e}");
+        drop(log_guard);
         std::process::exit(1);
     }
 }
 
-async fn run() -> Result<(), String> {
+async fn run() -> Result<()> {
     info!("FEP IEC 61850 (MMS client) mulai");
     let kafka_cfg = KafkaConfig::from_env()?;
     let runtime = RuntimeConfig::from_env();
@@ -74,7 +72,7 @@ async fn run() -> Result<(), String> {
     let event_mgr = Arc::clone(&mgr);
     let event_task = tokio::spawn(async move {
         while let Some(ev) = events.recv().await {
-            handlers::handle(&event_mgr, ev).await;
+            event_handler::handle(&event_mgr, ev).await;
         }
     });
 

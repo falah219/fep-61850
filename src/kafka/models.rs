@@ -5,6 +5,28 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 pub const PROTOCOL: &str = "IEC61850";
 
+/// Salinan `DataMessage` FEP IEC 104. Urutan & nama field JANGAN diubah.
+#[derive(Serialize)]
+pub struct DataMessage<'a> {
+    pub ip_address: &'a str,
+    pub protocol: &'static str,
+    pub id_rtu: i32,
+    pub action: &'a str,
+    pub tag: &'a str,
+    pub value: &'a serde_json::Value,
+    pub address: i32,
+    pub ca: i32,
+    pub asdu: i32,
+    #[serde(rename = "type")]
+    pub typ: &'a str,
+    pub quality: &'static str,
+    pub flag: &'a str,
+    pub group: &'a str,
+    pub general_action: Option<i32>,
+    pub time: i64,
+    pub time_desc: &'static str,
+}
+
 /// IOA boleh string atau angka (sama seperti IEC 104).
 fn deserialize_ioa<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
     use serde::de::Error;
@@ -151,6 +173,35 @@ pub struct ManualSetEventResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    /// Bentuk JSON harus sama persis dengan test `data_message_keeps_json_shape` di FEP IEC 104.
+    #[test]
+    fn bentuk_json_sama_dengan_iec104() {
+        let value = json!(2);
+        let m = DataMessage {
+            ip_address: "10.0.0.1",
+            protocol: "IEC61850",
+            id_rtu: 7,
+            action: "DATA_CHANGE",
+            tag: "TAG",
+            value: &value,
+            address: 1001,
+            ca: 0,
+            asdu: 0,
+            typ: "DPS",
+            quality: "GOOD",
+            flag: "GOOD",
+            group: "",
+            general_action: Some(3),
+            time: 1,
+            time_desc: "RTU",
+        };
+        assert_eq!(
+            serde_json::to_string(&m).unwrap(),
+            r#"{"ip_address":"10.0.0.1","protocol":"IEC61850","id_rtu":7,"action":"DATA_CHANGE","tag":"TAG","value":2,"address":1001,"ca":0,"asdu":0,"type":"DPS","quality":"GOOD","flag":"GOOD","group":"","general_action":3,"time":1,"time_desc":"RTU"}"#
+        );
+    }
 
     #[test]
     fn status_json_sama_dengan_iec104() {

@@ -28,7 +28,8 @@ for run in $(seq 1 "$RUNS"); do
   # Per id_rtu: waktu konek terakhir yang belum diikuti "RCB ... aktif". Putus / gagal = reset.
   # IED yang konek < WINDOW detik sebelum log berakhir tidak dinilai (belum cukup waktu).
   if ! awk -v window="$WINDOW" '
-    function secs(ts,   h, m, s) { h = substr(ts, 12, 2); m = substr(ts, 15, 2); s = substr(ts, 18, 6); return h * 3600 + m * 60 + s }
+    # Console logger (src/logger.rs) memakai jam lokal "HH:MM:SS.mmm" di kolom pertama.
+    function secs(ts,   h, m, s) { h = substr(ts, 1, 2); m = substr(ts, 4, 2); s = substr(ts, 7, 6); return h * 3600 + m * 60 + s }
     {
       gsub(/\x1b\[[0-9;]*m/, "")
       # Mulai shutdown: log sesudahnya (semua thread dihentikan) tidak dinilai.

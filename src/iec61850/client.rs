@@ -9,29 +9,27 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::error::{Iec61850Error, Result};
 use crate::ffi;
 
-pub fn check(err: ffi::IedClientError) -> Result<(), String> {
+pub fn check(err: ffi::IedClientError) -> Result<()> {
     if err == ffi::IED_ERROR_OK {
         return Ok(());
     }
-    // SAFETY: IedClientError_toString mengembalikan string statis milik library
-    Err(unsafe { CStr::from_ptr(ffi::IedClientError_toString(err)) }
-        .to_string_lossy()
-        .into_owned())
+    Err(Iec61850Error::mms(err))
 }
 
-pub fn cstring(s: &str) -> Result<CString, String> {
-    CString::new(s).map_err(|_| format!("string mengandung NUL: {s:?}"))
+pub fn cstring(s: &str) -> Result<CString> {
+    CString::new(s).map_err(|_| Iec61850Error::InvalidConfiguration(format!("string mengandung NUL: {s:?}")))
 }
 
 /// `"ST"` -> FunctionalConstraint. Error kalau FC tidak dikenal.
-pub fn fc_from_str(fc: &str) -> Result<ffi::FunctionalConstraint, String> {
+pub fn fc_from_str(fc: &str) -> Result<ffi::FunctionalConstraint> {
     let c = cstring(fc)?;
     // SAFETY: c hidup selama pemanggilan
     let v = unsafe { ffi::FunctionalConstraint_fromString(c.as_ptr()) };
     if v == ffi::IEC61850_FC_NONE {
-        return Err(format!("FC tidak dikenal: {fc}"));
+        return Err(Iec61850Error::InvalidConfiguration(format!("FC tidak dikenal: {fc}")));
     }
     Ok(v)
 }
@@ -86,7 +84,7 @@ pub struct OsiParams {
 }
 
 /// `"00 00 00 01"` -> bytes. 1..=`max` byte, tiap byte 2 digit hex dipisah spasi.
-pub fn parse_selector(s: &str, max: usize) -> Result<Vec<u8>, String> {
+pub fn parse_selector(s: &str, max: usize) -> std::result::Result<Vec<u8>, String> {
     let bytes: Option<Vec<u8>> = s
         .split_whitespace()
         .map(|b| {
@@ -143,7 +141,7 @@ macro_rules! selector {
 }
 
 /// Tulis parameter OSI ke koneksi sebelum connect.
-fn apply_osi(con: ffi::IedConnection, o: &OsiParams) -> Result<(), String> {
+fn apply_osi(con: ffi::IedConnection, o: &OsiParams) -> Result<()> {
     let ap = o.ap_title.as_deref().map(cstring).transpose()?;
     let p = selector!(ffi::PSelector, &o.p_selector);
     let s = selector!(ffi::SSelector, &o.s_selector);
@@ -220,8 +218,6 @@ pub struct Ied {
     con: ffi::IedConnection,
     /// Ada request yang gagal karena koneksi mati (getState bisa tetap CONNECTED).
     lost: Cell<bool>,
-    /// Kode error request terakhir (mis. untuk membedakan TIMEOUT)
-    last_err: Cell<ffi::IedClientError>,
     alive: Arc<Liveness>,
 }
 
@@ -230,12 +226,12 @@ pub struct Ied {
 unsafe impl Send for Ied {}
 
 impl Ied {
-    pub fn connect(p: &ConnectParams) -> Result<Self, String> {
+    pub fn connect(p: &ConnectParams) -> Result<Self> {
         let c_host = cstring(p.host)?;
         let c_local = p.local_ip.filter(|ip| *ip != "0.0.0.0" && !ip.is_empty()).map(cstring).transpose()?;
         let mut err = ffi::IED_ERROR_OK;
         // SAFETY: handle baru; kalau konek gagal, Drop tetap memanggil destroy.
-        let ied = Ied { con: unsafe { ffi::IedConnection_create() }, lost: Cell::new(false), last_err: Cell::new(ffi::IED_ERROR_OK), alive: Arc::default() };
+        let ied = Ied { con: unsafe { ffi::IedConnection_create() }, lost: Cell::new(false), alive: Arc::default() };
         // SAFETY: handle valid; setter hanya mengubah konfigurasi lokal
         unsafe {
             ffi::IedConnection_setConnectTimeout(ied.con, p.connect_timeout_ms);
@@ -256,7 +252,6 @@ impl Ied {
 
     /// Catat hasil satu request: sukses / dijawab IED = tanda hidup; error koneksi = sesi mati.
     fn note(&self, err: ffi::IedClientError) {
-        self.last_err.set(err);
         if err == ffi::IED_ERROR_OK || is_server_response(err) {
             self.alive.touch();
         } else if is_connection_error(err) {
@@ -272,11 +267,6 @@ impl Ied {
     /// true kalau ada request yang gagal karena koneksi mati: sesi harus diakhiri.
     pub fn lost(&self) -> bool {
         self.lost.get()
-    }
-
-    /// Kode error request MMS terakhir.
-    pub fn last_error(&self) -> ffi::IedClientError {
-        self.last_err.get()
     }
 
     pub fn mark_lost(&self) {
@@ -298,7 +288,7 @@ impl Ied {
 
     /// Cek hidup: baca `reference` [ST]. Ok juga kalau IED menjawab dengan error (mis. objek tidak
     /// ada) karena itu tetap bukti koneksinya hidup. Err = timeout / koneksi mati.
-    pub fn probe(&self, reference: &CStr) -> Result<(), String> {
+    pub fn probe(&self, reference: &CStr) -> Result<()> {
         let mut err = ffi::IED_ERROR_OK;
         // SAFETY: koneksi valid, reference hidup selama pemanggilan; nilai milik kita (dibuang)
         let v = unsafe { ffi::IedConnection_readObject(self.con, &mut err, reference.as_ptr(), ffi::IEC61850_FC_ST) };
@@ -311,7 +301,7 @@ impl Ied {
     }
 
     /// Anggota dataset, contoh `LD/GGIO1.AnIn1.mag.f[MX]`. `ds_ref` contoh `LD/LLN0.Events`.
-    pub fn dataset_directory(&self, ds_ref: &str) -> Result<Vec<String>, String> {
+    pub fn dataset_directory(&self, ds_ref: &str) -> Result<Vec<String>> {
         let c = cstring(ds_ref)?;
         let mut err = ffi::IED_ERROR_OK;
         // SAFETY: koneksi valid, c hidup selama pemanggilan; null = tidak perlu flag deletable
@@ -323,7 +313,7 @@ impl Ied {
     }
 
     /// Tipe (nama child) dari sebuah reference + FC. Dipakai untuk mengambil `stVal`/`q`/`t` dari struktur.
-    pub fn variable_spec(&self, reference: &str, fc: ffi::FunctionalConstraint) -> Result<Spec, String> {
+    pub fn variable_spec(&self, reference: &str, fc: ffi::FunctionalConstraint) -> Result<Spec> {
         let c = cstring(reference)?;
         let mut err = ffi::IED_ERROR_OK;
         // SAFETY: koneksi valid, c hidup selama pemanggilan
@@ -332,13 +322,13 @@ impl Ied {
         self.note(err);
         check(err)?;
         if spec.0.is_null() {
-            return Err(format!("spec {reference} kosong"));
+            return Err(format!("spec {reference} kosong").into());
         }
         Ok(spec)
     }
 
     /// Baca satu objek (LN+FC, DO, atau DA) dalam satu request MMS.
-    pub fn read_object(&self, reference: &CString, fc: ffi::FunctionalConstraint) -> Result<OwnedValue, String> {
+    pub fn read_object(&self, reference: &CString, fc: ffi::FunctionalConstraint) -> Result<OwnedValue> {
         let mut err = ffi::IED_ERROR_OK;
         // SAFETY: koneksi valid, reference hidup selama pemanggilan; nilai jadi milik kita
         let v = unsafe { ffi::IedConnection_readObject(self.con, &mut err, reference.as_ptr(), fc) };
@@ -512,7 +502,7 @@ pub fn plan_enable(cur: &RcbCurrent, want: &RcbSettings, resv_tms_secs: i16) -> 
 }
 
 impl Rcb {
-    pub fn read(ied: &Ied, reference: &str) -> Result<Self, String> {
+    pub fn read(ied: &Ied, reference: &str) -> Result<Self> {
         let c_ref = cstring(reference)?;
         let mut err = ffi::IED_ERROR_OK;
         // SAFETY: koneksi valid, c_ref hidup; null = buat objek RCB baru
@@ -579,7 +569,7 @@ impl Rcb {
     }
 
     /// Tulis EntryID (BRCB, sebelum enable): IED mengirim entri buffer SETELAH entri ini.
-    pub fn write_entry_id(&self, ied: &Ied, entry_id: &[u8]) -> Result<(), String> {
+    pub fn write_entry_id(&self, ied: &Ied, entry_id: &[u8]) -> Result<()> {
         let v = OwnedValue::octet_string(entry_id);
         if v.as_ptr().is_null() {
             return Err("gagal membuat nilai EntryID".into());
@@ -589,7 +579,7 @@ impl Rcb {
         self.write(ied, ffi::RCB_ELEMENT_ENTRY_ID)
     }
 
-    pub fn enable(&self, ied: &Ied, s: &RcbSettings, resv_tms_secs: i16) -> Result<(), String> {
+    pub fn enable(&self, ied: &Ied, s: &RcbSettings, resv_tms_secs: i16) -> Result<()> {
         let plan = plan_enable(&self.current(), s, resv_tms_secs);
         let mut mask = ffi::RCB_ELEMENT_RPT_ENA;
         // MMS memakai `$` antara LN dan nama dataset: LD/LLN0$Events
@@ -630,13 +620,13 @@ impl Rcb {
         self.write(ied, mask)
     }
 
-    pub fn gi(&self, ied: &Ied) -> Result<(), String> {
+    pub fn gi(&self, ied: &Ied) -> Result<()> {
         // SAFETY: rcb valid
         unsafe { ffi::ClientReportControlBlock_setGI(self.rcb, true) };
         self.write(ied, ffi::RCB_ELEMENT_GI)
     }
 
-    fn write(&self, ied: &Ied, mask: u32) -> Result<(), String> {
+    fn write(&self, ied: &Ied, mask: u32) -> Result<()> {
         let mut err = ffi::IED_ERROR_OK;
         // SAFETY: koneksi dan rcb valid; true = satu request
         unsafe { ffi::IedConnection_setRCBValues(ied.raw(), &mut err, self.rcb, mask, true) };
@@ -683,12 +673,12 @@ unsafe extern "C" fn on_termination(param: *mut c_void, ctl: ffi::ControlObjectC
 
 impl Control {
     /// Membuat objek kontrol. Membaca ctlModel & tipe ctlVal dari IED (request MMS).
-    pub fn create(ied: &Ied, reference: &str) -> Result<Self, String> {
+    pub fn create(ied: &Ied, reference: &str) -> Result<Self> {
         let c = cstring(reference)?;
         // SAFETY: koneksi valid, c hidup selama pemanggilan
         let ctl = unsafe { ffi::ControlObjectClient_create(c.as_ptr(), ied.raw()) };
         if ctl.is_null() {
-            return Err(format!("objek kontrol {reference} tidak ditemukan / tidak bisa dibaca"));
+            return Err(format!("objek kontrol {reference} tidak ditemukan / tidak bisa dibaca").into());
         }
         let me = Self { ctl, termination: Box::default() };
         let param = &*me.termination as *const Termination as *mut c_void;
@@ -709,7 +699,7 @@ impl Control {
     }
 
     /// orIdent + orCat (remote-control), interlock & synchro check.
-    pub fn prepare(&self, or_ident: &str, interlock: bool, synchro: bool) -> Result<(), String> {
+    pub fn prepare(&self, or_ident: &str, interlock: bool, synchro: bool) -> Result<()> {
         let ident = cstring(or_ident)?;
         // SAFETY: ctl valid; orIdent disalin library
         unsafe {
@@ -721,7 +711,7 @@ impl Control {
     }
 
     /// SBO normal: select; SBO enhanced: select-with-value; model direct: tidak ada yang perlu dipilih.
-    pub fn select(&self, value: &OwnedValue) -> Result<(), String> {
+    pub fn select(&self, value: &OwnedValue) -> Result<()> {
         // SAFETY: ctl & value valid; value tidak diambil alih library
         let ok = match self.control_model() {
             ffi::CONTROL_MODEL_SBO_NORMAL => unsafe { ffi::ControlObjectClient_select(self.ctl) },
@@ -733,7 +723,7 @@ impl Control {
     }
 
     /// Operate. Enhanced security: tunggu CommandTermination (maks `wait`).
-    pub fn operate(&self, value: &OwnedValue, wait: std::time::Duration) -> Result<(), String> {
+    pub fn operate(&self, value: &OwnedValue, wait: std::time::Duration) -> Result<()> {
         if let Ok(mut r) = self.termination.result.lock() {
             *r = None;
         }
@@ -757,7 +747,7 @@ impl Control {
         }
     }
 
-    pub fn cancel(&self) -> Result<(), String> {
+    pub fn cancel(&self) -> Result<()> {
         // SAFETY: ctl valid
         if unsafe { ffi::ControlObjectClient_cancel(self.ctl) } {
             Ok(())
@@ -772,13 +762,20 @@ impl Control {
         is_connection_error(unsafe { ffi::ControlObjectClient_getLastError(self.ctl) })
     }
 
-    fn error(&self, what: &str) -> String {
+    /// Error perintah terakhir. Ada kode IedClientError -> `Mms` (bisa dicek timeout/putus);
+    /// ditolak IED tanpa kode (LastApplError saja) -> `Other`.
+    fn error(&self, what: &str) -> Iec61850Error {
         // SAFETY: ctl valid
         let (err, appl) = unsafe {
             (ffi::ControlObjectClient_getLastError(self.ctl), ffi::ControlObjectClient_getLastApplError(self.ctl))
         };
-        let base = check(err).err().unwrap_or_else(|| "ditolak IED".into());
-        format!("{what} gagal: {base} (LastApplError error={}, addCause={})", appl.error, appl.addCause)
+        let base = check(err).err().map_or_else(|| "ditolak IED".to_string(), |e| e.to_string());
+        let msg = format!("{what} gagal: {base} (LastApplError error={}, addCause={})", appl.error, appl.addCause);
+        if err == ffi::IED_ERROR_OK {
+            Iec61850Error::Other(msg)
+        } else {
+            Iec61850Error::Mms { code: err, msg }
+        }
     }
 }
 
@@ -802,7 +799,7 @@ pub fn control_model_from_str(s: &str) -> Option<ffi::ControlModel> {
 }
 
 /// Salin LinkedList<char*> ke Vec<String>, lalu bebaskan list-nya.
-fn take_strings(list: ffi::LinkedList, err: ffi::IedClientError) -> Result<Vec<String>, String> {
+fn take_strings(list: ffi::LinkedList, err: ffi::IedClientError) -> Result<Vec<String>> {
     let mut out = Vec::new();
     if !list.is_null() {
         // SAFETY: list milik kita; elemen pertama kepala kosong; data = char* malloc.

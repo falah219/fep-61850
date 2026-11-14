@@ -1,69 +1,16 @@
-//! Query konfigurasi dari Postgres (skema: migrations/0001_iec61850.up.sql).
+//! Query konfigurasi IED, RCB, dan mapping titik (padanan `repository/rtu_repository.rs` FEP IEC 104).
+//! Skema: migrations/0001_iec61850.up.sql.
 
 use std::env;
 
-use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
-use tokio_postgres::{Client, NoTls, Row};
+use tokio_postgres::{Client, Row};
 use tracing::warn;
 
-use crate::config::DatabaseConfig;
-
+use super::{db_err, DbResult};
+use crate::domain::{Point, RtuConfig};
 use crate::iec61850::client::{OsiSide, RcbSettings};
 use crate::iec61850::mapper::parse_trg_ops;
-use crate::iec61850::mapping::{default_value_attribute, Point, PointMap};
-
-type DbResult<T> = Result<T, String>;
-
-/// Pool koneksi Postgres (sama seperti `repository/pool.rs` FEP IEC 104).
-pub fn create_pool(db: &DatabaseConfig) -> DbResult<Pool> {
-    let mut cfg = Config::new();
-    cfg.host = Some(db.host.clone());
-    cfg.port = Some(db.port);
-    cfg.user = Some(db.user.clone());
-    cfg.password = Some(db.password.clone());
-    cfg.dbname = Some(db.dbname.clone());
-    cfg.manager = Some(ManagerConfig { recycling_method: RecyclingMethod::Fast });
-    cfg.create_pool(Some(Runtime::Tokio1), NoTls).map_err(|e| format!("gagal membuat pool DB: {e}"))
-}
-
-fn db_err(what: &str) -> impl Fn(tokio_postgres::Error) -> String + '_ {
-    move |e| format!("{what}: {e}")
-}
-
-#[derive(Debug, Clone)]
-pub struct RtuConfig {
-    pub id_rtu: i32,
-    pub state_rtu: bool,
-    pub channel_number: i32,
-    pub ip_address: String,
-    pub port: i32,
-    pub local_ip_address: String,
-    pub acquisition_mode: String,
-    pub poll_interval_ms: u64,
-    pub general_interrogation_interval: u64,
-    pub connect_timeout_ms: u32,
-    pub request_timeout_ms: u32,
-    pub reconnect_time_ms: u64,
-    /// 0 = tanpa batas
-    pub reconnect_retry_count: u32,
-    /// Tidak ada di DB: kirim ulang semua nilai polling tiap periode ini (env INTEGRITY_PERIOD_MS).
-    pub integrity_period_ms: u64,
-    /// Tidak ada di DB: jeda coba ulang RCB yang gagal di-setup (env RCB_RETRY_SECS).
-    pub rcb_retry_secs: u64,
-    /// Tidak ada di DB: ResvTms BRCB (env BRCB_RESV_TMS_SECS)
-    pub brcb_resv_tms_secs: i16,
-    /// Tidak ada di DB: tanpa tanda hidup selama ini -> cek LLN0.Mod.stVal (env LIVENESS_SECS)
-    pub liveness_secs: u64,
-    /// Tidak ada di DB: default tunggu CommandTermination (env OPER_TIMEOUT_MS)
-    pub oper_timeout_ms: u64,
-    /// Tidak ada di DB: env OSI_PARAMS_SIDE
-    pub osi_side: OsiSide,
-    pub ap_title: String,
-    pub ae_qualifier: i32,
-    pub p_selector: String,
-    pub s_selector: String,
-    pub t_selector: String,
-}
+use crate::iec61850::mapping::{default_value_attribute, PointMap};
 
 fn osi_side_from_env() -> OsiSide {
     let v = env::var("OSI_PARAMS_SIDE").unwrap_or_default();
@@ -229,96 +176,6 @@ pub async fn load_points(c: &Client, id: Option<i32>) -> DbResult<PointMap> {
         }
     }
     Ok(map)
-}
-
-// ---- Query resolver: sama dengan FEP IEC 104, tetapi protocol = 'IEC61850' ----
-
-pub async fn load_tags(c: &Client) -> DbResult<Vec<(i32, i32, String)>> {
-    let rows = c
-        .query(
-            "SELECT id_rtu, ioa, tag FROM master_datapoints
-             WHERE is_deleted = FALSE AND protocol = 'IEC61850' AND tag IS NOT NULL AND tag != ''",
-            &[],
-        )
-        .await
-        .map_err(db_err("query tag"))?;
-    Ok(rows
-        .iter()
-        .filter_map(|r| Some((r.try_get(0).ok()?, r.try_get(1).ok()?, r.try_get(2).ok()?)))
-        .collect())
-}
-
-pub async fn load_manual_sets(c: &Client) -> DbResult<Vec<String>> {
-    let rows = c
-        .query(
-            "SELECT md.tag FROM manual_sets ms JOIN master_datapoints md ON md.id = ms.id_master_datapoint
-             WHERE ms.is_manual_set = TRUE AND ms.is_deleted = FALSE AND md.is_deleted = FALSE
-               AND md.protocol = 'IEC61850' AND md.tag IS NOT NULL",
-            &[],
-        )
-        .await
-        .map_err(db_err("query manual set"))?;
-    Ok(rows.iter().filter_map(|r| r.try_get(0).ok()).collect())
-}
-
-pub async fn load_formulas(c: &Client) -> DbResult<Vec<(String, String, f64, f64, f64, f64)>> {
-    let rows = c
-        .query(
-            "SELECT md.tag, COALESCE(f.scalling_type, 'No Scale'), COALESCE(f.scale, 1.0), COALESCE(f.offset, 0.0),
-                    COALESCE(f.span_low, 0.0), COALESCE(f.span_high, 100.0)
-             FROM master_datapoints md JOIN formulas f ON md.id = f.id_datapoint
-             WHERE md.is_deleted = FALSE AND f.is_deleted = FALSE AND md.protocol = 'IEC61850'
-               AND md.tag IS NOT NULL AND md.tag != ''",
-            &[],
-        )
-        .await
-        .map_err(db_err("query formula"))?;
-    Ok(rows
-        .iter()
-        .filter_map(|r| {
-            Some((
-                r.try_get(0).ok()?,
-                r.try_get(1).ok()?,
-                r.try_get(2).ok()?,
-                r.try_get(3).ok()?,
-                r.try_get(4).ok()?,
-                r.try_get(5).ok()?,
-            ))
-        })
-        .collect())
-}
-
-pub async fn load_groups(c: &Client) -> DbResult<Vec<(String, String)>> {
-    let rows = c
-        .query(
-            "SELECT initial, id_group::TEXT FROM master_data_objects
-             WHERE is_deleted = FALSE AND initial IS NOT NULL AND id_group IS NOT NULL",
-            &[],
-        )
-        .await
-        .map_err(db_err("query group"))?;
-    Ok(rows.iter().filter_map(|r| Some((r.try_get(0).ok()?, r.try_get(1).ok()?))).collect())
-}
-
-pub async fn load_general_actions(c: &Client) -> DbResult<Vec<(String, i32)>> {
-    let rows = c
-        .query(
-            "SELECT name_action, code FROM master_general_actions
-             WHERE protocol = 'IEC61850' AND is_deleted = FALSE AND name_action IS NOT NULL AND name_action != ''",
-            &[],
-        )
-        .await
-        .map_err(db_err("query general action"))?;
-    Ok(rows.iter().filter_map(|r| Some((r.try_get(0).ok()?, r.try_get(1).ok()?))).collect())
-}
-
-/// id_rtu pemilik sebuah master_datapoints.id (uuid dalam bentuk teks).
-pub async fn rtu_of_datapoint(c: &Client, id_master_datapoint: &str) -> DbResult<Option<i32>> {
-    let row = c
-        .query_opt("SELECT id_rtu FROM master_datapoints WHERE id::TEXT = $1", &[&id_master_datapoint])
-        .await
-        .map_err(db_err("query id_rtu datapoint"))?;
-    Ok(row.and_then(|r| r.try_get(0).ok()))
 }
 
 #[cfg(test)]
