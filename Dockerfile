@@ -5,13 +5,13 @@ FROM rust:slim-bookworm AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git ca-certificates build-essential cmake clang libclang-dev pkg-config libssl-dev libsasl2-dev \
+        ca-certificates build-essential cmake clang libclang-dev pkg-config libssl-dev libsasl2-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# libIEC61850 di-pin ke tag rilis (setara pin commit lib60870 di FEP IEC 104), link statis.
-ARG LIBIEC61850_TAG=v1.6.2.1
-RUN git clone --depth 1 -b ${LIBIEC61850_TAG} https://github.com/mz-automation/libiec61850.git /tmp/libiec61850 \
-    && cmake -S /tmp/libiec61850 -B /tmp/libiec61850/build -DCMAKE_BUILD_TYPE=Release \
+# libIEC61850 v1.6.2.1 dari source di repo (native/libiec61850, lihat THIRD_PARTY_NOTICES.md),
+# tanpa unduh dari internet. Link statis; build.rs memakai hasil install di /usr/local.
+COPY native/libiec61850 /tmp/libiec61850
+RUN cmake -S /tmp/libiec61850 -B /tmp/libiec61850/build -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_EXAMPLES=OFF -DBUILD_TESTS=OFF -DCMAKE_INSTALL_PREFIX=/usr/local \
     && cmake --build /tmp/libiec61850/build -j"$(nproc)" \
     && cmake --install /tmp/libiec61850/build \

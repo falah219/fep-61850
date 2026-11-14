@@ -6,7 +6,8 @@ Acuan arsitektur: repo `iconics-fep-iec104`.
 ## Fase 1 — Lingkungan dev + simulator IED
 
 Isi:
-- `docker/Dockerfile.dev` — build **libIEC61850 v1.6.2.1** sekali, lalu dipakai oleh:
+- `docker/Dockerfile.dev` — build **libIEC61850 v1.6.2.1** sekali dari source di [native/libiec61850/](native/libiec61850/)
+  (tanpa unduh dari internet; versi, sumber & perubahan di [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)), lalu dipakai oleh:
   - stage `dev`: Rust + clang/bindgen + libIEC61850 (untuk fase 2 dst.)
   - stage `ied-sim`: contoh server `server_example_basic_io` sebagai IED simulasi
 - `docker-compose.dev.yml` — service `dev`, `ied-sim-1`, `ied-sim-2` (jaringan bridge).

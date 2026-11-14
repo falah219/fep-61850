@@ -3,16 +3,14 @@
 #   dev         : toolchain Rust untuk build FEP (fase 2+)
 #   ied-sim     : image kecil berisi simulator IED
 
-ARG LIBIEC61850_TAG=v1.6.2.1
-
 FROM debian:bookworm-slim AS libiec61850
-ARG LIBIEC61850_TAG
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git ca-certificates build-essential cmake \
+        build-essential cmake \
     && rm -rf /var/lib/apt/lists/*
-# Pin ke tag rilis stabil (setara pin commit lib60870 di FEP IEC 104)
-RUN git clone --depth 1 -b ${LIBIEC61850_TAG} https://github.com/mz-automation/libiec61850.git /src \
-    && cmake -S /src -B /src/build -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=ON -DBUILD_TESTS=OFF -DCMAKE_INSTALL_PREFIX=/usr/local \
+# libIEC61850 v1.6.2.1 dari source di repo (native/libiec61850, lihat THIRD_PARTY_NOTICES.md),
+# tanpa unduh dari internet. Contoh yang ikut hanya simulator (basic_io) + mms_utility.
+COPY native/libiec61850 /src
+RUN cmake -S /src -B /src/build -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=ON -DBUILD_TESTS=OFF -DCMAKE_INSTALL_PREFIX=/usr/local \
     && cmake --build /src/build -j"$(nproc)" \
     && cmake --install /src/build \
     && cp /src/build/examples/server_example_basic_io/server_example_basic_io /usr/local/bin/ied-sim \
