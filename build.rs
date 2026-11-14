@@ -13,6 +13,9 @@ fn main() {
     println!("cargo:rustc-link-lib=m");
     println!("cargo:rustc-link-lib=rt");
     println!("cargo:rerun-if-changed=wrapper.h");
+    // Link ulang saat library di-build ulang (path tetap /usr/local, tidak diatur lewat env).
+    println!("cargo:rerun-if-changed=/usr/local/lib/libiec61850.a");
+    println!("cargo:rerun-if-changed=/usr/local/lib/libhal.a");
 
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")
