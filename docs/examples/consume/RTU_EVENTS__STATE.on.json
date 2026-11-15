@@ -1,0 +1,6 @@
+{
+  "event": "STATE",
+  "protocol": "IEC61850",
+  "id_rtu": 9001,
+  "state_rtu": true
+}

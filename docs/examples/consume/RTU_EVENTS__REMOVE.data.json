@@ -1,0 +1,7 @@
+{
+  "event": "REMOVE",
+  "protocol": "IEC61850",
+  "data": {
+    "id_rtu": 9001
+  }
+}

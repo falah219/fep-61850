@@ -1,0 +1,20 @@
+{
+  "key": "browse-9001-02",
+  "id_rtu": 9001,
+  "status": "SUCCESS",
+  "message": "4 objek",
+  "objects": [
+    {
+      "object_reference": "simpleIOGenericIO/GGIO1.SPCSO1",
+      "fc": "ST",
+      "cdc": "SPC"
+    },
+    {
+      "object_reference": "simpleIOGenericIO/GGIO1.SPCSO1",
+      "fc": "CO",
+      "cdc": "SPC"
+    }
+  ],
+  "part": 2,
+  "total_parts": 2
+}

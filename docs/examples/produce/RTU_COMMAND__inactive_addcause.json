@@ -1,0 +1,14 @@
+{
+  "hostname": "10.10.1.21",
+  "port": 102,
+  "protocol": "IEC61850",
+  "tag": "BAY1_CB_3005",
+  "command_type": "DPC",
+  "command_value": 2,
+  "qualifier": 0,
+  "event": "OPERATE",
+  "status": "inactive",
+  "msg": "OPERATE failed: operate gagal: ditolak IED (LastApplError error=1, addCause=10) - RTU status is Inactive",
+  "key": "cmd-20261115-0001",
+  "time": 1794711845123
+}

@@ -1,0 +1,7 @@
+{
+  "ip_address": "10.10.1.21",
+  "protocol": "IEC61850",
+  "id_rtu": 9001,
+  "logging": "[INFO] terkoneksi MMS 10.10.1.21:102 mode REPORT",
+  "time": 1794711845123
+}

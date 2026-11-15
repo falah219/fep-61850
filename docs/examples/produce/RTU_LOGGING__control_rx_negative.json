@@ -1,0 +1,7 @@
+{
+  "ip_address": "10.10.1.21",
+  "protocol": "IEC61850",
+  "id_rtu": 9001,
+  "logging": "2026-11-15T03:04:08.000000Z CONTROL RX - OPERATE BAY1LD0/CSWI1.Pos negative AddCause=blocked-by-interlocking",
+  "time": 1794711845123
+}

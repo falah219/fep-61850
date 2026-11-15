@@ -1,0 +1,13 @@
+{
+  "event": "COMMAND",
+  "protocol": "IEC61850",
+  "ip_address": "10.10.1.21",
+  "port": 102,
+  "id_rtu": 9001,
+  "action": "OPERATE_RTU",
+  "tag": "BAY1_CB_3005",
+  "type": "DPC",
+  "value": "2",
+  "key": "cmd-20261115-0002",
+  "user": "operator1"
+}

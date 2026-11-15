@@ -22,7 +22,7 @@ pub enum KafkaEvent {
     ManualSet(ManualSetEventMessage),
 }
 
-fn parse(topic: &str, payload: &str) -> Result<Option<KafkaEvent>, String> {
+pub(crate) fn parse(topic: &str, payload: &str) -> Result<Option<KafkaEvent>, String> {
     let e = |err: serde_json::Error| format!("{topic} parse error: {err}");
     Ok(Some(match topic {
         "RTU_EVENTS" => KafkaEvent::RtuEvent(Box::new(serde_json::from_str(payload).map_err(e)?)),

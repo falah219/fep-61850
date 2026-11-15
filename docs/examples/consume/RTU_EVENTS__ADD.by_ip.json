@@ -1,0 +1,5 @@
+{
+  "event": "ADD",
+  "protocol": "IEC61850",
+  "ip_address": "10.10.1.21"
+}

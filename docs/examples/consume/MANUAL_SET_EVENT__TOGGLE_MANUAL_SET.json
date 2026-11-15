@@ -1,0 +1,8 @@
+{
+  "event": "TOGGLE_MANUAL_SET",
+  "protocol": "IEC61850",
+  "tag": "BAY1_ANIN1_2001",
+  "manual_set": true,
+  "id_rtu": 9001,
+  "user": "operator1"
+}

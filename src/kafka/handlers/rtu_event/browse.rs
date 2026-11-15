@@ -57,14 +57,14 @@ pub fn submit(mgr: &Arc<Manager>, m: RtuEventMessage) -> impl Future<Output = ()
             Err(e) => Err(e),
         };
         let topic_key = if key.is_empty() { "unknown" } else { key.as_str() };
-        for msg in responses(&key, id, &result) {
+        for msg in responses(&key, id, &result, MAX_PART_BYTES) {
             mgr.publisher.producer.send_raw(TOPIC_BROWSE_RESPONSE, topic_key, &msg);
         }
     }
 }
 
-/// Pesan respons (satu atau lebih bagian) sebagai JSON.
-fn responses(key: &str, id_rtu: Option<i32>, result: &Result<Vec<BrowseObject>, String>) -> Vec<Value> {
+/// Pesan respons (satu atau lebih bagian, tiap bagian <= `limit` byte objek) sebagai JSON.
+fn responses(key: &str, id_rtu: Option<i32>, result: &Result<Vec<BrowseObject>, String>, limit: usize) -> Vec<Value> {
     let (status, message, objects): (_, String, &[BrowseObject]) = match result {
         Ok(o) => ("SUCCESS", format!("{} objek", o.len()), o),
         Err(e) => {
@@ -72,7 +72,7 @@ fn responses(key: &str, id_rtu: Option<i32>, result: &Result<Vec<BrowseObject>, 
             ("FAILED", e.clone(), &[])
         }
     };
-    let parts = split_parts(objects, MAX_PART_BYTES);
+    let parts = split_parts(objects, limit);
     let total_parts = parts.len();
     parts
         .iter()
@@ -123,17 +123,46 @@ mod tests {
 
     #[test]
     fn respons_gagal_dan_sukses() {
-        let r = responses("k1", Some(9001), &Err("IED tidak terkoneksi".into()));
+        let r = responses("k1", Some(9001), &Err("IED tidak terkoneksi".into()), MAX_PART_BYTES);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0]["status"], "FAILED");
         assert_eq!(r[0]["message"], "IED tidak terkoneksi");
         assert_eq!(r[0]["objects"], serde_json::json!([]));
         assert_eq!((r[0]["part"].as_u64(), r[0]["total_parts"].as_u64()), (Some(1), Some(1)));
 
-        let r = responses("k2", Some(9001), &Ok(vec![obj(1)]));
+        let r = responses("k2", Some(9001), &Ok(vec![obj(1)]), MAX_PART_BYTES);
         assert_eq!(r[0]["status"], "SUCCESS");
         assert_eq!(r[0]["objects"][0]["object_reference"], "LD/GGIO1.Ind1");
         assert_eq!(r[0]["objects"][0]["cdc"], "SPS");
+    }
+
+    /// Contoh IEC61850_BROWSE_RESPONSE di docs/examples/produce = keluaran responses().
+    #[test]
+    fn contoh_dokumen_browse() {
+        use crate::kafka::payload_examples::{examples_of, str_of};
+        let ex: std::collections::BTreeMap<String, Value> = examples_of("produce", TOPIC_BROWSE_RESPONSE).into_iter().collect();
+        assert_eq!(ex.len(), 4, "contoh BROWSE baru: tambahkan di test ini");
+        let get = |n: &str| ex.get(&format!("{TOPIC_BROWSE_RESPONSE}__{n}")).cloned().unwrap_or_else(|| panic!("contoh {n}"));
+        let objs = |v: &Value| -> Vec<BrowseObject> {
+            v["objects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| BrowseObject {
+                    object_reference: str_of(o, "object_reference").into(),
+                    fc: str_of(o, "fc").into(),
+                    cdc: o["cdc"].as_str().map(String::from),
+                })
+                .collect()
+        };
+        let s = get("success");
+        assert_eq!(responses("browse-9001-01", Some(9001), &Ok(objs(&s)), MAX_PART_BYTES), vec![s]);
+        // multi-part dengan batas kecil supaya contoh pendek (FEP memakai MAX_PART_BYTES)
+        let (p1, p2) = (get("multipart_1"), get("multipart_2"));
+        let all: Vec<_> = objs(&p1).into_iter().chain(objs(&p2)).collect();
+        assert_eq!(responses("browse-9001-02", Some(9001), &Ok(all), 160), vec![p1, p2]);
+        let f = get("failed");
+        assert_eq!(responses("browse-9002-01", Some(9002), &Err("IED tidak terkoneksi".into()), MAX_PART_BYTES), vec![f]);
     }
 
     #[tokio::test]

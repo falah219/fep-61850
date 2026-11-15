@@ -1,0 +1,9 @@
+{
+  "event": "CHANNEL",
+  "protocol": "IEC61850",
+  "ip_address": "10.10.1.21",
+  "id_rtu": 9001,
+  "data": {
+    "channel": 1
+  }
+}

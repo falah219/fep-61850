@@ -1,6 +1,7 @@
 # FEP IEC 61850 (MMS Client)
 
 Rencana kerja lengkap: [docs/IEC61850_PLAN.md](docs/IEC61850_PLAN.md).
+Semua payload Kafka (consume & produce, contoh JSON, beda dengan IEC 104): [docs/KAFKA_PAYLOADS.md](docs/KAFKA_PAYLOADS.md).
 Acuan arsitektur: repo `iconics-fep-iec104`.
 
 ## Fase 1 — Lingkungan dev + simulator IED
@@ -300,7 +301,8 @@ docker compose -f docker-compose.dev.yml exec -w /work dev scripts/uji_konek_ser
 - **`RTU_LOGGING`**: konek, putus, gagal konek, RCB gagal (`[LEVEL] pesan`).
 - Peringatan konfigurasi (WARN, log + `RTU_LOGGING`, sekali per sesi setelah konek): mode REPORT/HYBRID tanpa RCB
   `enabled`, dan datapoint `protocol = 'IEC61850'` tanpa baris `master_datapoint_iec61850s` (IOA disebut, maks 20).
-- **Consumer** (`GROUP_ID` default `IEC61850_GROUP`), pesan dengan `protocol` ≠ `IEC61850` diabaikan:
+- **Consumer** (`GROUP_ID` default `IEC61850_GROUP`), pesan dengan `protocol` ≠ `IEC61850` diabaikan.
+  Field, contoh JSON, dan balasan tiap topic: [docs/KAFKA_PAYLOADS.md](docs/KAFKA_PAYLOADS.md).
 
 | Topik / event | Aksi |
 |---|---|

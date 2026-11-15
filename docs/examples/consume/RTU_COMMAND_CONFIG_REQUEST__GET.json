@@ -1,0 +1,7 @@
+{
+  "action": "GET",
+  "protocol": "IEC61850",
+  "ip_address": "10.10.1.21",
+  "ioa": 3005,
+  "value": 1
+}

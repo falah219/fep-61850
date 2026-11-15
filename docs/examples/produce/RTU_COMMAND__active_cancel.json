@@ -1,0 +1,14 @@
+{
+  "hostname": "10.10.1.21",
+  "port": 102,
+  "protocol": "IEC61850",
+  "tag": "",
+  "command_type": "",
+  "command_value": null,
+  "qualifier": 0,
+  "event": "CANCEL",
+  "status": "active",
+  "msg": "CANCEL success RTU status is Active",
+  "key": "cmd-20261115-0003",
+  "time": 1794711845123
+}

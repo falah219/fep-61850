@@ -6,6 +6,8 @@ pub mod context;
 pub mod event_handler;
 pub mod handlers;
 pub mod models;
+#[cfg(test)]
+pub(crate) mod payload_examples;
 pub mod producer;
 pub mod publisher;
 

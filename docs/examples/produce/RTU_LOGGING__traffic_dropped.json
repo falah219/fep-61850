@@ -1,0 +1,7 @@
+{
+  "ip_address": "10.10.1.21",
+  "protocol": "IEC61850",
+  "id_rtu": 9001,
+  "logging": "[INFO] 12 log data dilewati (batas LOG_DATA_MAX_PER_SEC)",
+  "time": 1794711845123
+}

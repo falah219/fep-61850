@@ -1,0 +1,18 @@
+{
+  "ip_address": "10.10.1.21",
+  "protocol": "IEC61850",
+  "id_rtu": 9001,
+  "action": "DATA_CHANGE",
+  "tag": "",
+  "value": 2,
+  "address": 1001,
+  "ca": 0,
+  "asdu": 0,
+  "type": "DPS",
+  "quality": "GOOD",
+  "flag": "GOOD",
+  "group": "6f1c2a9e-3b7d-4c11-9a52-0d8e4b7f2a10",
+  "general_action": 3,
+  "time": 1794711845123,
+  "time_desc": "RTU"
+}

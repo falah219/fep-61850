@@ -1,0 +1,18 @@
+{
+  "ip_address": "10.10.1.21",
+  "protocol": "IEC61850",
+  "id_rtu": 9001,
+  "action": "INTEGRITY",
+  "tag": "BAY1_ANIN1_2001",
+  "value": 2.314,
+  "address": 2001,
+  "ca": 0,
+  "asdu": 0,
+  "type": "MV",
+  "quality": "GOOD",
+  "flag": "GOOD",
+  "group": "a2b4c6d8-1e3f-4a5b-8c7d-9e0f1a2b3c4d",
+  "general_action": 2,
+  "time": 1794711845123,
+  "time_desc": "RTU"
+}

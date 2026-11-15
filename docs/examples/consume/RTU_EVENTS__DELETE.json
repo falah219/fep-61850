@@ -1,0 +1,5 @@
+{
+  "event": "DELETE",
+  "protocol": "IEC61850",
+  "id_rtu": 9001
+}

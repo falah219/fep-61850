@@ -1,0 +1,9 @@
+{
+  "id_rtu": 9001,
+  "id_station": "7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f",
+  "protocol": "IEC61850",
+  "event": "UPDATE_ID_RTU",
+  "new_data": {
+    "id_rtu": 9011
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "event": "COMMAND",
+  "protocol": "IEC61850",
+  "data": {
+    "action": "OPERATE_RTU",
+    "ioa": 3010,
+    "type": "APC",
+    "value": 12.5,
+    "id_rtu": 9001,
+    "key": "cmd-20261115-0004"
+  }
+}

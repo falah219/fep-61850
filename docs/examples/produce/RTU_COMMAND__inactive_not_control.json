@@ -1,0 +1,14 @@
+{
+  "hostname": "10.10.1.21",
+  "port": 102,
+  "protocol": "IEC61850",
+  "tag": "",
+  "command_type": "",
+  "command_value": 1,
+  "qualifier": 0,
+  "event": "SELECT",
+  "status": "inactive",
+  "msg": "SELECT failed: IOA 1001 bukan titik kontrol (FC CO) di RTU ini - RTU status is Inactive",
+  "key": "cmd-20261115-0007",
+  "time": 1794711845123
+}

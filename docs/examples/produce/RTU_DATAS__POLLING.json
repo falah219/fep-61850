@@ -1,0 +1,18 @@
+{
+  "ip_address": "10.10.1.22",
+  "protocol": "IEC61850",
+  "id_rtu": 9002,
+  "action": "POLLING",
+  "tag": "",
+  "value": 49.98,
+  "address": 2003,
+  "ca": 0,
+  "asdu": 0,
+  "type": "MV",
+  "quality": "GOOD",
+  "flag": "GOOD",
+  "group": "",
+  "general_action": null,
+  "time": 1794711846000,
+  "time_desc": "SERVER"
+}

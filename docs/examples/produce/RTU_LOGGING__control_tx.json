@@ -1,0 +1,7 @@
+{
+  "ip_address": "10.10.1.21",
+  "protocol": "IEC61850",
+  "id_rtu": 9001,
+  "logging": "2026-11-15T03:04:07.000000Z CONTROL TX - SELECT BAY1LD0/CSWI1.Pos ctlVal=true orIdent=operator1",
+  "time": 1794711845123
+}

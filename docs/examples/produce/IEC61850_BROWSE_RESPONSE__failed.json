@@ -1,0 +1,9 @@
+{
+  "key": "browse-9002-01",
+  "id_rtu": 9002,
+  "status": "FAILED",
+  "message": "IED tidak terkoneksi",
+  "objects": [],
+  "part": 1,
+  "total_parts": 1
+}

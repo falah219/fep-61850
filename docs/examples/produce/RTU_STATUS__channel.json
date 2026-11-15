@@ -1,0 +1,8 @@
+{
+  "ip_address": "10.10.1.21",
+  "id_rtu": 9001,
+  "protocol": "IEC61850",
+  "channel": 1,
+  "status": 0,
+  "time": 1794711845123
+}

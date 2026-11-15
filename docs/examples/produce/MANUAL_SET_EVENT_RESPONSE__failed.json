@@ -1,0 +1,7 @@
+{
+  "status": "FAILED",
+  "protocol": "IEC61850",
+  "tag": "TAG_TIDAK_ADA",
+  "error": "Datapoint not found",
+  "timestamp": 1794711845123
+}

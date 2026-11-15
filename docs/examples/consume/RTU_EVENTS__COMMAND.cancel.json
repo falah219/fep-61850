@@ -1,0 +1,12 @@
+{
+  "event": "COMMAND",
+  "protocol": "IEC61850",
+  "ip_address": "10.10.1.21",
+  "data": {
+    "action": "CANCEL_RTU",
+    "ioa": 3005,
+    "id_rtu": 9001,
+    "key": "cmd-20261115-0003",
+    "user": "operator1"
+  }
+}

@@ -131,14 +131,27 @@ fn respond(mgr: &Manager, cd: &CommandData, action: CommandAction, ioa: Option<i
         Ok(()) => info!("[COMMAND] {} sukses ioa={ioa:?}", action.as_str()),
         Err(e) => error!("[COMMAND] {} gagal ioa={ioa:?}: {e}", action.as_str()),
     }
+    let cfg = cd.id_rtu.or_else(|| mgr.id_by_ip(&cd.ip_address)).and_then(|id| mgr.endpoint_of(id));
+    let response = response_json(cd, action, value, result, response_endpoint(&cd.ip_address, cd.port, cfg), now_ms());
+    let key = cd.key.as_deref().unwrap_or_default();
+    let topic_key = if key.is_empty() { "unknown" } else { key };
+    mgr.publisher.producer.send_raw(TOPIC_RTU_COMMAND, topic_key, &response);
+}
+
+/// Isi pesan RTU_COMMAND (format sama dengan IEC 104). `endpoint` = (hostname, port).
+fn response_json(
+    cd: &CommandData,
+    action: CommandAction,
+    value: Option<f64>,
+    result: &Result<(), String>,
+    (hostname, port): (String, i32),
+    time: i64,
+) -> Value {
     let (status, msg) = match result {
         Ok(()) => ("active", format!("{} success RTU status is Active", action.as_str())),
         Err(e) => ("inactive", format!("{} failed: {e} - RTU status is Inactive", action.as_str())),
     };
-    let key = cd.key.clone().unwrap_or_default();
-    let cfg = cd.id_rtu.or_else(|| mgr.id_by_ip(&cd.ip_address)).and_then(|id| mgr.endpoint_of(id));
-    let (hostname, port) = response_endpoint(&cd.ip_address, cd.port, cfg);
-    let response = json!({
+    json!({
         "hostname": hostname,
         "port": port,
         "protocol": PROTOCOL,
@@ -149,11 +162,9 @@ fn respond(mgr: &Manager, cd: &CommandData, action: CommandAction, ioa: Option<i
         "event": action.as_str(),
         "status": status,
         "msg": msg,
-        "key": key,
-        "time": now_ms(),
-    });
-    let topic_key = if key.is_empty() { "unknown" } else { key.as_str() };
-    mgr.publisher.producer.send_raw(TOPIC_RTU_COMMAND, topic_key, &response);
+        "key": cd.key.clone().unwrap_or_default(),
+        "time": time,
+    })
 }
 
 /// hostname/port respons: port dari konfigurasi IED (payload sering tanpa port -> 0),
@@ -235,6 +246,77 @@ mod tests {
         assert_eq!(cd.action, "SELECT_RTU");
         assert_eq!(as_i32(cd.ioa.as_ref()), Some(3001));
         assert_eq!(as_f64(cd.value.as_ref()), Some(1.0));
+    }
+
+    /// Contoh COMMAND di docs/examples/consume terbaca utuh (bukan jatuh diam-diam ke field datar).
+    #[test]
+    fn contoh_dokumen_command() {
+        use crate::kafka::payload_examples::examples_of;
+        let exs: Vec<_> = examples_of("consume", "RTU_EVENTS").into_iter().filter(|(n, _)| n.contains("__COMMAND")).collect();
+        assert!(!exs.is_empty());
+        for (name, v) in &exs {
+            let m: RtuEventMessage = serde_json::from_value(v.clone()).unwrap();
+            if let Some(d) = m.data.as_ref() {
+                CommandData::deserialize(d).unwrap_or_else(|e| panic!("{name}: data: {e}"));
+            }
+            let cd = parse_command_data(&m);
+            let action = CommandAction::parse(&cd.action).unwrap_or_else(|| panic!("{name}: action {:?}", cd.action));
+            assert!(as_i32(cd.ioa.as_ref()).or_else(|| cd.tag.as_deref().and_then(ioa_from_tag)).is_some(), "{name}: ioa");
+            assert_eq!(as_f64(cd.value.as_ref()).is_some(), action != CommandAction::Cancel, "{name}: value");
+            assert!(cd.id_rtu.is_some() || !cd.ip_address.is_empty(), "{name}: id_rtu / ip_address");
+        }
+        // compat104 juga terbaca bentuk FEP IEC 104: ip_address atas wajib, data.ip_address/port wajib, value i32, type wajib
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct Iec104Event {
+            ip_address: String,
+            data: Iec104Data,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct Iec104Data {
+            action: String,
+            ip_address: String,
+            port: u16,
+            value: i32,
+            #[serde(rename = "type")]
+            command_type: String,
+            key: String,
+        }
+        let (_, v) = exs.iter().find(|(n, _)| n.ends_with("COMMAND.compat104")).expect("contoh compat104");
+        let e: Iec104Event = serde_json::from_value(v.clone()).unwrap();
+        assert!(!e.ip_address.is_empty() && !e.data.ip_address.is_empty() && e.data.port > 0);
+    }
+
+    /// Contoh RTU_COMMAND di docs/examples/produce = keluaran response_json.
+    #[test]
+    fn contoh_dokumen_rtu_command() {
+        use crate::kafka::payload_examples::{examples_of, int_of, str_of};
+        let exs = examples_of("produce", TOPIC_RTU_COMMAND);
+        assert!(!exs.is_empty());
+        for (name, v) in exs {
+            let event = str_of(&v, "event");
+            let action = CommandAction::parse(&format!("{event}_RTU")).unwrap_or_else(|| panic!("{name}: event {event}"));
+            let msg = str_of(&v, "msg");
+            let result = match str_of(&v, "status") {
+                "active" => Ok(()),
+                "inactive" => Err(msg
+                    .strip_prefix(&format!("{event} failed: "))
+                    .and_then(|m| m.strip_suffix(" - RTU status is Inactive"))
+                    .unwrap_or_else(|| panic!("{name}: msg {msg}"))
+                    .to_string()),
+                s => panic!("{name}: status {s}"),
+            };
+            let cd = CommandData {
+                tag: Some(str_of(&v, "tag").into()),
+                command_type: Some(str_of(&v, "command_type").into()),
+                key: Some(str_of(&v, "key").into()),
+                ..Default::default()
+            };
+            let endpoint = (str_of(&v, "hostname").to_string(), int_of(&v, "port") as i32);
+            let out = response_json(&cd, action, v["command_value"].as_f64(), &result, endpoint, int_of(&v, "time"));
+            assert_eq!(out, v, "{name}");
+        }
     }
 
     #[test]

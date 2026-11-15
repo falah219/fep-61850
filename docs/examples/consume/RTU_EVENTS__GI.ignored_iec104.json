@@ -1,0 +1,6 @@
+{
+  "event": "GI",
+  "protocol": "IEC104",
+  "ip_address": "10.10.2.5",
+  "port": 2404
+}

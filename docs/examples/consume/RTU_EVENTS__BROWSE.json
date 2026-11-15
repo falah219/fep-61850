@@ -1,0 +1,6 @@
+{
+  "event": "BROWSE",
+  "protocol": "IEC61850",
+  "id_rtu": 9001,
+  "key": "browse-9001-01"
+}

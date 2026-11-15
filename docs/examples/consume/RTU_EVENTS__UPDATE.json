@@ -1,0 +1,11 @@
+{
+  "event": "UPDATE",
+  "protocol": "IEC61850",
+  "ip_address": "10.10.1.21",
+  "port": 102,
+  "id_rtu": 9001,
+  "data": {
+    "id_rtu": 9001,
+    "name": "GI BAY 1"
+  }
+}

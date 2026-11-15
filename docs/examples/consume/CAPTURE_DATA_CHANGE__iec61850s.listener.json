@@ -1,0 +1,14 @@
+{
+  "table": "iec61850s",
+  "schema": "public",
+  "operation": "UPDATE",
+  "record": {
+    "id": "5d0f3c1a-7b2e-4f60-9a11-2c3d4e5f6a7b",
+    "id_rtu": 9001,
+    "ip_address": "10.10.1.21",
+    "port": 102,
+    "state_rtu": true
+  },
+  "timestamp": "2026-11-15T03:04:05.123Z",
+  "source": "cdc_listener"
+}
