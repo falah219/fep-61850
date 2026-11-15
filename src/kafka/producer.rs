@@ -79,6 +79,11 @@ impl KafkaProducer {
         self.send_json(TOPIC_RTU_LOGGING, &id_rtu.to_string(), &msg);
     }
 
+    /// RTU_LOGGING tanpa prefix level (baris lalu lintas data, sama dengan "ASDU RX ..." IEC 104).
+    pub fn send_log_raw(&self, ip: &str, id_rtu: i32, line: &str) {
+        self.send_json(TOPIC_RTU_LOGGING, &id_rtu.to_string(), &RtuLoggingMessage::new(ip, id_rtu, line));
+    }
+
     pub fn send_raw(&self, topic: &str, key: &str, msg: &impl Serialize) {
         self.send_json(topic, key, msg);
     }

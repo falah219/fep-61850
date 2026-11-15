@@ -480,6 +480,18 @@ impl OwnedValue {
         }
     }
 
+    /// Jumlah elemen struktur/array (0 untuk tipe dasar).
+    pub fn element_count(&self) -> usize {
+        // SAFETY: self.0 non-null (dicek saat dibuat oleh read_object)
+        let t = unsafe { ffi::MmsValue_getType(self.0) };
+        if t == ffi::MMS_STRUCTURE || t == ffi::MMS_ARRAY {
+            // SAFETY: tipe sudah dicek
+            unsafe { ffi::MmsValue_getArraySize(self.0) as usize }
+        } else {
+            0
+        }
+    }
+
     pub fn int32(v: i32) -> Self {
         // SAFETY: membuat nilai baru, jadi milik kita
         Self(unsafe { ffi::MmsValue_newIntegerFromInt32(v) })
@@ -813,8 +825,8 @@ impl Control {
         if ok { Ok(()) } else { Err(self.error("select")) }
     }
 
-    /// Operate. Enhanced security: tunggu CommandTermination (maks `wait`).
-    pub fn operate(&self, value: &OwnedValue, wait: std::time::Duration) -> Result<()> {
+    /// Operate. Ok(true) = enhanced security: panggil `wait_termination` sesudahnya.
+    pub fn operate(&self, value: &OwnedValue) -> Result<bool> {
         if let Ok(mut r) = self.termination.result.lock() {
             *r = None;
         }
@@ -822,20 +834,25 @@ impl Control {
         if !unsafe { ffi::ControlObjectClient_operate(self.ctl, value.as_ptr(), 0) } {
             return Err(self.error("operate"));
         }
-        if !matches!(self.control_model(), ffi::CONTROL_MODEL_DIRECT_ENHANCED | ffi::CONTROL_MODEL_SBO_ENHANCED) {
-            return Ok(());
-        }
-        let guard = self.termination.result.lock().map_err(|_| "lock termination rusak")?;
-        let (guard, _) = self
-            .termination
-            .cv
-            .wait_timeout_while(guard, wait, |r| r.is_none())
-            .map_err(|_| "lock termination rusak")?;
-        match *guard {
-            Some(true) => Ok(()),
-            Some(false) => Err(self.error("CommandTermination-")),
-            None => Err("CommandTermination tidak diterima (timeout)".into()),
-        }
+        Ok(matches!(self.control_model(), ffi::CONTROL_MODEL_DIRECT_ENHANCED | ffi::CONTROL_MODEL_SBO_ENHANCED))
+    }
+
+    /// Tunggu CommandTermination (maks `wait`). Some(true) = positif, Some(false) = negatif, None = timeout.
+    pub fn wait_termination(&self, wait: std::time::Duration) -> Option<bool> {
+        let guard = self.termination.result.lock().ok()?;
+        let (guard, _) = self.termination.cv.wait_timeout_while(guard, wait, |r| r.is_none()).ok()?;
+        *guard
+    }
+
+    /// Error untuk CommandTermination negatif (pakai LastApplError).
+    pub fn termination_error(&self) -> Iec61850Error {
+        self.error("CommandTermination-")
+    }
+
+    /// AddCause dari LastApplError perintah terakhir.
+    pub fn add_cause(&self) -> i32 {
+        // SAFETY: ctl valid
+        unsafe { ffi::ControlObjectClient_getLastApplError(self.ctl) }.addCause as i32
     }
 
     pub fn cancel(&self) -> Result<()> {
@@ -875,6 +892,17 @@ impl Drop for Control {
         // SAFETY: ctl milik kita, dihancurkan sekali
         unsafe { ffi::ControlObjectClient_destroy(self.ctl) };
     }
+}
+
+/// Nama FC, contoh `MX`.
+pub fn fc_name(fc: ffi::FunctionalConstraint) -> String {
+    // SAFETY: string statis milik library (atau null untuk FC tak dikenal)
+    let p = unsafe { ffi::FunctionalConstraint_toString(fc) };
+    if p.is_null() {
+        return "?".into();
+    }
+    // SAFETY: p non-null, string C statis
+    unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
 }
 
 /// Teks ctl_model di DB -> ControlModel.

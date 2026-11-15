@@ -54,4 +54,7 @@ data:
   RUST_LOG: "info"
   # Di Kubernetes log dibaca dari stdout (kubectl logs); file di dalam pod tidak dipakai
   LOG_TO_FILE: "false"
+  # Lalu lintas data ke RTU_LOGGING (CONTROL selalu dikirim); batas baris/detik per IED, 0 = tanpa batas
+  LOG_DATA_TRAFFIC: "false"
+  LOG_DATA_MAX_PER_SEC: "50"
   RUST_BACKTRACE: "0"

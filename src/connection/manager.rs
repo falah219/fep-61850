@@ -1,6 +1,7 @@
 //! Connection manager: satu thread per IED, start/stop/reload dari event Kafka
 //! (padanan `connection/manager.rs` FEP IEC 104). Heartbeat di `health_check.rs`, ping di `network_ping.rs`.
 
+use crate::iec61850::traffic::TrafficLog;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -212,6 +213,7 @@ impl Manager {
         }
         let mut ctx = RtuCtx::new(rtu, rcbs, points, Arc::clone(&self.publisher), Arc::clone(&self.gate));
         ctx.unmapped_ioas = unmapped_ioas;
+        ctx.traffic = TrafficLog::new(self.runtime.log_data_traffic, self.runtime.log_data_max_per_sec);
         let ctx = Arc::new(ctx);
         let thread_ctx = Arc::clone(&ctx);
         // Satu thread OS per IED: API libIEC61850 blocking, tidak boleh jalan di task async.

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
 use super::client::{
-    control_model_from_str, fc_from_str, is_connection_error, osi_params, ConnectParams, Control, Ied, OsiParams,
+    control_model_from_str, fc_from_str, fc_name, is_connection_error, osi_params, ConnectParams, Control, Ied, OsiParams,
     OwnedValue, Rcb, RcbSettings, Spec,
 };
 use super::callbacks::report::{on_report, ReportCtx};
@@ -22,6 +22,7 @@ use super::mapper::{mms_quality, mms_time, mms_to_json};
 use super::mapping::split_fc;
 use crate::connection::ConnectGate;
 use super::browse::{browse, BrowseObject};
+use super::traffic::{self, TrafficLog};
 use crate::domain::{ctl_value, CommandAction, CommandJob, CommandReq, CtlVal, Point, PointState, RtuConfig};
 use crate::error::Result;
 use crate::ffi;
@@ -182,6 +183,8 @@ pub struct RtuCtx {
     entry_ids: Mutex<HashMap<String, Vec<u8>>>,
     /// IOA datapoint IEC61850 RTU ini yang tidak punya baris master_datapoint_iec61850s (diisi Manager)
     pub unmapped_ioas: Vec<i32>,
+    /// Log lalu lintas data ke RTU_LOGGING (diisi Manager dari LOG_DATA_TRAFFIC / LOG_DATA_MAX_PER_SEC)
+    pub traffic: TrafficLog,
 }
 
 impl RtuCtx {
@@ -210,7 +213,22 @@ impl RtuCtx {
             state,
             entry_ids: Mutex::default(),
             unmapped_ioas: Vec::new(),
+            traffic: TrafficLog::new(false, 0),
         }
+    }
+
+    /// Baris data (REPORT/POLL/GI) ke RTU_LOGGING, kalau LOG_DATA_TRAFFIC aktif & di bawah batas.
+    /// Non-blocking (atomik + BaseProducer), aman dari thread report.
+    pub(crate) fn log_data(&self, line: impl FnOnce() -> String) {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        for l in self.traffic.data_lines(now, line) {
+            self.publisher.producer.send_log_raw(&self.rtu.ip_address, self.rtu.id_rtu, &l);
+        }
+    }
+
+    /// Baris CONTROL: selalu dikirim (audit), tidak ikut LOG_DATA_TRAFFIC.
+    pub(crate) fn log_control(&self, line: &str) {
+        self.publisher.producer.send_log_raw(&self.rtu.ip_address, self.rtu.id_rtu, &format!("{} {line}", traffic::ts()));
     }
 
     pub(crate) fn publish(&self, i: usize, s: &PointState, action: &str, entry_time: Option<i64>) {
@@ -367,9 +385,7 @@ pub(crate) fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End> {
         let gi_due = last_gi.is_none_or(|t| gi_every.is_some_and(|every| t.elapsed() >= every));
         if !rcbs.is_empty() && gi_due {
             for rcb in rcbs.iter().take_while(|_| !ied.lost()) {
-                if let Err(e) = rcb.gi(&ied) {
-                    warn!(id_rtu = r.id_rtu, "GI {} gagal: {e}", rcb.reference);
-                }
+                send_gi(&ied, ctx, rcb);
             }
             last_gi = Some(Instant::now());
         }
@@ -380,9 +396,7 @@ pub(crate) fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End> {
             // GI supaya nilai terkini langsung terkirim, tidak menunggu GI berkala.
             // last_gi None = GI awal belum jalan, nanti otomatis mencakup RCB ini.
             for rcb in recovered.iter().filter(|_| last_gi.is_some()) {
-                if let Err(e) = rcb.gi(&ied) {
-                    warn!(id_rtu = r.id_rtu, "GI {} gagal: {e}", rcb.reference);
-                }
+                send_gi(&ied, ctx, rcb);
             }
             rcbs.extend(recovered);
             next_rcb_retry = Instant::now() + rcb_retry;
@@ -453,6 +467,14 @@ pub(crate) fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End> {
     }
 }
 
+/// GI ke satu RCB + baris "GI TX".
+fn send_gi(ied: &Ied, ctx: &RtuCtx, rcb: &Rcb) {
+    ctx.log_data(|| traffic::gi_tx(&rcb.reference));
+    if let Err(e) = rcb.gi(ied) {
+        warn!(id_rtu = ctx.rtu.id_rtu, "GI {} gagal: {e}", rcb.reference);
+    }
+}
+
 /// Jalankan select/operate/cancel di thread IED. Objek kontrol di-cache per IOA selama sesi,
 /// supaya SELECT dan OPERATE yang datang terpisah memakai objek (ctlNum) yang sama.
 fn execute_command(ied: &Ied, ctx: &RtuCtx, controls: &mut HashMap<i32, Control>, req: &CommandReq) -> Result<()> {
@@ -483,10 +505,38 @@ fn execute_command(ied: &Ied, ctx: &RtuCtx, controls: &mut HashMap<i32, Control>
             CtlVal::Tcmd(t) => OwnedValue::tcmd(t),
         })
     };
-    let result = match req.action {
-        CommandAction::Select => ctl.select(&value()?),
-        CommandAction::Operate => ctl.operate(&value()?, Duration::from_millis(ctx.rtu.oper_timeout_ms)),
-        CommandAction::Cancel => ctl.cancel(),
+    let action = req.action.as_str();
+    let r = &p.object_reference;
+    let ctl_text = req
+        .value
+        .filter(|_| req.action != CommandAction::Cancel)
+        .and_then(|v| ctl_value(&p.cdc, v, ctx.rtu.dpc_close_value).ok())
+        .map(traffic::ctl_val_text);
+    ctx.log_control(&traffic::control_tx(action, r, ctl_text.as_deref(), &req.or_ident));
+    // Ok(true) = operate enhanced security: CommandTermination masih ditunggu
+    let sent = match req.action {
+        CommandAction::Select => ctl.select(&value()?).map(|()| false),
+        CommandAction::Operate => ctl.operate(&value()?),
+        CommandAction::Cancel => ctl.cancel().map(|()| false),
+    };
+    // CONTROL RX hanya untuk jawaban IED (bukan timeout / koneksi putus)
+    match &sent {
+        Ok(_) => ctx.log_control(&traffic::control_rx(action, r, None)),
+        Err(e) if !e.is_timeout() && !ctl.connection_lost() => {
+            ctx.log_control(&traffic::control_rx(action, r, Some(ctl.add_cause())));
+        }
+        Err(_) => {}
+    }
+    let result = match sent {
+        Ok(true) => match ctl.wait_termination(Duration::from_millis(ctx.rtu.oper_timeout_ms)) {
+            Some(positive) => {
+                ctx.log_control(&traffic::termination_rx(r, positive));
+                if positive { Ok(()) } else { Err(ctl.termination_error()) }
+            }
+            None => Err("CommandTermination tidak diterima (timeout)".into()),
+        },
+        Ok(false) => Ok(()),
+        Err(e) => Err(e),
     };
     if result.is_ok() {
         ied.touch();
@@ -561,7 +611,13 @@ fn setup_rcb(ied: &Ied, ctx: &Arc<RtuCtx>, rcb_ref: &str, settings: &RcbSettings
     let mapped = members.iter().filter(|m| !m.picks.is_empty()).count();
     info!(id_rtu = ctx.rtu.id_rtu, "RCB {rcb_ref}: dataset {ds}, {} anggota, {mapped} termapping", members.len());
 
-    let rc = Box::new(ReportCtx { rtu: Arc::clone(ctx), rcb_ref: rcb_ref.to_string(), members, alive: ied.liveness() });
+    let rc = Box::new(ReportCtx {
+        rtu: Arc::clone(ctx),
+        rcb_ref: rcb_ref.to_string(),
+        dataset: ds,
+        members,
+        alive: ied.liveness(),
+    });
     let param = &*rc as *const ReportCtx as *mut c_void;
     out.push(rc);
     // SAFETY: ReportCtx di heap, hidup sampai setelah `ied` di-drop (lihat session()).
@@ -625,8 +681,10 @@ fn poll_cycle(ied: &Ied, ctx: &RtuCtx, groups: &[PollGroup], sent: &mut [Option<
     let Ok(mut state) = ctx.state.lock() else { return timed_out };
     let mut touched = Vec::new();
     for (i, v) in &values {
+        let g = &groups[*i];
+        ctx.log_data(|| traffic::poll_rx(&format!("{}[{}]", g.reference.to_string_lossy(), fc_name(g.fc)), v.element_count()));
         // SAFETY: nilai hasil readObject sesuai spec LN+FC yang sama
-        unsafe { decode(&groups[*i].plan, v.as_ptr(), &ctx.points, &mut state, &mut touched) };
+        unsafe { decode(&g.plan, v.as_ptr(), &ctx.points, &mut state, &mut touched) };
     }
     for i in touched {
         let cur = &state[i];

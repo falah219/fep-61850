@@ -11,10 +11,13 @@ use crate::ffi;
 use crate::iec61850::acquisition::{decode, MemberPlan, RtuCtx};
 use crate::iec61850::client::{octet_bytes, Liveness};
 use crate::iec61850::mapper::{action_rank, reason_action};
+use crate::iec61850::traffic;
 
 pub(crate) struct ReportCtx {
     pub(crate) rtu: Arc<RtuCtx>,
     pub(crate) rcb_ref: String,
+    /// Untuk baris REPORT RX (dataset dari DB / RCB)
+    pub(crate) dataset: String,
     pub(crate) members: Vec<MemberPlan>,
     /// Report masuk = tanda hidup koneksi
     pub(crate) alive: Arc<Liveness>,
@@ -34,11 +37,15 @@ pub(crate) unsafe extern "C" fn on_report(param: *mut c_void, report: ffi::Clien
         }
         let Ok(mut state) = rtu.state.lock() else { return };
         let mut actions: Vec<(usize, &'static str)> = Vec::new();
+        // untuk baris REPORT RX: gabungan reason & jumlah entri yang termuat
+        let (mut mask, mut entries) = (0u32, 0usize);
         for (i, member) in ctx.members.iter().enumerate() {
             let reason = unsafe { ffi::ClientReport_getReasonForInclusion(report, i as i32) } as u32;
             if reason == ffi::IEC61850_REASON_NOT_INCLUDED {
                 continue;
             }
+            mask |= reason;
+            entries += 1;
             let action = reason_action(reason).unwrap_or("DATA_UPDATE");
             let v = unsafe { ffi::MmsValue_getElement(values, i as i32) };
             if v.is_null() {
@@ -65,7 +72,15 @@ pub(crate) unsafe extern "C" fn on_report(param: *mut c_void, report: ffi::Clien
         drop(state);
         // EntryID dicatat SETELAH report diproses: saat reconnect IED melanjutkan dari entri berikutnya.
         // SAFETY: nilai milik report, langsung disalin
-        if let Some(id) = unsafe { octet_bytes(ffi::ClientReport_getEntryId(report)) } {
+        let entry_id = unsafe { octet_bytes(ffi::ClientReport_getEntryId(report)) };
+        // SAFETY: report valid selama callback
+        let seq = unsafe { ffi::ClientReport_hasSeqNum(report) }.then(|| unsafe { ffi::ClientReport_getSeqNum(report) });
+        let brcb = ctx.rcb_ref.contains(".BR.");
+        rtu.log_data(|| {
+            let id = entry_id.as_deref().filter(|_| brcb);
+            traffic::report_rx(&ctx.rcb_ref, &ctx.dataset, mask, entries, seq, id)
+        });
+        if let Some(id) = entry_id {
             rtu.set_entry_id(&ctx.rcb_ref, id);
         }
     }));

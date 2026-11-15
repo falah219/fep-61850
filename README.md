@@ -162,6 +162,30 @@ Log (`src/logger.rs`, format sama dengan FEP IEC 104):
   `src/kafka/context.rs` dengan target `librdkafka`.
 - `docker-compose.yml` me-mount `./logs:/app/logs`.
 
+Log lalu lintas data ke `RTU_LOGGING` (`src/iec61850/traffic.rs`, padanan `ASDU RX ...` FEP IEC 104).
+Field `logging` = timestamp UTC ISO-8601 + isi, key = `id_rtu`:
+
+| Env | Default | Arti |
+|---|---|---|
+| `LOG_DATA_TRAFFIC` | `false` | Kirim baris REPORT/POLL/GI. `false` = `RTU_LOGGING` hanya kejadian koneksi/RCB/command |
+| `LOG_DATA_MAX_PER_SEC` | `50` | Batas baris data per IED per detik (counter atomik). Lewat batas: dilewati, detik berikutnya satu baris `[INFO] <n> log data dilewati (batas LOG_DATA_MAX_PER_SEC)`. `0` = tanpa batas |
+
+```
+2026-11-15T03:04:05.123456Z REPORT RX - RCB: brcbST01, Dataset: DS_ST, Reason: dchg, Entries: 2, SeqNum: 15, EntryID: 0a00000000000000
+2026-11-15T03:04:05.123456Z GI TX - RCB: brcbST01
+2026-11-15T03:04:05.223456Z GI RX - RCB: brcbST01, Entries: 12
+2026-11-15T03:04:06.000000Z POLL RX - Group: simpleIOGenericIO/GGIO1[MX], Elements: 4
+2026-11-15T03:04:07.000000Z CONTROL TX - SELECT SIMIED1LD0/CSWI1.Pos ctlVal=false orIdent=tester
+2026-11-15T03:04:07.050000Z CONTROL RX - SELECT SIMIED1LD0/CSWI1.Pos positive
+2026-11-15T03:04:08.000000Z CONTROL RX - OPERATE SIMIED1LD0/CSWI1.Pos negative AddCause=position-reached
+2026-11-15T03:04:09.000000Z CONTROL RX - CommandTermination SIMIED1LD0/CSWI1.Pos positive
+```
+
+- `EntryID` hanya untuk BRCB. Report dengan reason `gi` ditulis sebagai `GI RX`.
+- Baris `CONTROL` **selalu** dikirim (audit), walau `LOG_DATA_TRAFFIC=false`. `CONTROL RX` hanya untuk jawaban
+  IED (timeout / koneksi putus tidak ditulis sebagai RX).
+- Baris ringkas dikirim bersama baris data pertama di detik berikutnya (tidak ada timer).
+
 Struktur folder mengikuti `iconics-fep-iec104`:
 
 ```

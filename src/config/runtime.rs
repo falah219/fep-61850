@@ -17,6 +17,10 @@ pub struct RuntimeConfig {
     pub reload_debounce_ms: u64,
     /// Batas tunggu semua thread IED berhenti saat shutdown, sebelum flush Kafka.
     pub shutdown_wait_secs: u64,
+    /// LOG_DATA_TRAFFIC: baris REPORT/POLL/GI ke RTU_LOGGING (default false). CONTROL selalu dikirim.
+    pub log_data_traffic: bool,
+    /// LOG_DATA_MAX_PER_SEC: batas baris data per IED per detik (default 50, 0 = tanpa batas).
+    pub log_data_max_per_sec: u32,
     pub subscribe_topics: Vec<String>,
 }
 
@@ -43,6 +47,8 @@ impl RuntimeConfig {
             ping_concurrency: env_or("PING_CONCURRENCY", 500).max(1),
             reload_debounce_ms: env_or("RELOAD_DEBOUNCE_MS", 2000),
             shutdown_wait_secs: env_or("SHUTDOWN_WAIT_SECS", 5),
+            log_data_traffic: crate::logger::env_flag(env::var("LOG_DATA_TRAFFIC").ok().as_deref(), false),
+            log_data_max_per_sec: env_or("LOG_DATA_MAX_PER_SEC", 50),
             subscribe_topics: env::var("SUBSCRIBE_TOPICS")
                 .unwrap_or_else(|_| DEFAULT_TOPICS.into())
                 .split(',')
