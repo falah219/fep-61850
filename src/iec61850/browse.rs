@@ -3,7 +3,9 @@
 //! Per LN: satu `getVariableSpecification` per FC (cepat). Kalau gagal (mis. `malformed-message`: respons type
 //! spec LN terlalu besar untuk PDU / tidak bisa di-parse libIEC61850), struktur dibangun dari GetNameList
 //! (`getLogicalDeviceVariables`, nama MMS `LN$FC$DO$DA`); tipe `stVal` dari read nilai (BROWSE_READ_VALUES).
-//! Kegagalan satu node dicatat di `errors` dan browse lanjut ke node berikutnya.
+//! Sebagian IED (mis. Schneider Baseline) membalas `malformed-message` untuk LN+FC yang memang tidak ada:
+//! kalau GetNameList juga tidak punya variabel FC itu, FC dianggap tidak ada (hanya log DEBUG, bukan error).
+//! Kegagalan nyata satu node dicatat di `errors` dan browse lanjut ke node berikutnya.
 //!
 //! Dikerjakan bertahap (`BrowseJob::step`, satu LN per langkah) di thread IED, diselingi polling & command,
 //! dibatasi BROWSE_TIMEOUT_MS. CDC dari tipe MMS: ENS/ENC tidak bisa dibedakan dari INS/INC -> INS / INC.
@@ -12,6 +14,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use super::client::{cstring, fc_from_str, Ied, Rcb, SpecNode, SpecType};
 use super::mapper::trg_ops_text;
@@ -55,20 +58,36 @@ pub struct BrowseError {
     pub error: String,
 }
 
-/// RCB (BRCB `.BR.` / URCB `.RP.`) untuk setup mode REPORT.
+/// RCB (BRCB `.BR.` / URCB `.RP.`) untuk setup mode REPORT. Urutan field = urutan JSON.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RcbInfo {
     pub reference: String,
     pub buffered: bool,
-    pub rpt_id: Option<String>,
-    pub rpt_ena: bool,
     /// Format ACSI `LD/LLN0.DataSet`
     pub dataset: Option<String>,
+    pub rpt_id: Option<String>,
+    pub rpt_ena: bool,
     /// `dchg,qchg,dupd,integrity,gi` (format kolom trg_ops)
     pub trg_ops: String,
     pub intg_pd_ms: u32,
-    /// Anggota dataset, contoh `LD/XSWI1.Pos.stVal[ST]`
-    pub members: Vec<String>,
+    pub members: Vec<DatasetMember>,
+}
+
+/// Anggota dataset, bentuk sama dengan `objects[]`: `LD/LN.DO.DA` + FC.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DatasetMember {
+    pub object_reference: String,
+    /// `""` kalau IED tidak menyertakan FC
+    pub fc: String,
+}
+
+/// `LD/XSWI1.Pos.stVal[ST]` (format GetDataSetDirectory libIEC61850) -> {object_reference, fc}.
+pub fn parse_member(s: &str) -> DatasetMember {
+    let s = s.trim();
+    match s.strip_suffix(']').and_then(|x| x.rsplit_once('[')) {
+        Some((r, fc)) => DatasetMember { object_reference: r.into(), fc: fc.into() },
+        None => DatasetMember { object_reference: s.into(), fc: String::new() },
+    }
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -76,8 +95,6 @@ pub struct BrowseResult {
     pub objects: Vec<BrowseObject>,
     pub errors: Vec<BrowseError>,
     pub rcbs: Vec<RcbInfo>,
-    /// false = BROWSE_TIMEOUT_MS tercapai sebelum semua LN dibrowse
-    pub complete: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -124,7 +141,7 @@ pub struct BrowseJob {
     /// Cache GetNameList per LD (fallback); Err = gagal, sudah dicatat
     ld_names: HashMap<String, std::result::Result<Vec<String>, String>>,
     /// Cache anggota dataset
-    datasets: HashMap<String, Vec<String>>,
+    datasets: HashMap<String, Vec<DatasetMember>>,
     opts: BrowseOptions,
     deadline: Instant,
     result: BrowseResult,
@@ -139,7 +156,7 @@ impl BrowseJob {
             datasets: HashMap::new(),
             opts,
             deadline: Instant::now() + opts.timeout,
-            result: BrowseResult { complete: true, ..Default::default() },
+            result: BrowseResult::default(),
         };
         for ld in ied.logical_devices()? {
             match ied.logical_nodes(&ld) {
@@ -157,7 +174,6 @@ impl BrowseJob {
             let left = self.pending.len();
             let ms = self.opts.timeout.as_millis();
             self.error("browse", &format!("BROWSE_TIMEOUT_MS ({ms} ms) tercapai, {left} LN belum dibrowse"));
-            self.result.complete = false;
             self.pending.clear();
         }
         let Some((ld, ln)) = self.pending.pop_front() else { return Ok(true) };
@@ -176,25 +192,24 @@ impl BrowseJob {
     fn browse_ln(&mut self, ied: &Ied, ld: &str, ln: &str) -> Result<()> {
         let ln_ref = format!("{ld}/{ln}");
         let mut specs = Vec::new();
-        let mut spec_failed = false;
+        let mut failed: Vec<(&'static str, String)> = Vec::new();
         for fc in FCS {
             match ied.variable_spec(&ln_ref, fc_from_str(fc)?) {
                 Ok(s) => specs.push((fc, s.tree())),
                 Err(e) if is_absent(&e) => {}
                 Err(e) if e.is_connection_lost() => return Err(e),
-                Err(e) => {
-                    self.error(&format!("{ln_ref}[{fc}]"), &format!("getVariableSpecification: {e}; pakai GetNameList"));
-                    spec_failed = true;
-                    break;
-                }
+                Err(e) => failed.push((fc, e.to_string())),
             }
         }
-        if spec_failed {
-            specs = match self.ld_names(ied, ld)? {
-                Some(names) => tree_from_names(ln, names),
-                None => Vec::new(),
+        if !failed.is_empty() {
+            let names_tree = match self.ld_names(ied, ld)? {
+                Ok(names) => Ok(tree_from_names(ln, names)),
+                Err(e) => Err(e),
             };
-            if self.opts.read_values {
+            specs.extend(fallback_specs(&ln_ref, &failed, names_tree, &mut self.result.errors));
+            specs.sort_by_key(|(f, _)| FCS.iter().position(|x| x == f));
+            // tipe stVal hanya perlu dibaca kalau struktur ST dari GetNameList (tanpa tipe)
+            if self.opts.read_values && failed.iter().any(|(f, _)| *f == "ST") {
                 if let Some((_, st)) = specs.iter_mut().find(|(f, _)| *f == "ST") {
                     fill_stval_types(ied, &ln_ref, st, 0, &mut self.result.errors)?;
                 }
@@ -208,20 +223,21 @@ impl BrowseJob {
         self.rcbs(ied, &ln_ref)
     }
 
-    /// Nama variabel MMS satu LD (sekali per LD).
-    fn ld_names(&mut self, ied: &Ied, ld: &str) -> Result<Option<&[String]>> {
+    /// Nama variabel MMS satu LD (GetNameList, sekali per LD). Err dalam = GetNameList gagal.
+    fn ld_names(&mut self, ied: &Ied, ld: &str) -> Result<std::result::Result<&[String], String>> {
         if !self.ld_names.contains_key(ld) {
             let names = match ied.logical_device_variables(ld) {
                 Ok(v) => Ok(v),
                 Err(e) if e.is_connection_lost() => return Err(e),
-                Err(e) => {
-                    self.error(&format!("{ld} (GetNameList)"), &e);
-                    Err(e.to_string())
-                }
+                Err(e) => Err(e.to_string()),
             };
             self.ld_names.insert(ld.to_string(), names);
         }
-        Ok(self.ld_names.get(ld).and_then(|r| r.as_ref().ok()).map(Vec::as_slice))
+        Ok(match self.ld_names.get(ld) {
+            Some(Ok(v)) => Ok(v.as_slice()),
+            Some(Err(e)) => Err(e.clone()),
+            None => Err("GetNameList tidak tersedia".into()),
+        })
     }
 
     fn rcbs(&mut self, ied: &Ied, ln_ref: &str) -> Result<()> {
@@ -264,12 +280,12 @@ impl BrowseJob {
         Ok(())
     }
 
-    fn members(&mut self, ied: &Ied, ds: &str) -> Result<Vec<String>> {
+    fn members(&mut self, ied: &Ied, ds: &str) -> Result<Vec<DatasetMember>> {
         if let Some(m) = self.datasets.get(ds) {
             return Ok(m.clone());
         }
         let m = match ied.dataset_directory(ds) {
-            Ok(m) => m,
+            Ok(m) => m.iter().map(|s| parse_member(s)).collect(),
             Err(e) if e.is_connection_lost() => return Err(e),
             Err(e) => {
                 self.error(ds, &e);
@@ -278,6 +294,39 @@ impl BrowseJob {
         };
         self.datasets.insert(ds.to_string(), m.clone());
         Ok(m)
+    }
+}
+
+/// FC yang getVariableSpecification-nya gagal: strukturnya diambil dari GetNameList (`names_tree`).
+/// - GetNameList tidak punya variabel FC itu -> FC memang tidak ada (IED membalas malformed alih-alih
+///   object-non-existent): BUKAN error, hanya DEBUG.
+/// - GetNameList gagal -> error per FC (fallback juga gagal).
+pub fn fallback_specs(
+    ln_ref: &str,
+    failed: &[(&'static str, String)],
+    names_tree: std::result::Result<Vec<(&'static str, SpecNode)>, String>,
+    errors: &mut Vec<BrowseError>,
+) -> Vec<(&'static str, SpecNode)> {
+    match names_tree {
+        Err(e) => {
+            for (fc, spec_err) in failed {
+                errors.push(BrowseError {
+                    reference: format!("{ln_ref}[{fc}]"),
+                    error: format!("getVariableSpecification: {spec_err}; GetNameList: {e}"),
+                });
+            }
+            Vec::new()
+        }
+        Ok(tree) => failed
+            .iter()
+            .filter_map(|(fc, spec_err)| {
+                let found = tree.iter().find(|(f, _)| f == fc).cloned();
+                if found.is_none() {
+                    debug!("{ln_ref}[{fc}]: getVariableSpecification {spec_err}, GetNameList tanpa variabel FC ini -> FC tidak ada");
+                }
+                found
+            })
+            .collect(),
     }
 }
 
@@ -577,6 +626,57 @@ mod tests {
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].1.children.len(), 1);
         assert!(tree_from_names("TIDAKADA", &names()).is_empty());
+    }
+
+    /// (a) malformed + GetNameList tanpa variabel FC itu -> FC tidak ada, TIDAK masuk errors.
+    #[test]
+    fn malformed_dan_getnamelist_kosong_bukan_error() {
+        let failed = vec![("MX", "malformed-message".to_string()), ("CO", "malformed-message".to_string())];
+        let mut errors = Vec::new();
+        // GetNameList LN ini hanya punya ST
+        let names = tree_from_names("MainXSWI1", &["MainXSWI1$ST$Pos$stVal".to_string()]);
+        assert!(fallback_specs("LD/MainXSWI1", &failed, Ok(names), &mut errors).is_empty());
+        assert!(errors.is_empty(), "{errors:?}");
+        // LN tanpa variabel sama sekali
+        assert!(fallback_specs("LD/LLN0", &failed, Ok(Vec::new()), &mut errors).is_empty());
+        assert!(errors.is_empty());
+    }
+
+    /// (b) malformed + GetNameList punya variabel FC itu -> struktur dari GetNameList, objek tetap masuk, tanpa error.
+    #[test]
+    fn malformed_dan_getnamelist_ada_variabel() {
+        let failed = vec![("ST", "malformed-message".to_string()), ("MX", "malformed-message".to_string())];
+        let mut errors = Vec::new();
+        let names_tree = tree_from_names("XSWI1", &names());
+        let mut specs = fallback_specs("LD/XSWI1", &failed, Ok(names_tree), &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(specs.iter().map(|(f, _)| *f).collect::<Vec<_>>(), vec!["ST", "MX"]);
+        set_type(&mut specs, "ST", &["Pos", "stVal"], SpecType::BitString);
+        let objs = ln_objects("LD/XSWI1", &specs);
+        assert!(objs.contains(&obj("LD/XSWI1.Pos", "ST", Some("DPS"))), "{objs:?}");
+        assert!(objs.contains(&obj("LD/XSWI1.A.phsA", "MX", Some("CMV"))));
+    }
+
+    /// GetNameList juga gagal -> baru masuk errors (per FC), tanpa teks internal.
+    #[test]
+    fn getnamelist_gagal_masuk_errors() {
+        let failed = vec![("ST", "malformed-message".to_string())];
+        let mut errors = Vec::new();
+        assert!(fallback_specs("LD/X", &failed, Err("timeout".into()), &mut errors).is_empty());
+        assert_eq!(
+            errors,
+            vec![BrowseError { reference: "LD/X[ST]".into(), error: "getVariableSpecification: malformed-message; GetNameList: timeout".into() }]
+        );
+        assert!(!errors[0].error.contains("pakai"));
+    }
+
+    /// (c) anggota dataset "LD/LN.DO[FC]" -> {object_reference, fc}.
+    #[test]
+    fn parse_anggota_dataset() {
+        let m = |r: &str, fc: &str| DatasetMember { object_reference: r.into(), fc: fc.into() };
+        assert_eq!(parse_member("BaselineLD0/XSWI1.Pos.stVal[ST]"), m("BaselineLD0/XSWI1.Pos.stVal", "ST"));
+        assert_eq!(parse_member("LD/MMXU1.A[MX]"), m("LD/MMXU1.A", "MX"));
+        assert_eq!(parse_member(" LD/GGIO1.Ind1 "), m("LD/GGIO1.Ind1", ""));
     }
 
     #[test]

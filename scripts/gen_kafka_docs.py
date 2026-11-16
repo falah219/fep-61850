@@ -51,6 +51,11 @@ BROWSE_ALL = [
     bo("simpleIOGenericIO/GGIO1.SPCSO1", "CO", "SPC"),
 ]
 
+def browse(key, id_rtu, message, objects, rcbs=(), errors=(), part=1, total=1):
+    """IEC61850_BROWSE_RESPONSE, urutan field sama dengan FEP."""
+    return {"key": key, "id_rtu": id_rtu, "status": "SUCCESS", "message": message, "objects": list(objects),
+            "rcbs": list(rcbs), "errors": list(errors), "part": part, "total_parts": total}
+
 consume = {
     "RTU_EVENTS__CREATE": {"event": "CREATE", "protocol": "IEC61850", "id_rtu": 9001},
     "RTU_EVENTS__UPDATE": {"event": "UPDATE", "protocol": "IEC61850", "ip_address": IP, "port": 102, "id_rtu": 9001,
@@ -193,30 +198,29 @@ produce = {
                                           "error": "Datapoint not found", "timestamp": T},
     "MANUAL_SET_EVENT_RESPONSE__failed_ied": {"status": "FAILED", "protocol": "IEC61850", "tag": "BAY1_ANIN1_2001",
                                               "error": "IED tidak berjalan", "timestamp": T},
-    "IEC61850_BROWSE_RESPONSE__success": {"key": "browse-9001-01", "id_rtu": 9001, "status": "SUCCESS",
-                                          "message": "4 objek", "objects": BROWSE_ALL, "part": 1, "total_parts": 1},
-    "IEC61850_BROWSE_RESPONSE__multipart_1": {"key": "browse-9001-02", "id_rtu": 9001, "status": "SUCCESS",
-                                              "message": "4 objek", "objects": BROWSE_ALL[:2], "part": 1, "total_parts": 2},
-    "IEC61850_BROWSE_RESPONSE__multipart_2": {"key": "browse-9001-02", "id_rtu": 9001, "status": "SUCCESS",
-                                              "message": "4 objek", "objects": BROWSE_ALL[2:], "part": 2, "total_parts": 2},
-    # Bentuk CONTOH (nama objek ilustrasi): LN yang getVariableSpecification-nya gagal, dibangun dari GetNameList.
-    "IEC61850_BROWSE_RESPONSE__fallback": {
-        "key": "browse-9302-01", "id_rtu": 9302, "status": "SUCCESS", "message": "3 objek, 1 node gagal (lihat errors)",
-        "objects": [
+    "IEC61850_BROWSE_RESPONSE__success": browse("browse-9001-01", 9001, "4 objek, 0 RCB", BROWSE_ALL),
+    "IEC61850_BROWSE_RESPONSE__multipart_1": browse("browse-9001-02", 9001, "4 objek, 0 RCB", BROWSE_ALL[:2], part=1, total=2),
+    "IEC61850_BROWSE_RESPONSE__multipart_2": browse("browse-9001-02", 9001, "4 objek, 0 RCB", BROWSE_ALL[2:], part=2, total=2),
+    # Bentuk CONTOH (nama objek ilustrasi). Error nyata saja: RCB yang tidak bisa dibaca. LN+FC yang tidak ada
+    # (IED membalas malformed-message, GetNameList juga tidak punya FC itu) TIDAK masuk errors.
+    "IEC61850_BROWSE_RESPONSE__success_with_errors": browse(
+        "browse-9302-01", 9302, "3 objek, 1 RCB, 1 error",
+        [
             bo("BaselineLD0/XSWI1.OpCnt", "ST", "INS"),
             bo("BaselineLD0/XSWI1.Pos", "ST", "DPC"),
             dict(bo("BaselineLD0/XSWI1.Pos", "CO", "DPC"),
                  control={"ctl_model": "sbo-with-enhanced-security", "sbo_timeout_ms": 30000,
                           "sbow": True, "oper": True, "cancel": True}),
         ],
-        "part": 1, "total_parts": 1,
-        "errors": [{"ref": "BaselineLD0/XSWI1[ST]", "error": "getVariableSpecification: malformed-message; pakai GetNameList"}],
-        "rcbs": [{"reference": "BaselineLD0/LLN0.BR.brcbST01", "buffered": True, "rpt_id": "BaselineLD0/LLN0$BR$brcbST01",
-                  "rpt_ena": False, "dataset": "BaselineLD0/LLN0.dsStatus", "trg_ops": "dchg,qchg,gi", "intg_pd_ms": 0,
-                  "members": ["BaselineLD0/XSWI1.Pos.stVal[ST]", "BaselineLD0/XSWI1.Pos.q[ST]"]}],
-    },
+        rcbs=[{"reference": "BaselineLD0/LLN0.BR.brcbST01", "buffered": True, "dataset": "BaselineLD0/LLN0.dsStatus",
+               "rpt_id": "BaselineLD0/LLN0$BR$brcbST01", "rpt_ena": False, "trg_ops": "dchg,qchg,gi", "intg_pd_ms": 0,
+               "members": [{"object_reference": "BaselineLD0/XSWI1.Pos.stVal", "fc": "ST"},
+                           {"object_reference": "BaselineLD0/XSWI1.Pos.q", "fc": "ST"}]}],
+        errors=[{"ref": "BaselineLD0/LLN0.BR.brcbMX01", "error": "timeout"}]),
     "IEC61850_BROWSE_RESPONSE__failed": {"key": "browse-9002-01", "id_rtu": 9002, "status": "FAILED",
-                                         "message": "IED tidak terkoneksi", "objects": [], "part": 1, "total_parts": 1},
+                                         "message": "IED tidak terkoneksi", "objects": [], "rcbs": [],
+                                         "errors": [{"ref": "browse", "error": "IED tidak terkoneksi"}],
+                                         "part": 1, "total_parts": 1},
 }
 
 # Simulasi split_parts (browse.rs) untuk batas test 160 byte

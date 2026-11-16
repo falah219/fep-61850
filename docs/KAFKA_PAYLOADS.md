@@ -526,13 +526,14 @@ koneksi MMS yang sama. LD → LN → DO → FC (`ST`, `MX`, `CO`, `SP`):
 
 1. Satu `getVariableSpecification` per LN + FC.
 2. Gagal (mis. `malformed-message`: respons type spec LN terlalu besar untuk PDU atau tidak bisa di-parse libIEC61850) →
-   dicatat di `errors`, lalu struktur LN dibangun dari **GetNameList** (`getLogicalDeviceVariables`, nama MMS `LN$FC$DO$DA`).
+   struktur FC itu dibangun dari **GetNameList** (`getLogicalDeviceVariables`, nama MMS `LN$FC$DO$DA`).
    Tipe `stVal` (untuk CDC) dibaca dari nilainya kalau `BROWSE_READ_VALUES=true` (default).
 3. Objek FC `CO`: `control` (SBOw/Oper/Cancel dari struktur, `ctlModel` & `sboTimeout` dari CF kalau `BROWSE_READ_VALUES`).
 4. RCB tiap LN (`.BR.` / `.RP.`): `RptEna`, `DatSet`, `RptID`, `TrgOps`, `IntgPd`, dan anggota dataset → `rcbs`.
 
-Kegagalan satu LN / DO / RCB **tidak** menggagalkan browse (dicatat di `errors`). Batas total `BROWSE_TIMEOUT_MS`
-(default 300000): tercapai → `SUCCESS` dengan hasil sebagian, `complete: false`. Timeout per request = `request_timeout_ms`.
+Kegagalan nyata satu LN / DO / RCB **tidak** menggagalkan browse (dicatat di `errors`); LN+FC yang memang tidak ada
+(`malformed-message` + GetNameList tanpa FC itu) bukan error. Batas total `BROWSE_TIMEOUT_MS`
+(default 300000): tercapai → `SUCCESS` dengan hasil sebagian + error `{ref: "browse"}`. Timeout per request = `request_timeout_ms`.
 Max PDU hasil negosiasi ada di log koneksi (`RTU_LOGGING` `terkoneksi MMS ..., max PDU N`); usulan FEP bisa diatur dengan
 `MMS_MAX_PDU_SIZE`. Debug satu objek: `cargo run --bin varspec -- <host> <port> <LD/LN.DO>` (lihat README).
 Balasan ke `IEC61850_BROWSE_RESPONSE` (bagian [3.7](#37-iec61850_browse_response)).
@@ -1725,25 +1726,54 @@ Struct: `ManualSetEventResponse`. Key = `"IEC61850"`.
 
 Dibuat di [rtu_event/browse.rs](../src/kafka/handlers/rtu_event/browse.rs). Key = `key` payload (`"unknown"` kalau kosong).
 
+**Skema stabil** (untuk consumer GRITA): semua field di bawah **selalu ada** dengan tipe yang sama, urutan field JSON tetap
+`key, id_rtu, status, message, objects, rcbs, errors, part, total_parts` (dijaga test `urutan_field_json_tetap`).
+
 | Field | Tipe | Arti |
 |---|---|---|
 | `key` | string | `key` payload (`""` kalau tidak ada) |
-| `id_rtu` | integer / null | `id_rtu` payload (`null` kalau tidak diisi) |
+| `id_rtu` | integer / null | `id_rtu` payload / hasil pencarian dari IP (`null` kalau tidak ketemu) |
 | `status` | string | `SUCCESS` / `FAILED` |
-| `message` | string | SUCCESS: `<total> objek` (jumlah semua bagian), `, <n> node gagal (lihat errors)` kalau ada error, `, belum lengkap (BROWSE_TIMEOUT_MS)` kalau batas waktu tercapai; FAILED: alasan |
+| `message` | string | SUCCESS: `<n> objek, <m> RCB` (total semua bagian), ditambah `, <k> error` kalau `errors` tidak kosong. FAILED: penyebab |
 | `objects` | array | Objek di bagian ini (`[]` kalau FAILED) |
 | `objects[].object_reference` | string | `LD/LN.DO` atau `LD/LN.DO.SDO` (untuk `master_datapoint_iec61850s.object_reference`) |
 | `objects[].fc` | string | `ST`, `MX`, `CO`, `SP` |
 | `objects[].cdc` | string / null | CDC tebakan dari struktur DO: `SPS DPS INS SPC DPC INC ACT ACD BCR BSC APC MV CMV`; `null` = tidak dikenali (juga fallback GetNameList dengan `BROWSE_READ_VALUES=false`). ENS/ENC terbaca INS/INC |
-| `objects[].control` | object | **Opsional**, hanya objek FC `CO`: `ctl_model` (teks kolom `ctl_model`, null = tidak dibaca), `sbo_timeout_ms` (CF `sboTimeout`, null = tidak ada), `sbow` / `oper` / `cancel` (boolean: ada di struktur CO) |
-| `errors` | array | **Opsional** (bagian 1, kalau ada): `[{ref, error}]` node yang gagal (`LD/LN[FC]`, `LD/LN.DO.stVal[ST]`, `LD/LN.BR.rcb`, ...) |
-| `rcbs` | array | **Opsional** (bagian 1, kalau ada): `reference`, `buffered`, `rpt_id`, `rpt_ena`, `dataset` (ACSI `LD/LN.DS`), `trg_ops` (format kolom `trg_ops`), `intg_pd_ms`, `members` (anggota dataset `LD/LN.DO.DA[FC]`) |
-| `complete` | boolean | **Opsional**: hanya ada (`false`) kalau `BROWSE_TIMEOUT_MS` tercapai sebelum semua LN dibrowse |
+| `objects[].control` | object | **Hanya ada untuk `fc = "CO"`**; objek FC lain tidak punya field ini (tidak dikirim, bukan `null`). Isi: `ctl_model` (string / null: teks kolom `ctl_model`, null = tidak dibaca), `sbo_timeout_ms` (integer / null: CF `sboTimeout`), `sbow` / `oper` / `cancel` (boolean: ada di struktur CO) |
+| `rcbs` | array | RCB + dataset, **lengkap di bagian 1**, `[]` di bagian lain dan saat FAILED |
+| `rcbs[].reference` | string | `LD/LN.BR.<nama>` (BRCB) / `LD/LN.RP.<nama>` (URCB), untuk `iec61850_report_controls.rcb_reference` |
+| `rcbs[].buffered` | boolean | BRCB = `true` |
+| `rcbs[].dataset` | string / null | `DatSet`, format ACSI `LD/LN.DataSet` (untuk `dataset_reference`) |
+| `rcbs[].rpt_id` | string / null | `RptID` |
+| `rcbs[].rpt_ena` | boolean | `RptEna` saat dibaca (`true` = sedang dipakai client lain / FEP) |
+| `rcbs[].trg_ops` | string | `TrgOps`, format kolom `trg_ops` (`dchg,qchg,dupd,integrity,gi`) |
+| `rcbs[].intg_pd_ms` | integer | `IntgPd` (ms) |
+| `rcbs[].members` | array | Anggota dataset `[{object_reference, fc}]`, bentuk sama dengan `objects[]` (`fc` = `""` kalau IED tidak menyertakannya) |
+| `errors` | array | Error **nyata** `[{ref, error}]`, **lengkap di bagian 1**, `[]` di bagian lain. FAILED: `[{ref: "browse", error: <penyebab>}]` |
 | `part` | integer | Nomor bagian, mulai 1 |
 | `total_parts` | integer | Jumlah bagian |
 
+Isi `errors` (selain itu tidak dilaporkan):
+
+| `ref` | Kapan |
+|---|---|
+| `LD/LN[FC]` | `getVariableSpecification` gagal **dan** fallback GetNameList juga gagal (`getVariableSpecification: <err>; GetNameList: <err>`) |
+| `LD/LN.DO.stVal[ST]` | Variabel ada di GetNameList tapi nilainya tidak bisa dibaca (tipe / CDC tidak bisa ditentukan) |
+| `LD/LN.DO.ctlModel[CF]`, `LD/LN.DO.sboTimeout[CF]` | Atribut kontrol ada tapi tidak bisa dibaca (`sboTimeout` yang tidak ada bukan error) |
+| `LD/LN.BR.<rcb>`, `LD/LN.RP.<rcb>`, `LD/LN (BR)`, `<dataset>` | RCB / daftar RCB / anggota dataset gagal dibaca |
+| `<LD>` | Daftar LN satu LD gagal dibaca |
+| `browse` | `BROWSE_TIMEOUT_MS` tercapai (hasil sebagian), atau penyebab FAILED |
+
+**Bukan error**: LN+FC yang memang tidak ada. IED membalasnya `object-non-existent`, tapi sebagian IED (mis. Schneider Baseline:
+`MainXSWI1[MX]`, `PMr_MMXU1[CO]`, `LLN0[MX]`) membalas `malformed-message`. Kalau GetNameList juga tidak punya variabel FC
+itu, FC dianggap tidak ada dan hanya dicatat di log DEBUG FEP. Kalau GetNameList punya variabelnya, struktur diambil dari
+GetNameList dan objeknya tetap masuk `objects` tanpa error.
+
 Satu DO bisa muncul beberapa kali (satu per FC). JSON tiap bagian ≤ ~900 KB (di bawah `message.max.bytes` default 1 MB);
-lebih → beberapa pesan dengan `key` dan `message` sama, `part` 1..`total_parts`. Gabungkan `objects` semua bagian.
+lebih → beberapa pesan dengan `key` dan `message` sama, `part` 1..`total_parts`. Gabungkan `objects` semua bagian; ambil
+`rcbs` dan `errors` dari bagian 1.
+
+SUCCESS tanpa RCB / error:
 
 `docs/examples/produce/IEC61850_BROWSE_RESPONSE__success.json`
 
@@ -1752,7 +1782,7 @@ lebih → beberapa pesan dengan `key` dan `message` sama, `part` 1..`total_parts
   "key": "browse-9001-01",
   "id_rtu": 9001,
   "status": "SUCCESS",
-  "message": "4 objek",
+  "message": "4 objek, 0 RCB",
   "objects": [
     {
       "object_reference": "simpleIOGenericIO/GGIO1.AnIn1",
@@ -1775,74 +1805,24 @@ lebih → beberapa pesan dengan `key` dan `message` sama, `part` 1..`total_parts
       "cdc": "SPC"
     }
   ],
+  "rcbs": [],
+  "errors": [],
   "part": 1,
   "total_parts": 1
 }
 ```
 
-Multi-part (di sini dibagi dengan batas kecil supaya contoh pendek; FEP memakai ~900 KB):
+SUCCESS dengan info kontrol, RCB, dan satu error nyata (**bentuk contoh**, nama objek ilustrasi untuk IED seperti Schneider
+Baseline):
 
-`docs/examples/produce/IEC61850_BROWSE_RESPONSE__multipart_1.json`
-
-```json
-{
-  "key": "browse-9001-02",
-  "id_rtu": 9001,
-  "status": "SUCCESS",
-  "message": "4 objek",
-  "objects": [
-    {
-      "object_reference": "simpleIOGenericIO/GGIO1.AnIn1",
-      "fc": "MX",
-      "cdc": "MV"
-    },
-    {
-      "object_reference": "simpleIOGenericIO/GGIO1.Ind1",
-      "fc": "ST",
-      "cdc": "SPS"
-    }
-  ],
-  "part": 1,
-  "total_parts": 2
-}
-```
-
-`docs/examples/produce/IEC61850_BROWSE_RESPONSE__multipart_2.json`
-
-```json
-{
-  "key": "browse-9001-02",
-  "id_rtu": 9001,
-  "status": "SUCCESS",
-  "message": "4 objek",
-  "objects": [
-    {
-      "object_reference": "simpleIOGenericIO/GGIO1.SPCSO1",
-      "fc": "ST",
-      "cdc": "SPC"
-    },
-    {
-      "object_reference": "simpleIOGenericIO/GGIO1.SPCSO1",
-      "fc": "CO",
-      "cdc": "SPC"
-    }
-  ],
-  "part": 2,
-  "total_parts": 2
-}
-```
-
-Fallback GetNameList + info kontrol & RCB (**bentuk contoh**, nama objek ilustrasi untuk IED seperti Schneider Baseline
-yang `getVariableSpecification`-nya gagal `malformed-message`):
-
-`docs/examples/produce/IEC61850_BROWSE_RESPONSE__fallback.json`
+`docs/examples/produce/IEC61850_BROWSE_RESPONSE__success_with_errors.json`
 
 ```json
 {
   "key": "browse-9302-01",
   "id_rtu": 9302,
   "status": "SUCCESS",
-  "message": "3 objek, 1 node gagal (lihat errors)",
+  "message": "3 objek, 1 RCB, 1 error",
   "objects": [
     {
       "object_reference": "BaselineLD0/XSWI1.OpCnt",
@@ -1867,31 +1847,95 @@ yang `getVariableSpecification`-nya gagal `malformed-message`):
       }
     }
   ],
-  "part": 1,
-  "total_parts": 1,
-  "errors": [
-    {
-      "ref": "BaselineLD0/XSWI1[ST]",
-      "error": "getVariableSpecification: malformed-message; pakai GetNameList"
-    }
-  ],
   "rcbs": [
     {
       "reference": "BaselineLD0/LLN0.BR.brcbST01",
       "buffered": true,
+      "dataset": "BaselineLD0/LLN0.dsStatus",
       "rpt_id": "BaselineLD0/LLN0$BR$brcbST01",
       "rpt_ena": false,
-      "dataset": "BaselineLD0/LLN0.dsStatus",
       "trg_ops": "dchg,qchg,gi",
       "intg_pd_ms": 0,
       "members": [
-        "BaselineLD0/XSWI1.Pos.stVal[ST]",
-        "BaselineLD0/XSWI1.Pos.q[ST]"
+        {
+          "object_reference": "BaselineLD0/XSWI1.Pos.stVal",
+          "fc": "ST"
+        },
+        {
+          "object_reference": "BaselineLD0/XSWI1.Pos.q",
+          "fc": "ST"
+        }
       ]
     }
-  ]
+  ],
+  "errors": [
+    {
+      "ref": "BaselineLD0/LLN0.BR.brcbMX01",
+      "error": "timeout"
+    }
+  ],
+  "part": 1,
+  "total_parts": 1
 }
 ```
+
+Multi-part (di sini dibagi dengan batas kecil supaya contoh pendek; FEP memakai ~900 KB). `rcbs` / `errors` di bagian 2 = `[]`:
+
+`docs/examples/produce/IEC61850_BROWSE_RESPONSE__multipart_1.json`
+
+```json
+{
+  "key": "browse-9001-02",
+  "id_rtu": 9001,
+  "status": "SUCCESS",
+  "message": "4 objek, 0 RCB",
+  "objects": [
+    {
+      "object_reference": "simpleIOGenericIO/GGIO1.AnIn1",
+      "fc": "MX",
+      "cdc": "MV"
+    },
+    {
+      "object_reference": "simpleIOGenericIO/GGIO1.Ind1",
+      "fc": "ST",
+      "cdc": "SPS"
+    }
+  ],
+  "rcbs": [],
+  "errors": [],
+  "part": 1,
+  "total_parts": 2
+}
+```
+
+`docs/examples/produce/IEC61850_BROWSE_RESPONSE__multipart_2.json`
+
+```json
+{
+  "key": "browse-9001-02",
+  "id_rtu": 9001,
+  "status": "SUCCESS",
+  "message": "4 objek, 0 RCB",
+  "objects": [
+    {
+      "object_reference": "simpleIOGenericIO/GGIO1.SPCSO1",
+      "fc": "ST",
+      "cdc": "SPC"
+    },
+    {
+      "object_reference": "simpleIOGenericIO/GGIO1.SPCSO1",
+      "fc": "CO",
+      "cdc": "SPC"
+    }
+  ],
+  "rcbs": [],
+  "errors": [],
+  "part": 2,
+  "total_parts": 2
+}
+```
+
+FAILED:
 
 `docs/examples/produce/IEC61850_BROWSE_RESPONSE__failed.json`
 
@@ -1902,6 +1946,13 @@ yang `getVariableSpecification`-nya gagal `malformed-message`):
   "status": "FAILED",
   "message": "IED tidak terkoneksi",
   "objects": [],
+  "rcbs": [],
+  "errors": [
+    {
+      "ref": "browse",
+      "error": "IED tidak terkoneksi"
+    }
+  ],
   "part": 1,
   "total_parts": 1
 }

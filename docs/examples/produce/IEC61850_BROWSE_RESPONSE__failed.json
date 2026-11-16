@@ -4,6 +4,13 @@
   "status": "FAILED",
   "message": "IED tidak terkoneksi",
   "objects": [],
+  "rcbs": [],
+  "errors": [
+    {
+      "ref": "browse",
+      "error": "IED tidak terkoneksi"
+    }
+  ],
   "part": 1,
   "total_parts": 1
 }

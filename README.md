@@ -373,11 +373,11 @@ Respons ke `IEC61850_BROWSE_RESPONSE` (key = `key`):
   (sub-DO seperti `WYE.phsA` dicari sampai 3 level). ENS/ENC tidak bisa dibedakan dari INS/INC lewat MMS.
   Tidak dikenali → `null`.
 - Dikerjakan **bertahap** (satu LN per langkah, 200 ms per putaran) di thread IED: polling & command tetap jalan.
-  Batas total `BROWSE_TIMEOUT_MS` (default 300000) → hasil sebagian + `complete: false`.
+  Batas total `BROWSE_TIMEOUT_MS` (default 300000) → hasil sebagian + error `{ref: "browse"}`.
 - **Toleran**: `getVariableSpecification` LN gagal (mis. `malformed-message` di Schneider Baseline Ed2) → dicatat di `errors`,
   struktur LN dibangun dari GetNameList (`LN$FC$DO$DA`), tipe `stVal` dari read nilai (`BROWSE_READ_VALUES`, default `true`).
-- Field opsional baru: `objects[].control` (ctlModel, sboTimeout, SBOw/Oper/Cancel), `errors`, `rcbs` (RptEna, DatSet, RptID,
-  TrgOps, IntgPd, anggota dataset), `complete`. Detail: [docs/KAFKA_PAYLOADS.md](docs/KAFKA_PAYLOADS.md#37-iec61850_browse_response).
+- Field baru: `objects[].control` (hanya FC CO: ctlModel, sboTimeout, SBOw/Oper/Cancel), `rcbs` (RptEna, DatSet, RptID,
+  TrgOps, IntgPd, anggota dataset `{object_reference, fc}`). Skema stabil: `rcbs` / `errors` selalu array (lengkap di part 1), LN+FC yang tidak ada (`malformed-message` + GetNameList kosong) bukan error. Detail: [docs/KAFKA_PAYLOADS.md](docs/KAFKA_PAYLOADS.md#37-iec61850_browse_response).
 - Max PDU hasil negosiasi ditulis di log koneksi; usulan FEP: `MMS_MAX_PDU_SIZE` (default library 65000, juga batas atasnya).
 - Debug satu objek (getVariableSpecification per FC + nama GetNameList):
 

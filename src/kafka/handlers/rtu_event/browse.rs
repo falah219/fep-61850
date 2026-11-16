@@ -1,6 +1,7 @@
 //! Event BROWSE (RTU_EVENTS): browse model IED di thread IED -> IEC61850_BROWSE_RESPONSE.
 //! IED besar bisa ribuan objek -> dikirim per bagian (`part` 1..=`total_parts`) maks ~900 KB.
-//! `errors` / `rcbs` (opsional) hanya di bagian 1.
+//! Skema stabil untuk GRITA: semua field selalu ada, urutan JSON tetap (struct diserialisasi langsung,
+//! bukan lewat `serde_json::Value` yang mengurutkan key). `rcbs` / `errors` lengkap di bagian 1, `[]` di bagian lain.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -23,28 +24,20 @@ const REPLY_MARGIN: Duration = Duration::from_secs(30);
 /// Di bawah batas default Kafka 1 MB (message.max.bytes), sisa untuk field lain.
 const MAX_PART_BYTES: usize = 900 * 1024;
 
-fn is_empty<T>(s: &&[T]) -> bool {
-    s.is_empty()
-}
-
+/// Satu pesan IEC61850_BROWSE_RESPONSE. Urutan field = urutan JSON.
 #[derive(Debug, Serialize)]
 struct BrowseResponse<'a> {
     key: &'a str,
     id_rtu: Option<i32>,
     status: &'static str,
-    message: &'a str,
+    message: String,
     objects: &'a [BrowseObject],
+    /// RCB + anggota dataset (bagian 1; bagian lain `[]`)
+    rcbs: &'a [RcbInfo],
+    /// Error nyata (bagian 1; bagian lain `[]`). FAILED: penyebabnya
+    errors: Vec<BrowseError>,
     part: usize,
     total_parts: usize,
-    /// Node yang gagal dibrowse (bagian 1 saja)
-    #[serde(skip_serializing_if = "is_empty")]
-    errors: &'a [BrowseError],
-    /// RCB + anggota dataset (bagian 1 saja)
-    #[serde(skip_serializing_if = "is_empty")]
-    rcbs: &'a [RcbInfo],
-    /// Hanya ada (false) kalau BROWSE_TIMEOUT_MS tercapai sebelum semua LN dibrowse
-    #[serde(skip_serializing_if = "Option::is_none")]
-    complete: Option<bool>,
 }
 
 /// Bagian SINKRON: kirim ke antrean thread IED. Future (tunggu + kirim respons) boleh di-spawn.
@@ -80,46 +73,54 @@ pub fn submit(mgr: &Arc<Manager>, m: RtuEventMessage) -> impl Future<Output = ()
     }
 }
 
-/// Pesan respons (satu atau lebih bagian, tiap bagian <= `limit` byte objek) sebagai JSON.
-fn responses(key: &str, id_rtu: Option<i32>, result: &Result<BrowseResult, String>, limit: usize) -> Vec<Value> {
-    let empty = BrowseResult::default();
-    let (status, message, r) = match result {
-        Ok(r) => {
-            let mut m = format!("{} objek", r.objects.len());
-            if !r.errors.is_empty() {
-                m.push_str(&format!(", {} node gagal (lihat errors)", r.errors.len()));
-            }
-            if !r.complete {
-                m.push_str(", belum lengkap (BROWSE_TIMEOUT_MS)");
-            }
-            ("SUCCESS", m, r)
-        }
+/// `<n> objek, <m> RCB[, <k> error]`.
+fn success_message(r: &BrowseResult) -> String {
+    let mut m = format!("{} objek, {} RCB", r.objects.len(), r.rcbs.len());
+    if !r.errors.is_empty() {
+        m.push_str(&format!(", {} error", r.errors.len()));
+    }
+    m
+}
+
+/// Pesan respons (satu atau lebih bagian, tiap bagian <= `limit` byte objek).
+fn responses<'a>(key: &'a str, id_rtu: Option<i32>, result: &'a Result<BrowseResult, String>, limit: usize) -> Vec<BrowseResponse<'a>> {
+    let r = match result {
+        Ok(r) => r,
         Err(e) => {
             warn!("[BROWSE] id_rtu={id_rtu:?} gagal: {e}");
-            ("FAILED", e.clone(), &empty)
+            let errors = vec![BrowseError { reference: "browse".into(), error: e.clone() }];
+            return vec![BrowseResponse {
+                key,
+                id_rtu,
+                status: "FAILED",
+                message: e.clone(),
+                objects: &[],
+                rcbs: &[],
+                errors,
+                part: 1,
+                total_parts: 1,
+            }];
         }
     };
-    let complete = (status == "SUCCESS" && !r.complete).then_some(false);
+    let message = success_message(r);
     let parts = split_parts(&r.objects, limit);
     let total_parts = parts.len();
     parts
-        .iter()
+        .into_iter()
         .enumerate()
         .map(|(i, objects)| {
             let first = i == 0;
-            let resp = BrowseResponse {
+            BrowseResponse {
                 key,
                 id_rtu,
-                status,
-                message: &message,
+                status: "SUCCESS",
+                message: message.clone(),
                 objects,
+                rcbs: if first { r.rcbs.as_slice() } else { &[] },
+                errors: if first { r.errors.clone() } else { Vec::new() },
                 part: i + 1,
                 total_parts,
-                errors: if first { r.errors.as_slice() } else { &[] },
-                rcbs: if first { r.rcbs.as_slice() } else { &[] },
-                complete,
-            };
-            serde_json::to_value(resp).unwrap_or(Value::Null)
+            }
         })
         .collect()
 }
@@ -144,13 +145,18 @@ pub fn split_parts(objects: &[BrowseObject], limit: usize) -> Vec<&[BrowseObject
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::iec61850::browse::{ControlInfo, DatasetMember};
 
     fn obj(i: usize) -> BrowseObject {
         BrowseObject { object_reference: format!("LD/GGIO1.Ind{i}"), fc: "ST".into(), cdc: Some("SPS".into()), control: None }
     }
 
     fn ok(objects: Vec<BrowseObject>) -> Result<BrowseResult, String> {
-        Ok(BrowseResult { objects, complete: true, ..Default::default() })
+        Ok(BrowseResult { objects, ..Default::default() })
+    }
+
+    fn json(r: Vec<BrowseResponse>) -> Vec<Value> {
+        r.iter().map(|x| serde_json::to_value(x).unwrap()).collect()
     }
 
     #[test]
@@ -166,42 +172,64 @@ mod tests {
     }
 
     #[test]
-    fn respons_gagal_dan_sukses() {
-        let r = responses("k1", Some(9001), &Err("IED tidak terkoneksi".into()), MAX_PART_BYTES);
+    fn skema_stabil_gagal_dan_sukses() {
+        let failed = Err("IED tidak terkoneksi".to_string());
+        let r = json(responses("k1", Some(9001), &failed, MAX_PART_BYTES));
         assert_eq!(r.len(), 1);
         assert_eq!(r[0]["status"], "FAILED");
         assert_eq!(r[0]["message"], "IED tidak terkoneksi");
-        assert_eq!(r[0]["objects"], serde_json::json!([]));
+        assert_eq!((&r[0]["objects"], &r[0]["rcbs"]), (&serde_json::json!([]), &serde_json::json!([])));
+        assert_eq!(r[0]["errors"], serde_json::json!([{"ref": "browse", "error": "IED tidak terkoneksi"}]));
         assert_eq!((r[0]["part"].as_u64(), r[0]["total_parts"].as_u64()), (Some(1), Some(1)));
-        // field opsional tidak muncul
-        assert!(r[0].get("errors").is_none() && r[0].get("rcbs").is_none() && r[0].get("complete").is_none());
 
-        let r = responses("k2", Some(9001), &ok(vec![obj(1)]), MAX_PART_BYTES);
-        assert_eq!(r[0]["status"], "SUCCESS");
-        assert_eq!(r[0]["objects"][0]["object_reference"], "LD/GGIO1.Ind1");
-        assert_eq!(r[0]["objects"][0]["cdc"], "SPS");
+        let res = ok(vec![obj(1)]);
+        let r = json(responses("k2", Some(9001), &res, MAX_PART_BYTES));
+        assert_eq!((r[0]["status"].as_str(), r[0]["message"].as_str()), (Some("SUCCESS"), Some("1 objek, 0 RCB")));
+        assert_eq!((&r[0]["rcbs"], &r[0]["errors"]), (&serde_json::json!([]), &serde_json::json!([])));
+        // control hanya untuk FC CO
         assert!(r[0]["objects"][0].get("control").is_none());
     }
 
     #[test]
-    fn errors_rcbs_hanya_di_bagian_pertama_dan_belum_lengkap() {
+    fn urutan_field_json_tetap() {
+        let res = Ok(BrowseResult {
+            objects: vec![BrowseObject { control: Some(ControlInfo::default()), fc: "CO".into(), ..obj(1) }],
+            rcbs: vec![RcbInfo {
+                reference: "LD/LLN0.BR.b".into(),
+                members: vec![DatasetMember { object_reference: "LD/X.Pos.stVal".into(), fc: "ST".into() }],
+                ..Default::default()
+            }],
+            errors: vec![BrowseError { reference: "LD/X".into(), error: "e".into() }],
+        });
+        let s = serde_json::to_string(&responses("k", Some(1), &res, MAX_PART_BYTES)[0]).unwrap();
+        let order = |keys: &[&str], from: &str| {
+            let pos: Vec<usize> = keys.iter().map(|k| from.find(&format!("\"{k}\":")).unwrap_or_else(|| panic!("{k}: {from}"))).collect();
+            assert!(pos.windows(2).all(|w| w[0] < w[1]), "urutan {keys:?}: {from}");
+        };
+        order(&["key", "id_rtu", "status", "message", "objects", "rcbs", "errors", "part", "total_parts"], &s);
+        let rcb = &s[s.find("\"rcbs\":").unwrap()..];
+        order(&["reference", "buffered", "dataset", "rpt_id", "rpt_ena", "trg_ops", "intg_pd_ms", "members"], rcb);
+    }
+
+    #[test]
+    fn rcbs_errors_hanya_di_bagian_pertama() {
         let res = Ok(BrowseResult {
             objects: (0..4).map(obj).collect(),
-            errors: vec![BrowseError { reference: "LD/XSWI1[ST]".into(), error: "malformed-message".into() }],
+            errors: vec![BrowseError { reference: "LD/LLN0.BR.brcbMX01".into(), error: "timeout".into() }],
             rcbs: vec![RcbInfo { reference: "LD/LLN0.BR.brcbST01".into(), ..Default::default() }],
-            complete: false,
         });
-        let r = responses("k3", Some(9302), &res, 160);
+        let r = json(responses("k3", Some(9302), &res, 160));
         assert!(r.len() > 1);
-        assert_eq!(r[0]["errors"][0]["ref"], "LD/XSWI1[ST]");
+        assert_eq!(r[0]["errors"][0]["ref"], "LD/LLN0.BR.brcbMX01");
         assert_eq!(r[0]["rcbs"][0]["reference"], "LD/LLN0.BR.brcbST01");
-        assert!(r[1].get("errors").is_none() && r[1].get("rcbs").is_none());
-        assert!(r.iter().all(|p| p["complete"] == false));
-        assert_eq!(r[0]["message"], "4 objek, 1 node gagal (lihat errors), belum lengkap (BROWSE_TIMEOUT_MS)");
+        for p in &r[1..] {
+            assert_eq!((&p["rcbs"], &p["errors"]), (&serde_json::json!([]), &serde_json::json!([])));
+        }
+        assert!(r.iter().all(|p| p["message"] == "4 objek, 1 RCB, 1 error"));
     }
 
     fn field<T: serde::de::DeserializeOwned>(v: &Value, k: &str) -> Vec<T> {
-        v.get(k).cloned().map_or_else(Vec::new, |x| serde_json::from_value(x).unwrap())
+        serde_json::from_value(v[k].clone()).unwrap()
     }
 
     /// Contoh IEC61850_BROWSE_RESPONSE di docs/examples/produce = keluaran responses().
@@ -210,22 +238,26 @@ mod tests {
         use crate::kafka::payload_examples::{examples_of, int_of, str_of};
         let ex: std::collections::BTreeMap<String, Value> = examples_of("produce", TOPIC_BROWSE_RESPONSE).into_iter().collect();
         let get = |n: &str| ex.get(&format!("{TOPIC_BROWSE_RESPONSE}__{n}")).cloned().unwrap_or_else(|| panic!("contoh {n}"));
+        for n in ["success", "success_with_errors", "failed", "multipart_1", "multipart_2"] {
+            get(n);
+        }
         let result = |v: &Value| -> Result<BrowseResult, String> {
             if str_of(v, "status") == "FAILED" {
                 return Err(str_of(v, "message").into());
             }
-            let complete = v.get("complete").and_then(Value::as_bool).unwrap_or(true);
-            Ok(BrowseResult { objects: field(v, "objects"), errors: field(v, "errors"), rcbs: field(v, "rcbs"), complete })
+            Ok(BrowseResult { objects: field(v, "objects"), errors: field(v, "errors"), rcbs: field(v, "rcbs") })
         };
-        // semua contoh satu bagian
         for (name, v) in ex.iter().filter(|(_, v)| v["total_parts"] == 1) {
             let id = Some(int_of(v, "id_rtu") as i32);
-            assert_eq!(responses(str_of(v, "key"), id, &result(v), MAX_PART_BYTES), vec![v.clone()], "{name}");
+            let res = result(v);
+            assert_eq!(json(responses(str_of(v, "key"), id, &res, MAX_PART_BYTES)), vec![v.clone()], "{name}");
         }
         // multi-part dengan batas kecil supaya contoh pendek (FEP memakai MAX_PART_BYTES)
         let (p1, p2) = (get("multipart_1"), get("multipart_2"));
-        let all: Vec<BrowseObject> = field(&p1, "objects").into_iter().chain(field(&p2, "objects")).collect();
-        assert_eq!(responses("browse-9001-02", Some(9001), &ok(all), 160), vec![p1, p2]);
+        let mut all = result(&p1).unwrap();
+        all.objects.extend(field::<BrowseObject>(&p2, "objects"));
+        let all = Ok(all);
+        assert_eq!(json(responses("browse-9001-02", Some(9001), &all, 160)), vec![p1, p2]);
     }
 
     #[tokio::test]

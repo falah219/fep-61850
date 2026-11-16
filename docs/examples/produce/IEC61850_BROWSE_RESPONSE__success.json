@@ -2,7 +2,7 @@
   "key": "browse-9001-01",
   "id_rtu": 9001,
   "status": "SUCCESS",
-  "message": "4 objek",
+  "message": "4 objek, 0 RCB",
   "objects": [
     {
       "object_reference": "simpleIOGenericIO/GGIO1.AnIn1",
@@ -25,6 +25,8 @@
       "cdc": "SPC"
     }
   ],
+  "rcbs": [],
+  "errors": [],
   "part": 1,
   "total_parts": 1
 }
