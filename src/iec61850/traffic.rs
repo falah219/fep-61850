@@ -129,6 +129,16 @@ pub fn control_tx(action: &str, reference: &str, ctl_val: Option<&str>, or_ident
     }
 }
 
+/// SELECT pada ctlModel direct: tidak ada request ke IED.
+pub fn control_skip(action: &str, reference: &str) -> String {
+    format!("CONTROL SKIP - {action} {reference} (direct, tidak dikirim)")
+}
+
+/// Command ditolak FEP sebelum dikirim (value tidak valid, status-only). Dikirim dengan level ERROR.
+pub fn control_not_sent(action: &str, reference: &str, reason: &str) -> String {
+    format!("CONTROL {action} {reference} tidak dikirim: {reason}")
+}
+
 /// `add_cause` None = positive.
 pub fn control_rx(action: &str, reference: &str, add_cause: Option<i32>) -> String {
     match add_cause {
@@ -223,6 +233,9 @@ mod tests {
             "CONTROL TX - SELECT SIMIED1LD0/CSWI1.Pos ctlVal=false orIdent=tester"
         );
         assert_eq!(control_tx("CANCEL", "X/Y.Pos", None, "op"), "CONTROL TX - CANCEL X/Y.Pos orIdent=op");
+        assert_eq!(control_skip("SELECT", "X/Y.Pos"), "CONTROL SKIP - SELECT X/Y.Pos (direct, tidak dikirim)");
+        assert_eq!(control_not_sent("OPERATE", "X/Y.Pos", "value DPC harus 1 (OPEN) atau 2 (CLOSE), bukan 0"),
+            "CONTROL OPERATE X/Y.Pos tidak dikirim: value DPC harus 1 (OPEN) atau 2 (CLOSE), bukan 0");
         assert_eq!(control_rx("OPERATE", "SIMIED1LD0/CSWI1.Pos", None), "CONTROL RX - OPERATE SIMIED1LD0/CSWI1.Pos positive");
         assert_eq!(
             control_rx("OPERATE", "SIMIED1LD0/CSWI1.Pos", Some(5)),

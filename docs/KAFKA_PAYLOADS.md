@@ -304,7 +304,7 @@ Aksi IEC 61850 per `ctlModel` (dibaca dari IED, ditimpa `iec61850_command_formul
 
 | `action` | direct-normal / direct-enhanced | sbo-normal | sbo-enhanced |
 |---|---|---|---|
-| `SELECT_RTU` | tidak ada request MMS, langsung sukses | `select` | `selectWithValue` |
+| `SELECT_RTU` | tidak ada request MMS, langsung sukses (`CONTROL SKIP` di RTU_LOGGING) | `select` | `selectWithValue` |
 | `OPERATE_RTU` | `operate` (enhanced: tunggu CommandTermination maks `OPER_TIMEOUT_MS`) | `operate` | `operate` + tunggu CommandTermination |
 | `CANCEL_RTU` | `cancel` | `cancel` | `cancel` |
 
@@ -1172,7 +1172,11 @@ CONTROL TX - <SELECT|OPERATE|CANCEL> <object_reference> ctlVal=<nilai> orIdent=<
 CONTROL RX - <SELECT|OPERATE|CANCEL> <object_reference> positive
 CONTROL RX - <SELECT|OPERATE|CANCEL> <object_reference> negative AddCause=<nama>
 CONTROL RX - CommandTermination <object_reference> <positive|negative>
+CONTROL SKIP - SELECT <object_reference> (direct, tidak dikirim)                        (SELECT pada ctlModel direct)
 ```
+
+Command yang ditolak FEP **sebelum** dikirim (value tidak cocok CDC, `value` kosong, ctlModel status-only) **tidak** ditulis
+`CONTROL TX`, melainkan `[ERROR] CONTROL <SELECT|OPERATE|CANCEL> <object_reference> tidak dikirim: <alasan>`.
 
 `ctlVal`: `true`/`false` (SPC/DPC), integer (INC/ENC), float (APC), `stop`/`lower`/`higher` (BSC).
 `CONTROL RX` hanya untuk jawaban IED (timeout / koneksi putus tidak ditulis sebagai RX). Nama AddCause: tabel di [3.5](#35-rtu_command).
@@ -1305,6 +1309,30 @@ CONTROL RX - CommandTermination <object_reference> <positive|negative>
   "protocol": "IEC61850",
   "id_rtu": 9001,
   "logging": "2026-11-15T03:04:09.000000Z CONTROL RX - CommandTermination BAY1LD0/CSWI1.Pos positive",
+  "time": 1794711845123
+}
+```
+
+`docs/examples/produce/RTU_LOGGING__control_skip.json`
+
+```json
+{
+  "ip_address": "10.10.1.21",
+  "protocol": "IEC61850",
+  "id_rtu": 9001,
+  "logging": "2026-11-15T03:04:07.000000Z CONTROL SKIP - SELECT BAY1LD0/CSWI1.Pos (direct, tidak dikirim)",
+  "time": 1794711845123
+}
+```
+
+`docs/examples/produce/RTU_LOGGING__control_rejected.json`
+
+```json
+{
+  "ip_address": "10.10.1.21",
+  "protocol": "IEC61850",
+  "id_rtu": 9001,
+  "logging": "[ERROR] CONTROL OPERATE BAY1LD0/CSWI1.Pos tidak dikirim: value DPC harus 1 (OPEN) atau 2 (CLOSE), bukan 0",
   "time": 1794711845123
 }
 ```
@@ -1742,8 +1770,7 @@ Ditemukan saat menulis dokumen ini. **Kode tidak diubah**; perlu keputusan tim.
 11. **`MASTER_DATAPOINT_EVENT.ioa` harus integer** (string → parse error), padahal `RTU_EVENTS.ioa` menerima string.
     `REMOVE` tidak dikenal di topic ini (hanya `DELETE`).
 12. ~~Event GI pada mode POLLING menghasilkan `INTEGRITY`~~ — **diperbaiki**: `GENERAL_INTERROGATION`.
-13. **`CONTROL TX` ditulis walau tidak ada yang dikirim ke IED**: `value` tidak cocok CDC (baris tanpa `ctlVal`, lalu command
-    gagal), dan `SELECT_RTU` pada ctlModel direct (ditulis `CONTROL TX` + `CONTROL RX ... positive` tanpa request MMS).
+13. ~~`CONTROL TX` ditulis walau tidak ada request ke IED~~ — **diperbaiki**: SELECT direct → `CONTROL SKIP`, value tidak valid / status-only → baris `[ERROR] ... tidak dikirim`.
 14. **Baris ringkas `[INFO] <n> log data dilewati ...` tanpa timestamp**, sementara baris lalu lintas lain diawali timestamp.
 15. **README fase 8** menyebut `RTU_LOGGING` hanya "konek, putus, gagal konek, RCB gagal"; kode juga mengirim hasil command,
     liveness/reconnect, EntryID ditolak, parameter OSI, peringatan konfigurasi, RCB pulih, dan baris lalu lintas/CONTROL.

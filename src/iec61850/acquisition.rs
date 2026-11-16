@@ -481,6 +481,18 @@ fn send_gi(ied: &Ied, ctx: &RtuCtx, rcb: &Rcb) {
 
 /// Jalankan select/operate/cancel di thread IED. Objek kontrol di-cache per IOA selama sesi,
 /// supaya SELECT dan OPERATE yang datang terpisah memakai objek (ctlNum) yang sama.
+/// false = tidak ada request MMS: SELECT pada ctlModel direct (operate langsung tanpa select).
+fn sends_request(action: CommandAction, model: ffi::ControlModel) -> bool {
+    !(action == CommandAction::Select && matches!(model, ffi::CONTROL_MODEL_DIRECT_NORMAL | ffi::CONTROL_MODEL_DIRECT_ENHANCED))
+}
+
+/// Command ditolak FEP sebelum ada request ke IED: baris `[ERROR]` di RTU_LOGGING (bukan CONTROL TX).
+fn control_rejected(ctx: &RtuCtx, action: &str, reference: &str, e: String) -> crate::error::Iec61850Error {
+    let r = &ctx.rtu;
+    ctx.publisher.producer.send_log(&r.ip_address, r.id_rtu, "ERROR", &traffic::control_not_sent(action, reference, &e));
+    e.into()
+}
+
 fn execute_command(ied: &Ied, ctx: &RtuCtx, controls: &mut HashMap<i32, Control>, req: &CommandReq) -> Result<()> {
     let p = ctx
         .points
@@ -500,28 +512,37 @@ fn execute_command(ied: &Ied, ctx: &RtuCtx, controls: &mut HashMap<i32, Control>
     };
     ctl.prepare(&req.or_ident, p.interlock_check, p.synchro_check)?;
 
-    let value = || -> Result<OwnedValue> {
-        let v = req.value.ok_or("value wajib diisi")?;
-        Ok(match ctl_value(&p.cdc, v, ctx.rtu.dpc_close_value)? {
-            CtlVal::Bool(b) => OwnedValue::boolean(b),
-            CtlVal::Int(i) => OwnedValue::int32(i),
-            CtlVal::Float(f) => OwnedValue::float(f),
-            CtlVal::Tcmd(t) => OwnedValue::tcmd(t),
-        })
-    };
     let action = req.action.as_str();
     let r = &p.object_reference;
-    let ctl_text = req
-        .value
-        .filter(|_| req.action != CommandAction::Cancel)
-        .and_then(|v| ctl_value(&p.cdc, v, ctx.rtu.dpc_close_value).ok())
-        .map(traffic::ctl_val_text);
-    ctx.log_control(&traffic::control_tx(action, r, ctl_text.as_deref(), &req.or_ident));
+    // Validasi SEBELUM baris CONTROL TX: TX hanya ditulis kalau benar-benar ada request ke IED.
+    let model = ctl.control_model();
+    if model == ffi::CONTROL_MODEL_STATUS_ONLY {
+        return Err(control_rejected(ctx, action, r, "ctlModel status-only, tidak bisa dikontrol".into()));
+    }
+    let val = match req.action {
+        CommandAction::Cancel => None,
+        _ => match req.value.ok_or_else(|| "value wajib diisi".to_string()).and_then(|v| ctl_value(&p.cdc, v, ctx.rtu.dpc_close_value)) {
+            Ok(v) => Some(v),
+            Err(e) => return Err(control_rejected(ctx, action, r, e)),
+        },
+    };
+    if !sends_request(req.action, model) {
+        ctx.log_control(&traffic::control_skip(action, r));
+        return Ok(());
+    }
+    let owned = val.map(|v| match v {
+        CtlVal::Bool(b) => OwnedValue::boolean(b),
+        CtlVal::Int(i) => OwnedValue::int32(i),
+        CtlVal::Float(f) => OwnedValue::float(f),
+        CtlVal::Tcmd(t) => OwnedValue::tcmd(t),
+    });
+    ctx.log_control(&traffic::control_tx(action, r, val.map(traffic::ctl_val_text).as_deref(), &req.or_ident));
     // Ok(true) = operate enhanced security: CommandTermination masih ditunggu
-    let sent = match req.action {
-        CommandAction::Select => ctl.select(&value()?).map(|()| false),
-        CommandAction::Operate => ctl.operate(&value()?),
-        CommandAction::Cancel => ctl.cancel().map(|()| false),
+    let sent = match (req.action, &owned) {
+        (CommandAction::Select, Some(v)) => ctl.select(v).map(|()| false),
+        (CommandAction::Operate, Some(v)) => ctl.operate(v),
+        (CommandAction::Cancel, _) => ctl.cancel().map(|()| false),
+        (_, None) => Err("value wajib diisi".into()),
     };
     // CONTROL RX hanya untuk jawaban IED (bukan timeout / koneksi putus)
     match &sent {
@@ -722,6 +743,17 @@ fn poll_cycle(ied: &Ied, ctx: &RtuCtx, groups: &[PollGroup], sent: &mut [Option<
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+
+    #[test]
+    fn select_direct_tanpa_request() {
+        use ffi::{CONTROL_MODEL_DIRECT_ENHANCED, CONTROL_MODEL_DIRECT_NORMAL, CONTROL_MODEL_SBO_ENHANCED, CONTROL_MODEL_SBO_NORMAL};
+        assert!(!sends_request(CommandAction::Select, CONTROL_MODEL_DIRECT_NORMAL));
+        assert!(!sends_request(CommandAction::Select, CONTROL_MODEL_DIRECT_ENHANCED));
+        assert!(sends_request(CommandAction::Select, CONTROL_MODEL_SBO_NORMAL));
+        assert!(sends_request(CommandAction::Select, CONTROL_MODEL_SBO_ENHANCED));
+        assert!(sends_request(CommandAction::Operate, CONTROL_MODEL_DIRECT_NORMAL));
+        assert!(sends_request(CommandAction::Cancel, CONTROL_MODEL_DIRECT_NORMAL));
+    }
 
     #[test]
     fn action_polling_penuh() {

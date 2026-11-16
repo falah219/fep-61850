@@ -1,0 +1,7 @@
+{
+  "ip_address": "10.10.1.21",
+  "protocol": "IEC61850",
+  "id_rtu": 9001,
+  "logging": "[ERROR] CONTROL OPERATE BAY1LD0/CSWI1.Pos tidak dikirim: value DPC harus 1 (OPEN) atau 2 (CLOSE), bukan 0",
+  "time": 1794711845123
+}

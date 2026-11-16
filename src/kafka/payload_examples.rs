@@ -221,6 +221,12 @@ fn contoh_rtu_logging() {
             "control_rx_positive" => traffic::control_rx("SELECT", POS, None),
             "control_rx_negative" => traffic::control_rx("OPERATE", POS, Some(10)),
             "control_termination" => traffic::termination_rx(POS, true),
+            "control_skip" => traffic::control_skip("SELECT", POS),
+            "control_rejected" => {
+                let reason = "value DPC harus 1 (OPEN) atau 2 (CLOSE), bukan 0";
+                assert_eq!(line, format!("[ERROR] {}", traffic::control_not_sent("OPERATE", POS, reason)), "{name}");
+                continue;
+            }
             "traffic_dropped" => {
                 // batas 1/detik, 13 baris di detik 1 -> 12 dilewati, ringkasan di detik 2 (tanpa timestamp)
                 let t = TrafficLog::new(true, 1);
