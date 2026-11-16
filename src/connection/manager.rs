@@ -105,6 +105,30 @@ pub struct Manager {
     /// true setelah stop_all (shutdown): reload yang masih tertunda tidak dijalankan.
     closed: AtomicBool,
     debounce: Debouncer,
+    /// Salinan TERAKHIR baris `iec61850s` dari DB per IED (apa adanya, tanpa override event STATE),
+    /// terpisah dari status jalan/berhenti. Pembanding CDC `iec61850s`.
+    db_rows: DashMap<i32, RtuConfig>,
+    /// Debounce khusus cek-ulang baris CDC `iec61850s` (kunci terpisah dari `debounce`, supaya tidak
+    /// menimpa reload penuh yang sedang tertunda untuk IED yang sama).
+    row_debounce: Debouncer,
+}
+
+/// Tindakan setelah baris `iec61850s` dibaca ulang dari DB (dibandingkan dengan salinan terakhir).
+#[derive(Debug, PartialEq)]
+pub enum RowAction {
+    /// Sama dengan salinan: tidak ada yang dilakukan (mis. sudah ditangani event STATE)
+    Skip,
+    Reload,
+    /// Baris hilang / is_deleted
+    Stop,
+}
+
+pub fn row_action(old: Option<&RtuConfig>, new: Option<&RtuConfig>) -> RowAction {
+    match (old, new) {
+        (_, None) => RowAction::Stop,
+        (Some(o), Some(n)) if o == n => RowAction::Skip,
+        _ => RowAction::Reload,
+    }
 }
 
 impl Manager {
@@ -120,6 +144,8 @@ impl Manager {
             ops: tokio::sync::Mutex::new(()),
             closed: AtomicBool::new(false),
             debounce: Debouncer::default(),
+            db_rows: DashMap::new(),
+            row_debounce: Debouncer::default(),
         }
     }
 
@@ -136,6 +162,9 @@ impl Manager {
         let points = repo::load_points(&c, None).await.map_err(Database)?;
         let unmapped = repo::load_unmapped_ioas(&c, None).await.map_err(Database)?;
         let mut started = 0;
+        for rtu in &rtus {
+            self.db_rows.insert(rtu.id_rtu, rtu.clone());
+        }
         for rtu in rtus.into_iter().filter(|r| r.state_rtu) {
             let id = rtu.id_rtu;
             let rtu_rcbs = rcbs.iter().filter(|(r, _, _)| *r == id).map(|(_, n, s)| (n.clone(), s.clone())).collect();
@@ -155,9 +184,12 @@ impl Manager {
         }
         let c = self.client().await?;
         let Some(mut rtu) = repo::load_rtus(&c, Some(id)).await.map_err(Database)?.into_iter().next() else {
+            self.db_rows.remove(&id);
             self.stop_locked(id).await;
             return Err(format!("RTU {id} tidak ada di iec61850s").into());
         };
+        // salinan DB apa adanya (sebelum override STATE)
+        self.db_rows.insert(id, rtu.clone());
         if let Some(s) = state {
             rtu.state_rtu = s;
         }
@@ -181,6 +213,65 @@ impl Manager {
             if let Err(e) = self.reload(id, None).await {
                 warn!(id_rtu = id, "reload gagal: {e}");
             }
+        }
+    }
+
+    /// Event STATE (idempoten): IED yang sudah jalan tidak di-restart oleh STATE true, IED yang sudah berhenti
+    /// tidak diapa-apakan oleh STATE false. Jadi STATE + CDC `state_rtu` untuk perubahan yang sama = satu aksi.
+    pub async fn set_state(&self, id: i32, state: bool) -> Result<()> {
+        if state == self.contains(id) {
+            info!(id_rtu = id, state, "STATE sama dengan kondisi IED, tidak ada aksi");
+            return Ok(());
+        }
+        self.reload(id, Some(state)).await
+    }
+
+    /// Salinan terakhir baris DB IED ini.
+    pub fn db_row(&self, id: i32) -> Option<RtuConfig> {
+        self.db_rows.get(&id).map(|r| r.clone())
+    }
+
+    /// `channel_number` berubah: cukup perbarui channel status ping, TANPA reconnect MMS.
+    pub fn set_channel(&self, id: i32, channel: i32) {
+        if let Some(mut row) = self.db_row(id).or_else(|| self.config_of(id)) {
+            row.channel_number = channel;
+            self.db_rows.insert(id, row);
+        }
+    }
+
+    /// Channel untuk status ping: salinan DB terbaru, kalau belum ada konfigurasi thread.
+    pub(super) fn channel_of(&self, id: i32, running: i32) -> i32 {
+        self.db_rows.get(&id).map_or(running, |r| r.channel_number)
+    }
+
+    /// CDC `iec61850s`: setelah RELOAD_DEBOUNCE_MS baca ulang baris dari DB dan bandingkan dengan salinan
+    /// terakhir. Sama -> tidak ada aksi (mis. event STATE sudah memprosesnya lebih dulu).
+    pub fn reload_row_later(self: &Arc<Self>, id: i32) {
+        let me = Arc::clone(self);
+        let delay = Duration::from_millis(self.runtime.reload_debounce_ms);
+        self.row_debounce.schedule(id, delay, async move {
+            if let Err(e) = me.reload_if_row_changed(id).await {
+                warn!(id_rtu = id, "reload gagal: {e}");
+            }
+        });
+    }
+
+    async fn reload_if_row_changed(&self, id: i32) -> Result<()> {
+        let row = {
+            let c = self.client().await?;
+            repo::load_rtus(&c, Some(id)).await.map_err(Database)?.into_iter().next()
+        };
+        match row_action(self.db_row(id).as_ref(), row.as_ref()) {
+            RowAction::Skip => {
+                info!(id_rtu = id, "baris iec61850s sama dengan salinan terakhir, tidak ada aksi");
+                Ok(())
+            }
+            RowAction::Stop => {
+                self.db_rows.remove(&id);
+                self.stop(id).await;
+                Ok(())
+            }
+            RowAction::Reload => self.reload(id, None).await,
         }
     }
 

@@ -31,7 +31,7 @@ impl Manager {
             let targets: Vec<(i32, String, i32)> = self
                 .rtus
                 .iter()
-                .map(|e| (*e.key(), e.ctx.rtu.ip_address.clone(), e.ctx.rtu.channel_number))
+                .map(|e| (*e.key(), e.ctx.rtu.ip_address.clone(), self.channel_of(*e.key(), e.ctx.rtu.channel_number)))
                 .collect();
             stream::iter(targets)
                 .for_each_concurrent(self.runtime.ping_concurrency, |(id, ip, channel)| {

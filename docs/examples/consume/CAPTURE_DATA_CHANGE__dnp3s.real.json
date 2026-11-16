@@ -13,6 +13,7 @@
     "rtu_offline_at": "1794791384243",
     "status_rtu": "red",
     "status_channel": false,
+    "channel_number": 104,
     "is_deleted": false,
     "updated_at": "2026-11-16T01:09:44.737+00:00",
     "...": "..."

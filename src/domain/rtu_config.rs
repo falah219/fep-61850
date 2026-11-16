@@ -2,7 +2,7 @@
 
 use crate::iec61850::client::OsiSide;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RtuConfig {
     pub id_rtu: i32,
     pub state_rtu: bool,

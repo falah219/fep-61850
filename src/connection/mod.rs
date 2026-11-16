@@ -9,5 +9,5 @@ mod reconnection;
 pub use gate::{ConnectGate, GatePermit};
 #[cfg(test)]
 pub(crate) use manager::testing;
-pub use manager::{join_timeout, Debouncer, Manager};
+pub use manager::{join_timeout, row_action, Debouncer, Manager, RowAction};
 pub use reconnection::run_ied;

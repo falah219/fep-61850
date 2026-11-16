@@ -611,7 +611,7 @@ Struct: `CaptureDataChangeMessage`. Handler: [capture_data_change.rs](../src/kaf
 
 | `table` | Efek |
 |---|---|
-| `iec61850s` | `record.id_rtu`. `DELETE` atau `is_deleted = true` → hentikan IED. `INSERT` → jalankan IED (reload). `UPDATE` → dibandingkan dengan konfigurasi IED yang **sedang berjalan**; reload IED itu hanya kalau kolom koneksi/akuisisi berubah (tabel di bawah). IED belum berjalan → dijalankan kalau `state_rtu` tidak `false` |
+| `iec61850s` | `record.id_rtu`. `DELETE` atau `is_deleted = true` → hentikan IED. Selain itu `record` dibandingkan dengan **salinan terakhir baris DB** IED itu (bukan dengan status jalan/berhenti): kolom konfigurasi berubah → baca ulang baris dari DB setelah `RELOAD_DEBOUNCE_MS`, reload IED itu kalau masih beda dengan salinan (sudah ditangani event STATE → tidak ada aksi); hanya `channel_number` berubah → channel status ping diperbarui **tanpa reconnect MMS**; hanya kolom status → tidak ada aksi. IED belum dikenal (INSERT) → dijalankan kalau `state_rtu` tidak `false` |
 | `iec61850_report_controls` | reload IED `record.id_rtu` |
 | `master_datapoint_iec61850s`, `iec61850_command_formulas` | `id_rtu` dicari dari `record.id_master_datapoint` lewat `master_datapoints` → reload IED itu. Tidak ketemu (mis. DELETE dan datapoint sudah hilang) → reload **semua** IED + WARN |
 | `master_data_objects` | muat ulang group (tanpa reconnect). `record.protocol` ada dan bukan `IEC61850` → diabaikan |
@@ -620,14 +620,15 @@ Struct: `CaptureDataChangeMessage`. Handler: [capture_data_change.rs](../src/kaf
 | `manual_sets` | muat ulang daftar tag manual set (tanpa reconnect) |
 | lainnya (`dnp3s`, `iec104s`, ...) | diabaikan, hanya log DEBUG |
 
-Kolom `iec61850s` yang memicu reload (dipakai `RtuConfig`): `ip_address`, `port`, `local_ip_address`, `acquisition_mode`,
+Kolom konfigurasi `iec61850s` (dipakai `RtuConfig`): `ip_address`, `port`, `local_ip_address`, `acquisition_mode`,
 `poll_interval_ms`, `general_interrogation_interval`, `connect_timeout_ms`, `request_timeout_ms`, `reconnect_time_ms`,
-`reconnect_retry_count`, `state_rtu`, `ap_title`, `ae_qualifier`, `p_selector`, `s_selector`, `t_selector` (+ `is_deleted`).
-Kolom lain **diabaikan**, termasuk kolom status yang sering di-UPDATE backend saat RTU online/offline (`status_rtu`,
-`rtu_online_at`, `rtu_offline_at`, `status_channel`, `channel_*`, `created_at`, `updated_at`, `name`, ...). Kolom yang tidak ada
-di `record` dianggap tidak berubah. Angka negatif dianggap 0 (sama dengan saat dimuat).
+`reconnect_retry_count`, `state_rtu`, `ap_title`, `ae_qualifier`, `p_selector`, `s_selector`, `t_selector` (+ `is_deleted`) →
+reload; `channel_number` → hanya channel ping. Kolom lain **diabaikan**, termasuk kolom status yang di-UPDATE backend dari
+`RTU_STATUS` FEP sendiri (`status_rtu`, `rtu_online_at`, `rtu_offline_at`, `status_channel`, `created_at`, `updated_at`, `name`, ...).
+Kolom yang tidak ada di `record` dianggap tidak berubah. Angka negatif dianggap 0 (sama dengan saat dimuat).
 
-Log: `INFO [CDC] UPDATE iec61850s: reload IED`, `DEBUG [CDC] UPDATE iec61850s diabaikan: hanya kolom status / non-koneksi yang berubah`,
+Log: `INFO [CDC] UPDATE iec61850s: konfigurasi berubah, cek ulang baris DB lalu reload`, `INFO [CDC] UPDATE iec61850s: channel_number berubah, tanpa reconnect MMS`,
+`DEBUG [CDC] UPDATE iec61850s diabaikan: hanya kolom status / non-konfigurasi yang berubah`,
 `WARN [CDC] DELETE master_datapoint_iec61850s: id_rtu datapoint <uuid> tidak ditemukan, reload semua IED`. Tidak ada balasan Kafka.
 
 Sampel asli dari cdc_listener (tabel lain, diabaikan FEP; `...` apa adanya dari sampel):
@@ -650,6 +651,7 @@ Sampel asli dari cdc_listener (tabel lain, diabaikan FEP; `...` apa adanya dari 
     "rtu_offline_at": "1794791384243",
     "status_rtu": "red",
     "status_channel": false,
+    "channel_number": 104,
     "is_deleted": false,
     "updated_at": "2026-11-16T01:09:44.737+00:00",
     "...": "..."
@@ -1812,7 +1814,6 @@ berlaku dan perlu keputusan tim.
 19. **BROWSE / COMMAND dengan `key` kosong**: key Kafka `"unknown"`, tetapi field `key` di isi pesan `""`.
 20. **Pencarian `id_rtu` dari IP membuang `-`** (`safe_ip`): IED yang `ip_address`-nya hostname (mis. `ied-sim-1`) tidak pernah
     cocok, jadi event tanpa `id_rtu` untuk IED seperti itu gagal ("RTU tidak ditemukan"). IP literal tidak terpengaruh.
-21. **CDC `iec61850s` tidak membandingkan `channel_number`** (diabaikan bersama kolom `channel_*` sesuai permintaan), padahal
-    dipakai sebagai `channel` di `RTU_STATUS` ping. Perubahan `channel_number` baru terpakai setelah reload karena sebab lain.
+21. ~~CDC `iec61850s` tidak membandingkan `channel_number`~~ — **diperbaiki**: perubahan `channel_number` memperbarui channel status ping tanpa reconnect MMS; pembanding CDC = salinan terakhir baris DB per IED.
 22. **CDC `iec61850s` untuk IED yang tidak berjalan** dengan `state_rtu = true` di `record` → IED dijalankan, termasuk IED
     yang sebelumnya dihentikan lewat event `STATE false` tanpa DB ikut diubah. Backend sebaiknya selalu menyimpan `state_rtu`.
