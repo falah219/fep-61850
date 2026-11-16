@@ -18,6 +18,8 @@ use crate::kafka::models::{RtuEventMessage, PROTOCOL};
 use crate::utils::timestamp::now_ms;
 
 const TOPIC_RTU_COMMAND: &str = "RTU_COMMAND";
+/// Port MMS standar, untuk respons IED tidak dikenal tanpa `port` di payload.
+const DEFAULT_MMS_PORT: i32 = 102;
 /// Batas tunggu hasil command dari thread IED (termasuk CommandTermination).
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -33,7 +35,8 @@ struct CommandData {
     action: String,
     tag: Option<String>,
     ip_address: String,
-    port: u16,
+    /// Hanya untuk respons kalau IED tidak dikenal; IED dikenal -> port konfigurasi
+    port: Option<u16>,
     value: Option<Value>,
     #[serde(rename = "type")]
     command_type: Option<String>,
@@ -41,6 +44,12 @@ struct CommandData {
     key: Option<String>,
     ioa: Option<Value>,
     user: Option<String>,
+    /// Dikembalikan apa adanya di respons (default 0)
+    qualifier: Option<u8>,
+}
+
+fn port_of(p: Option<i32>) -> Option<u16> {
+    p.and_then(|p| u16::try_from(p).ok())
 }
 
 fn as_i32(v: Option<&Value>) -> Option<i32> {
@@ -88,19 +97,26 @@ fn parse_command_data(m: &RtuEventMessage) -> Result<CommandData, String> {
         if cd.key.is_none() {
             cd.key = m.key.clone();
         }
+        if cd.port.is_none() {
+            cd.port = port_of(m.port);
+        }
+        if cd.qualifier.is_none() {
+            cd.qualifier = m.qualifier;
+        }
         return Ok(cd);
     }
     Ok(CommandData {
         action: m.action.clone().unwrap_or_default(),
         tag: m.tag.clone(),
         ip_address: m.ip_address.clone(),
-        port: m.port.unwrap_or(102) as u16,
+        port: port_of(m.port),
         value: m.value.clone(),
         command_type: m.command_type.clone(),
         id_rtu: m.id_rtu,
         key: m.key.clone(),
         ioa: m.ioa.clone().map(Value::String),
         user: m.user.clone(),
+        qualifier: m.qualifier,
     })
 }
 
@@ -116,6 +132,8 @@ fn lenient(m: &RtuEventMessage) -> CommandData {
         id_rtu: data_id_rtu(d).or(m.id_rtu),
         key: s("key").or_else(|| m.key.clone()),
         value: d.and_then(|d| d.get("value")).cloned().or_else(|| m.value.clone()),
+        port: d.and_then(|d| d.get("port")).and_then(Value::as_i64).and_then(|p| u16::try_from(p).ok()).or(port_of(m.port)),
+        qualifier: d.and_then(|d| d.get("qualifier")).and_then(Value::as_u64).and_then(|q| u8::try_from(q).ok()).or(m.qualifier),
         ..Default::default()
     }
 }
@@ -207,7 +225,7 @@ fn response_json(
         "tag": cd.tag.clone().unwrap_or_default(),
         "command_type": cd.command_type.clone().unwrap_or_default(),
         "command_value": value_json(value),
-        "qualifier": 0,
+        "qualifier": cd.qualifier.unwrap_or(0),
         "event": event,
         "status": status,
         "msg": msg,
@@ -216,12 +234,12 @@ fn response_json(
     })
 }
 
-/// hostname/port respons: port dari konfigurasi IED (payload sering tanpa port -> 0),
+/// hostname/port respons: port dari konfigurasi IED (payload sering tanpa port),
 /// hostname dari payload, konfigurasi kalau payload kosong. IED tidak dikenal -> isi payload.
-fn response_endpoint(ip: &str, port: u16, cfg: Option<(String, i32)>) -> (String, i32) {
+fn response_endpoint(ip: &str, port: Option<u16>, cfg: Option<(String, i32)>) -> (String, i32) {
     match cfg {
         Some((cfg_ip, cfg_port)) => (if ip.is_empty() { cfg_ip } else { ip.to_string() }, cfg_port),
-        None => (ip.to_string(), i32::from(port)),
+        None => (ip.to_string(), port.map_or(DEFAULT_MMS_PORT, i32::from)),
     }
 }
 
@@ -265,11 +283,12 @@ mod tests {
 
     #[test]
     fn hostname_port_respons() {
-        let cfg = Some(("10.0.0.5".to_string(), 102));
-        assert_eq!(response_endpoint("", 0, cfg.clone()), ("10.0.0.5".into(), 102));
-        assert_eq!(response_endpoint("ied-a", 0, cfg.clone()), ("ied-a".into(), 102));
-        assert_eq!(response_endpoint("ied-a", 9999, cfg), ("ied-a".into(), 102)); // konfigurasi menang
-        assert_eq!(response_endpoint("ied-x", 103, None), ("ied-x".into(), 103)); // IED tidak dikenal
+        let cfg = Some(("10.0.0.5".to_string(), 10102));
+        assert_eq!(response_endpoint("", None, cfg.clone()), ("10.0.0.5".into(), 10102));
+        assert_eq!(response_endpoint("ied-a", None, cfg.clone()), ("ied-a".into(), 10102));
+        assert_eq!(response_endpoint("ied-a", Some(9999), cfg), ("ied-a".into(), 10102)); // konfigurasi menang
+        assert_eq!(response_endpoint("ied-x", Some(103), None), ("ied-x".into(), 103)); // IED tidak dikenal
+        assert_eq!(response_endpoint("ied-x", None, None), ("ied-x".into(), 102));
     }
 
     #[test]
@@ -359,6 +378,7 @@ mod tests {
                 tag: Some(str_of(&v, "tag").into()),
                 command_type: Some(str_of(&v, "command_type").into()),
                 key: Some(str_of(&v, "key").into()),
+                qualifier: Some(int_of(&v, "qualifier") as u8),
                 ..Default::default()
             };
             let endpoint = (str_of(&v, "hostname").to_string(), int_of(&v, "port") as i32);
@@ -379,6 +399,28 @@ mod tests {
         // respons tetap membawa key / action dari data
         let cd = lenient(&m);
         assert_eq!((cd.key.as_deref(), event_name(&cd.action).as_str()), (Some("k9"), "OPERATE"));
+    }
+
+    #[test]
+    fn qualifier_dan_port_dari_payload() {
+        let m: RtuEventMessage = serde_json::from_str(
+            r#"{"event":"COMMAND","protocol":"IEC61850","port":10102,"qualifier":3,
+                "data":{"action":"OPERATE_RTU","ioa":3001,"value":1,"id_rtu":9001}}"#,
+        )
+        .unwrap();
+        let cd = parse_command_data(&m).unwrap();
+        assert_eq!((cd.port, cd.qualifier), (Some(10102), Some(3)));
+        let r = response_json(&cd, "OPERATE", Some(1.0), &Ok(()), ("h".into(), 102), 0);
+        assert_eq!(r["qualifier"], 3);
+        // data menang atas tingkat atas; tanpa qualifier -> 0
+        let m: RtuEventMessage = serde_json::from_str(
+            r#"{"event":"COMMAND","protocol":"IEC61850","qualifier":3,"data":{"action":"OPERATE_RTU","qualifier":1,"port":103}}"#,
+        )
+        .unwrap();
+        let cd = parse_command_data(&m).unwrap();
+        assert_eq!((cd.port, cd.qualifier), (Some(103), Some(1)));
+        let cd = CommandData::default();
+        assert_eq!(response_json(&cd, "OPERATE", None, &Ok(()), ("h".into(), 102), 0)["qualifier"], 0);
     }
 
     #[test]

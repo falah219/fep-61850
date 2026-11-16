@@ -284,10 +284,10 @@ berupa string), command **ditolak** dengan `inactive` `field data tidak valid: .
 | `type` | string | tidak | `""` | `data` / atas | Hanya disalin ke `command_type` respons. CDC diambil dari mapping DB, bukan dari sini |
 | `id_rtu` | integer | tidak** | - | `data` → atas | **Kalau kosong dicari dari `ip_address` |
 | `ip_address` | string | tidak** | `ip_address` atas | `data` / atas | Dipakai mencari `id_rtu` dan sebagai `hostname` respons |
-| `port` | integer 0..65535 | tidak | `data`: 0, datar: 102 | `data` / atas | Hanya untuk respons kalau IED tidak dikenal (biasanya port dari konfigurasi IED) |
+| `port` | integer 0..65535 | tidak | port konfigurasi IED | `data` → atas | Hanya untuk respons kalau IED tidak dikenal (tanpa `port`: 102). IED dikenal → selalu port konfigurasi |
 | `key` | string | tidak | `""` | `data` / atas | Disalin ke respons, juga jadi key Kafka respons |
 | `user` | string | tidak | `FEP-IEC61850` | `data` → atas | `orIdent` (pemberi perintah) di IEC 61850 |
-| `qualifier` | integer | tidak | - | atas | **Diabaikan**; respons selalu `qualifier: 0` |
+| `qualifier` | integer 0..255 | tidak | `0` | `data` → atas | Dikembalikan apa adanya di respons. Tidak dikirim ke IED (IEC 61850 tidak punya qualifier) |
 
 Arti `value` per CDC titik kontrol (`ctl_value`, [domain/command.rs](../src/domain/command.rs)):
 
@@ -1357,12 +1357,12 @@ Satu balasan per COMMAND, termasuk yang gagal sebelum dieksekusi (kecuali JSON t
 | Field | Tipe | Arti |
 |---|---|---|
 | `hostname` | string | `ip_address` payload; kosong → IP dari konfigurasi IED |
-| `port` | integer | Port dari konfigurasi IED; IED tidak dikenal → `port` payload |
+| `port` | integer | Port dari konfigurasi IED; IED tidak dikenal → `port` payload, tanpa `port` → 102 |
 | `protocol` | string | `IEC61850` |
 | `tag` | string | `tag` payload (`""` kalau tidak ada) |
 | `command_type` | string | `type` payload apa adanya (`""` kalau tidak ada) |
 | `command_value` | integer / float / null | `value` payload; bilangan bulat tetap integer, `null` kalau tidak ada (CANCEL) |
-| `qualifier` | integer | selalu `0` |
+| `qualifier` | integer | `qualifier` payload, default `0` |
 | `event` | string | `SELECT`, `OPERATE`, `CANCEL` |
 | `status` | string | `active` (sukses) / `inactive` (gagal) |
 | `msg` | string | `<EVENT> success RTU status is Active` / `<EVENT> failed: <alasan> - RTU status is Inactive` |
@@ -1701,12 +1701,12 @@ Sampel asli `RTU_DATAS` FEP IEC 104 (test `rtu_datas_sama_bentuk_dengan_sampel_i
 | `protocol` | `IEC104` (env `PROTOCOL`) | `IEC61850` |
 | `ip_address` tingkat atas RTU_EVENTS | **wajib** (tanpa itu parse error) | opsional |
 | COMMAND `data.ip_address`, `data.port` | **wajib** di dalam `data`; tanpa itu `data` gagal dibaca lalu jatuh ke field datar | opsional (`port` default 0) |
-| COMMAND port default | 2404 | `data`: 0, datar: 102; respons memakai port konfigurasi IED |
+| COMMAND port default | 2404 | port konfigurasi IED (IED tidak dikenal: `port` payload, lalu 102) |
 | COMMAND `type` | **wajib**, tipe ASDU (`C_SC_NA_1`, `C_DC_NA_1`, ...), menentukan perintah | opsional, hanya disalin ke respons; CDC dari mapping DB |
 | COMMAND `value` | **integer** (`i32`) | angka (integer/float), string angka, boolean |
 | COMMAND `action` | `SELECT` (lewat `url`), `SELECT_RTU`, `OPERATE_RTU` | `SELECT_RTU`, `OPERATE_RTU`, `CANCEL_RTU` |
 | COMMAND `user` | tidak ada | `orIdent` (default `FEP-IEC61850`) |
-| COMMAND `qualifier` | dikirim ke RTU (default 0) | diabaikan, respons selalu 0 |
+| COMMAND `qualifier` | dikirim ke RTU (default 0) | tidak dikirim ke IED, dikembalikan di respons (default 0) |
 | COMMAND pencarian RTU | dari `ip_address` | `id_rtu` dulu, baru `ip_address` |
 | `RTU_DATAS.action` | COT: `SPONTANEOUS`, `PERIODIC`, `BACKGROUND_SCAN`, `INTERROGATED_BY_STATION`, `INTERROGATED_BY_GROUP_n`, ... | reason report: `DATA_CHANGE`, `QUALITY_CHANGE`, `DATA_UPDATE`, `INTEGRITY`, `GENERAL_INTERROGATION`, `POLLING` |
 | `RTU_DATAS.type` / `asdu` / `ca` | nama tipe ASDU / type id / common address | CDC / `0` / `0` |
@@ -1757,9 +1757,8 @@ Ditemukan saat menulis dokumen ini. **Kode tidak diubah**; perlu keputusan tim.
    dari baris `master_data_objects` yang `initial`-nya = CDC, bukan CDC itu sendiri.
 3. ~~AddCause di `RTU_COMMAND` hanya kode~~ — **diperbaiki**: `addCause=10 (blocked-by-interlocking)`.
 4. ~~COMMAND `data` gagal dibaca → diam-diam pakai field datar~~ — **diperbaiki**: ditolak `inactive` `field data tidak valid: ...`.
-5. **Default port COMMAND tidak seragam**: `data` tanpa `port` → 0, format datar → 102 (komentar menyebut "sama dengan IEC 104",
-   yang default-nya 2404). Hanya terlihat di respons kalau IED tidak dikenal.
-6. **`qualifier` payload diabaikan**, respons selalu `0` (IEC 104 meneruskannya ke RTU).
+5. ~~Default port COMMAND tidak seragam~~ — **diperbaiki**: port konfigurasi IED (IED tidak dikenal: `port` payload, lalu 102).
+6. ~~`qualifier` payload diabaikan~~ — **diperbaiki**: dikembalikan di respons (default 0).
 7. **Tanpa balasan** (sisa): COMMAND dengan JSON tidak valid **tanpa** `key` yang terbaca, `MANUAL_SET_EVENT` untuk `id_rtu`
    yang tidak berjalan (sengaja: FEP lain yang menjawab) atau event selain `TOGGLE_MANUAL_SET`. COMMAND dengan `action` tidak
    dikenal / field salah tipe / JSON tidak valid ber-`key` **sudah dibalas** `inactive`.
