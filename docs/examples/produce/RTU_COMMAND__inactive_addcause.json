@@ -8,7 +8,7 @@
   "qualifier": 0,
   "event": "OPERATE",
   "status": "inactive",
-  "msg": "OPERATE failed: operate gagal: ditolak IED (LastApplError error=1, addCause=10) - RTU status is Inactive",
+  "msg": "OPERATE failed: operate gagal: ditolak IED (LastApplError error=1, addCause=10 (blocked-by-interlocking)) - RTU status is Inactive",
   "key": "cmd-20261115-0001",
   "time": 1794711845123
 }

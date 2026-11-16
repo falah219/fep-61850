@@ -878,7 +878,7 @@ impl Control {
             (ffi::ControlObjectClient_getLastError(self.ctl), ffi::ControlObjectClient_getLastApplError(self.ctl))
         };
         let base = check(err).err().map_or_else(|| "ditolak IED".to_string(), |e| e.to_string());
-        let msg = format!("{what} gagal: {base} (LastApplError error={}, addCause={})", appl.error, appl.addCause);
+        let msg = format!("{what} gagal: {base} ({})", super::traffic::appl_error(appl.error as i32, appl.addCause as i32));
         if err == ffi::IED_ERROR_OK {
             Iec61850Error::Other(msg)
         } else {

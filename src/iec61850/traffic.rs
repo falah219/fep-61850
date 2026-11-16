@@ -141,6 +141,11 @@ pub fn termination_rx(reference: &str, positive: bool) -> String {
     format!("CONTROL RX - CommandTermination {reference} {}", if positive { "positive" } else { "negative" })
 }
 
+/// Teks LastApplError untuk `msg` RTU_COMMAND: `LastApplError error=1, addCause=10 (blocked-by-interlocking)`.
+pub fn appl_error(error: i32, add_cause: i32) -> String {
+    format!("LastApplError error={error}, addCause={add_cause} ({})", add_cause_name(add_cause))
+}
+
 /// AddCause IEC 61850-7-2 (urutan = enum ControlAddCause libIEC61850).
 pub fn add_cause_name(c: i32) -> String {
     const NAMES: [&str; 28] = [
@@ -226,6 +231,8 @@ mod tests {
         assert_eq!(termination_rx("SIMIED1LD0/CSWI1.Pos", true), "CONTROL RX - CommandTermination SIMIED1LD0/CSWI1.Pos positive");
         assert_eq!(termination_rx("SIMIED1LD0/CSWI1.Pos", false), "CONTROL RX - CommandTermination SIMIED1LD0/CSWI1.Pos negative");
         assert_eq!(add_cause_name(99), "99");
+        assert_eq!(appl_error(1, 10), "LastApplError error=1, addCause=10 (blocked-by-interlocking)");
+        assert_eq!(appl_error(0, 99), "LastApplError error=0, addCause=99 (99)");
         assert_eq!(ctl_val_text(CtlVal::Bool(false)), "false");
         assert_eq!(ctl_val_text(CtlVal::Float(12.5)), "12.5");
         assert_eq!(ctl_val_text(CtlVal::Tcmd(2)), "higher");

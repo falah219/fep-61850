@@ -469,8 +469,8 @@ Gagal / ditolak (semua dibalas `RTU_COMMAND` `status: "inactive"`, alasan di `ms
 | `value` tidak cocok CDC | mis. `value DPC harus 1 (OPEN) atau 2 (CLOSE), bukan 0`, `value BSC harus 0 (stop), 1 (lower), atau 2 (higher), bukan 5`, `value INC harus bilangan bulat, bukan 1.5` |
 | Objek kontrol tidak ada di IED | `objek kontrol <ref> tidak ditemukan / tidak bisa dibaca` |
 | `ctlModel` status-only | `ctlModel status-only, tidak bisa dikontrol` |
-| IED menolak (negative response) | `<select\|operate\|cancel> gagal: <teks IedClientError atau "ditolak IED"> (LastApplError error=<0..3>, addCause=<kode>)` |
-| CommandTermination negatif | `CommandTermination- gagal: ... (LastApplError error=..., addCause=...)` |
+| IED menolak (negative response) | `<select\|operate\|cancel> gagal: <teks IedClientError atau "ditolak IED"> (LastApplError error=<0..3>, addCause=<kode> (<nama>))` |
+| CommandTermination negatif | `CommandTermination- gagal: ... (LastApplError error=..., addCause=<kode> (<nama>))` |
 | CommandTermination tidak datang | `CommandTermination tidak diterima (timeout)` |
 | Tidak ada hasil dalam 30 detik | `timeout menunggu hasil command` |
 | Thread IED berhenti di tengah | `thread IED berhenti sebelum command selesai` |
@@ -1394,7 +1394,7 @@ Ditolak IED dengan AddCause 10 (`blocked-by-interlocking`):
   "qualifier": 0,
   "event": "OPERATE",
   "status": "inactive",
-  "msg": "OPERATE failed: operate gagal: ditolak IED (LastApplError error=1, addCause=10) - RTU status is Inactive",
+  "msg": "OPERATE failed: operate gagal: ditolak IED (LastApplError error=1, addCause=10 (blocked-by-interlocking)) - RTU status is Inactive",
   "key": "cmd-20261115-0001",
   "time": 1794711845123
 }
@@ -1438,8 +1438,8 @@ Ditolak IED dengan AddCause 10 (`blocked-by-interlocking`):
 }
 ```
 
-AddCause (IEC 61850-7-2, enum `ControlAddCause` libIEC61850). Di `msg` RTU_COMMAND ditulis **kodenya** (`addCause=10`),
-di `RTU_LOGGING` `CONTROL RX` ditulis **namanya**:
+AddCause (IEC 61850-7-2, enum `ControlAddCause` libIEC61850). Di `msg` RTU_COMMAND ditulis kode + nama (`addCause=10 (blocked-by-interlocking)`),
+di `RTU_LOGGING` `CONTROL RX` hanya nama:
 
 | Kode | Nama | Kode | Nama |
 |---|---|---|---|
@@ -1725,7 +1725,7 @@ Ditemukan saat menulis dokumen ini. **Kode tidak diubah**; perlu keputusan tim.
 1. ~~CDC: `record` vs `data`~~ — **diperbaiki**: FEP membaca `record` (cadangan `data`), UPDATE kolom status `iec61850s` tidak lagi memicu reload, tabel lain diabaikan.
 2. **README `group`.** README menulis `group = master_data_objects.initial = CDC`. Di kode `group` berisi `id_group` (UUID)
    dari baris `master_data_objects` yang `initial`-nya = CDC, bukan CDC itu sendiri.
-3. **AddCause di `RTU_COMMAND`** hanya berupa kode di dalam `msg` (`addCause=10`), nama hanya ada di `RTU_LOGGING`.
+3. ~~AddCause di `RTU_COMMAND` hanya kode~~ — **diperbaiki**: `addCause=10 (blocked-by-interlocking)`.
 4. ~~COMMAND `data` gagal dibaca → diam-diam pakai field datar~~ — **diperbaiki**: ditolak `inactive` `field data tidak valid: ...`.
 5. **Default port COMMAND tidak seragam**: `data` tanpa `port` → 0, format datar → 102 (komentar menyebut "sama dengan IEC 104",
    yang default-nya 2404). Hanya terlihat di respons kalau IED tidak dikenal.
