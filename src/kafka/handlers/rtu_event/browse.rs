@@ -36,11 +36,14 @@ struct BrowseResponse<'a> {
 /// Bagian SINKRON: kirim ke antrean thread IED. Future (tunggu + kirim respons) boleh di-spawn.
 pub fn submit(mgr: &Arc<Manager>, m: RtuEventMessage) -> impl Future<Output = ()> + Send + 'static {
     let data = m.data.as_ref();
-    let id = m.id_rtu.or_else(|| data_id_rtu(data));
+    // sama dengan COMMAND: id_rtu atas -> data.id_rtu -> dicari dari ip_address (data -> atas)
+    let ip = data.and_then(|d| d.get("ip_address")).and_then(Value::as_str).unwrap_or(&m.ip_address).to_string();
+    let id = m.id_rtu.or_else(|| data_id_rtu(data)).or_else(|| (!ip.is_empty()).then(|| mgr.id_by_ip(&ip)).flatten());
     let key = m.key.clone().or_else(|| data.and_then(|d| d.get("key")).and_then(Value::as_str).map(String::from)).unwrap_or_default();
-    info!("[BROWSE] id_rtu={id:?} key={key:?}");
+    info!("[BROWSE] id_rtu={id:?} ip={ip} key={key:?}");
     let queued = match id {
-        None => Err("id_rtu wajib diisi".to_string()),
+        None if ip.is_empty() => Err("id_rtu atau ip_address wajib diisi".to_string()),
+        None => Err(format!("RTU tidak ditemukan untuk IP {ip}")),
         Some(id) => {
             let (tx, rx) = oneshot::channel();
             if mgr.send(id, Ctl::Browse(tx)) { Ok(rx) } else { Err("IED tidak terkoneksi".into()) }
@@ -163,6 +166,34 @@ mod tests {
         assert_eq!(responses("browse-9001-02", Some(9001), &Ok(all), 160), vec![p1, p2]);
         let f = get("failed");
         assert_eq!(responses("browse-9002-01", Some(9002), &Err("IED tidak terkoneksi".into()), MAX_PART_BYTES), vec![f]);
+    }
+
+    #[tokio::test]
+    async fn id_rtu_dicari_dari_ip() {
+        let mgr = crate::connection::testing::manager();
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+        let cfg = crate::domain::RtuConfig { ip_address: "10.0.0.91".into(), ..crate::connection::testing::rtu(9001) };
+        crate::connection::testing::fake_ied_cfg(&mgr, cfg, move |rx| {
+            while let Ok(ctl) = rx.recv() {
+                match ctl {
+                    Ctl::Browse(reply) => {
+                        let _ = seen_tx.send(());
+                        let _ = reply.send(Ok(vec![]));
+                    }
+                    Ctl::Stop => break,
+                    _ => {}
+                }
+            }
+        });
+        for json in [
+            r#"{"event":"BROWSE","protocol":"IEC61850","ip_address":"10.0.0.91","key":"k1"}"#,
+            r#"{"event":"BROWSE","protocol":"IEC61850","data":{"ip_address":"10.0.0.91","key":"k2"}}"#,
+        ] {
+            let m: RtuEventMessage = serde_json::from_str(json).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), submit(&mgr, m)).await.expect(json);
+            assert!(seen_rx.recv_timeout(Duration::from_secs(1)).is_ok(), "{json}");
+        }
+        mgr.stop_all(Duration::from_secs(5)).await;
     }
 
     #[tokio::test]

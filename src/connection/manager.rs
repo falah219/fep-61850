@@ -359,7 +359,12 @@ pub(crate) mod testing {
 
     /// Daftarkan "thread IED" palsu yang menjalankan `run`.
     pub fn fake_ied(mgr: &Manager, id: i32, run: impl FnOnce(Receiver<Ctl>) + Send + 'static) {
-        let ctx = Arc::new(RtuCtx::new(rtu(id), vec![], vec![], Arc::clone(&mgr.publisher), Arc::clone(&mgr.gate)));
+        fake_ied_cfg(mgr, rtu(id), run);
+    }
+
+    /// Sama dengan `fake_ied`, konfigurasi sendiri (mis. IP literal untuk `id_by_ip`).
+    pub fn fake_ied_cfg(mgr: &Manager, cfg: RtuConfig, run: impl FnOnce(Receiver<Ctl>) + Send + 'static) {
+        let ctx = Arc::new(RtuCtx::new(cfg, vec![], vec![], Arc::clone(&mgr.publisher), Arc::clone(&mgr.gate)));
         mgr.start_thread(ctx, run).expect("thread test");
     }
 }

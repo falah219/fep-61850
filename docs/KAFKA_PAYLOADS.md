@@ -69,7 +69,7 @@ Daftar isi:
 |---|---|
 | CREATE/ADD/UPDATE, DELETE/REMOVE, STATE, RESET, GI, CHANNEL | `id_rtu` tingkat atas → `data.id_rtu` → dicari dari `ip_address` di antara IED yang **sedang berjalan** |
 | COMMAND | `data.id_rtu` → `id_rtu` tingkat atas → dicari dari `data.ip_address` / `ip_address` di antara IED yang berjalan |
-| BROWSE | `id_rtu` tingkat atas → `data.id_rtu` (tidak dicari dari IP) |
+| BROWSE | `id_rtu` tingkat atas → `data.id_rtu` → dicari dari `data.ip_address` / `ip_address` di antara IED yang berjalan |
 
 Tidak ketemu → event tidak dijalankan (log `WARN`), kecuali COMMAND/BROWSE yang tetap dibalas `FAILED`/`inactive`.
 
@@ -486,7 +486,8 @@ COMMAND): LD → LN → DO → FC (`ST`, `MX`, `CO`, `SP`), satu `getVariableSpe
 
 | Field | Tipe JSON | Wajib | Default | Posisi | Arti |
 |---|---|---|---|---|---|
-| `id_rtu` | integer | ya | - | atas → `data` | IED yang di-browse |
+| `id_rtu` | integer | ya* | - | atas → `data` | IED yang di-browse |
+| `ip_address` | string | ya* | - | `data` → atas | *Dipakai mencari `id_rtu` kalau `id_rtu` kosong (IED yang sedang berjalan) |
 | `key` | string | tidak | `""` | atas → `data` | Disalin ke respons + key Kafka respons |
 
 `docs/examples/consume/RTU_EVENTS__BROWSE.json`
@@ -513,7 +514,8 @@ COMMAND): LD → LN → DO → FC (`ST`, `MX`, `CO`, `SP`), satu `getVariableSpe
 }
 ```
 
-Gagal: tanpa `id_rtu` → `FAILED` `id_rtu wajib diisi`; IED tidak berjalan / belum terkoneksi → `FAILED` `IED tidak terkoneksi`;
+Gagal: tanpa `id_rtu` dan `ip_address` → `FAILED` `id_rtu atau ip_address wajib diisi`; IP tidak cocok IED yang berjalan →
+`FAILED` `RTU tidak ditemukan untuk IP <ip>`; IED tidak berjalan / belum terkoneksi → `FAILED` `IED tidak terkoneksi`;
 lebih dari 300 detik → `FAILED` `timeout menunggu hasil browse`; error MMS → `FAILED` dengan teks error.
 
 ### 2.2 `MASTER_DATAPOINT_EVENT`
@@ -1764,7 +1766,7 @@ Ditemukan saat menulis dokumen ini. **Kode tidak diubah**; perlu keputusan tim.
    dikenal / field salah tipe / JSON tidak valid ber-`key` **sudah dibalas** `inactive`.
 8. **Cek protocol tidak berlaku** untuk `MASTER_DATA_OBJECT_EVENT` (pesan IEC104 pun memicu reload group 61850) dan
    `CAPTURE_DATA_CHANGE`. Perbandingan protocol tidak peka huruf besar/kecil, README menulis "≠ `IEC61850`".
-9. **BROWSE tidak mencari `id_rtu` dari `ip_address`**, beda dengan event RTU_EVENTS lain dan COMMAND.
+9. ~~BROWSE tidak mencari `id_rtu` dari `ip_address`~~ — **diperbaiki**: sama dengan COMMAND.
 10. **CREATE/ADD/UPDATE dengan `ip_address` saja** hanya berhasil untuk IED yang sudah berjalan; RTU baru wajib `id_rtu`.
 11. **`MASTER_DATAPOINT_EVENT.ioa` harus integer** (string → parse error), padahal `RTU_EVENTS.ioa` menerima string.
     `REMOVE` tidak dikenal di topic ini (hanya `DELETE`).
