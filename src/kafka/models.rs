@@ -1,8 +1,10 @@
-//! Format pesan Kafka, berasal dari `kafka/models.rs` FEP IEC 104.
-//! Pesan PRODUCE (`DataMessage`, status, logging, manual set) nama & urutan field sama dengan IEC 104,
-//! `protocol` = "IEC61850". Pesan CONSUME sengaja lebih longgar dari IEC 104: `RtuEventMessage` punya `user`
-//! dan `ip_address` opsional, `MasterRtuEventMessage` tanpa `id_station`, `CaptureDataChangeMessage` membaca
-//! `record`, `MasterDatapointEventMessage.ioa` boleh string. Lihat docs/KAFKA_PAYLOADS.md.
+//! Format pesan Kafka. Bentuk mengikuti `kafka/models.rs` FEP IEC 104, dengan perbedaan:
+//! - pesan PRODUCE (`DataMessage`, status, logging, manual set): nama & urutan field sama, `protocol` = "IEC61850",
+//!   `type` = CDC (bukan tipe ASDU), `ca` / `asdu` = 0, `action` = reason report (bukan COT);
+//! - pesan CONSUME lebih longgar: `RtuEventMessage` punya `user` dan `ip_address` opsional, `MasterRtuEventMessage`
+//!   tanpa `id_station`, `CaptureDataChangeMessage` membaca `record` (cadangan `data`),
+//!   `MasterDatapointEventMessage.ioa` boleh string angka.
+//! Detail: docs/KAFKA_PAYLOADS.md.
 
 use serde::{Deserialize, Deserializer, Serialize};
 

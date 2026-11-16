@@ -238,7 +238,7 @@ FEP start/stop IED -> RTU_STATUS -> backend UPDATE status_rtu / rtu_online_at / 
 #### GI
 
 Mode `REPORT`/`HYBRID`: GI ke semua RCB yang aktif → data `GENERAL_INTERROGATION` di `RTU_DATAS`.
-Mode `POLLING`: siklus polling penuh sekarang juga → semua titik dengan action `GENERAL_INTERROGATION` (sama dengan mode REPORT).
+Mode `POLLING`: siklus polling penuh sekarang juga → semua titik dengan action `GENERAL_INTERROGATION` (`general_action` 1, sama dengan mode REPORT).
 Mode `HYBRID`: GI ke RCB + polling penuh titik `MX`, keduanya `GENERAL_INTERROGATION`.
 IED tidak berjalan: log `WARN [RTU_EVENTS] GI RTU 9001: IED tidak berjalan`. Kalau `LOG_DATA_TRAFFIC=true`, baris
 `GI TX` / `GI RX` muncul di `RTU_LOGGING`.
@@ -913,9 +913,17 @@ clockNotSynchronized), urutan tetap, dipisah `|`. Tidak ada satu pun → `GOOD`.
 `time_desc`: `RTU` = atribut `t` titik, atau waktu entri report kalau titik tidak punya `t` (tidak dikoreksi `TIMEZONE`);
 `SERVER` = jam server FEP (polling tanpa `t`).
 
-`general_action`: `master_general_actions.code` apa adanya dari DB, **kode internal GRITA, bukan nomor COT** (sampel FEP IEC 104
-mengirim `0` untuk `SPONTANEOUS`). FEP tidak punya konstanta sendiri; nilainya sepenuhnya bergantung isi tabel, dan angka
-`general_action` di contoh dokumen ini **hanya contoh**. Isi tabel di lingkungan masing-masing:
+`general_action`: `master_general_actions.code` apa adanya dari DB, **kode internal GRITA, bukan nomor COT**. FEP tidak punya
+konstanta sendiri; nilainya sepenuhnya bergantung isi tabel. Isi tabel di server (dipakai di semua contoh dokumen ini):
+
+| `protocol` | `name_action` = `code` | Arti |
+|---|---|---|
+| `IEC104` | `SPONTANEOUS` = 0, `INTERROGATED_BY_STATION` = 1, `PERIODIC` = 2, `ACTIVATION_CON` = 3 | |
+| `IEC61850` | `DATA_CHANGE` = 0, `QUALITY_CHANGE` = 0, `DATA_UPDATE` = 0 | 0 = spontan |
+| `IEC61850` | `GENERAL_INTERROGATION` = 1 | 1 = GI |
+| `IEC61850` | `INTEGRITY` = 2, `POLLING` = 2 | 2 = periodik |
+
+Jadi kode IEC 61850 sejajar dengan IEC 104 (0 spontan, 1 GI, 2 periodik). Cek isi tabel di lingkungan masing-masing:
 
 ```text
 SELECT protocol, name_action, code
@@ -961,7 +969,7 @@ Nilai command `DPC` memakai pemetaan lain (`DPC_CLOSE_VALUE`, bagian [2.1 COMMAN
   "quality": "GOOD",
   "flag": "GOOD",
   "group": "6f1c2a9e-3b7d-4c11-9a52-0d8e4b7f2a10",
-  "general_action": 3,
+  "general_action": 0,
   "time": 1794711845123,
   "time_desc": "RTU"
 }
@@ -986,7 +994,7 @@ Nilai command `DPC` memakai pemetaan lain (`DPC_CLOSE_VALUE`, bagian [2.1 COMMAN
   "quality": "INVALID",
   "flag": "INVALID|FAILURE",
   "group": "a2b4c6d8-1e3f-4a5b-8c7d-9e0f1a2b3c4d",
-  "general_action": 4,
+  "general_action": 0,
   "time": 1794711845123,
   "time_desc": "RTU"
 }
@@ -1042,7 +1050,7 @@ Nilai command `DPC` memakai pemetaan lain (`DPC_CLOSE_VALUE`, bagian [2.1 COMMAN
 }
 ```
 
-`POLLING` (tanpa `t`, group / general action belum dikonfigurasi):
+`POLLING` (tanpa `t` → waktu server):
 
 `docs/examples/produce/RTU_DATAS__POLLING.json`
 
@@ -1060,8 +1068,8 @@ Nilai command `DPC` memakai pemetaan lain (`DPC_CLOSE_VALUE`, bagian [2.1 COMMAN
   "type": "MV",
   "quality": "GOOD",
   "flag": "GOOD",
-  "group": "",
-  "general_action": null,
+  "group": "a2b4c6d8-1e3f-4a5b-8c7d-9e0f1a2b3c4d",
+  "general_action": 2,
   "time": 1794711846000,
   "time_desc": "SERVER"
 }
@@ -1086,7 +1094,7 @@ Nilai command `DPC` memakai pemetaan lain (`DPC_CLOSE_VALUE`, bagian [2.1 COMMAN
   "quality": "GOOD",
   "flag": "GOOD",
   "group": "6f1c2a9e-3b7d-4c11-9a52-0d8e4b7f2a10",
-  "general_action": 3,
+  "general_action": 0,
   "time": 1794711845123,
   "time_desc": "RTU"
 }
@@ -1769,8 +1777,9 @@ Sampel asli `RTU_DATAS` FEP IEC 104 (test `rtu_datas_sama_bentuk_dengan_sampel_i
 **Perlu dikonfirmasi backend** (dibandingkan dengan sampel asli IEC 104 di atas):
 
 1. `action`: IEC 104 `SPONTANEOUS` / `PERIODIC` / `INTERROGATED_BY_STATION` ..., IEC 61850 `DATA_CHANGE` / `INTEGRITY` /
-   `GENERAL_INTERROGATION` .... Konsumen yang memfilter `action` per nama harus mengenal keduanya, atau memakai
-   `general_action` (isi baris `master_general_actions` protocol `IEC61850` dengan `code` yang diinginkan backend).
+   `GENERAL_INTERROGATION` .... **Apakah backend membaca `action` sebagai teks?** Kalau ya, backend harus mengenal nama
+   IEC 61850 juga. `general_action` sudah sejajar (0 spontan, 1 GI, 2 periodik, tabel di 3.1), jadi konsumen yang memakai
+   `general_action` tidak perlu perubahan.
 2. `ca` / `asdu`: IEC 104 `1` / `36`, IEC 61850 selalu `0` / `0`. Apakah ada konsumen yang memakai `ca`/`asdu` sebagai kunci?
 3. `type`: IEC 104 nama tipe ASDU (`M_ME_TF_1`), IEC 61850 CDC (`MV`, `DPS`, ...). Apakah tampilan / alarm memetakan `type`?
 
