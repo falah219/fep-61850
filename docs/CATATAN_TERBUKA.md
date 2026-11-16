@@ -6,13 +6,13 @@ Hal yang **belum diputuskan / belum dikonfirmasi tim**. Perbarui file ini setiap
 
 | # | Topik | Kondisi sekarang | Lokasi kode |
 |---|---|---|---|
-| 1 | **Nilai DPC (breaker) di payload COMMAND** | Pakai standar DCS IEC 104: `value 2 = CLOSE (true)`, `value 1 = OPEN (false)`. Dokumen `COMMAND_TEST_PAYLOADS.md` IEC 104 menulis sebaliknya (1=CLOSE). | `ctl_value` di [src/command.rs](../src/command.rs) |
+| 1 | **Nilai DPC (breaker) di payload COMMAND** | Pakai standar DCS IEC 104: `value 2 = CLOSE (true)`, `value 1 = OPEN (false)`. Dokumen `COMMAND_TEST_PAYLOADS.md` IEC 104 menulis sebaliknya (1=CLOSE). | `ctl_value` di [src/domain/command.rs](../src/domain/command.rs) |
 | 2 | **APC / BSC / ENC** (setpoint analog, tap changer) | Sudah didukung: ENC integer, BSC Tcmd (0 stop, 1 lower, 2 higher, bit string 2 bit seperti `Dbpos_toMmsValue`), APC float (libIEC61850 membungkus ke `AnalogueValue`). Perlu diuji ke IED asli (simulator tidak punya BSC/APC). | `ctl_value` di [src/domain/command.rs](../src/domain/command.rs) |
 | 3 | **`OSI_PARAMS_SIDE`: "Application ID", "AE Qualifier", P/S/T selector di form GRITA milik IED tujuan (remote) atau FEP (local)?** | Sudah bisa dipakai lewat env `OSI_PARAMS_SIDE` = `none` \| `local` \| `remote`. **Default `none` (perilaku lama: default libIEC61850) menunggu konfirmasi tim.** Selector divalidasi (hex 2 digit dipisah spasi, P/S maks 16 byte, T maks 4 byte); tidak valid -> default + ERROR di `RTU_LOGGING`. **Perlu diuji ke IED asli**: simulator libIEC61850 tidak memeriksa nilai ini, jadi uji simulator tidak membuktikan apa-apa. | `apply_osi` di [src/iec61850/client.rs](../src/iec61850/client.rs) |
 | 4 | **AE/AP Invoke ID** | libIEC61850 v1.6.2.1 tidak punya setter. Kolom disimpan, tidak dikirim ke IED. | — |
 | 5 | **Penyimpanan password ACSE** | Belum ditentukan (enkripsi kolom / Kubernetes secret). Hanya kolom `password_ref`; autentikasi belum diimplementasi. | migrasi `0001` |
 | 6 | **Lokasi file SCL** (DB / object storage / volume) | Hanya nama file (`scl_file_name`). Tool import (fase 10) membaca file lokal. | — |
-| 7 | **Cara CDC tim** (Debezium / lainnya) | Handler `CAPTURE_DATA_CHANGE` mengikuti format IEC 104 (`table`, `schema`, `operation`, `data`). Migrasi `0001` memasang trigger `notify_table_change()` (fungsi milik cdc_listener, harus sudah ada) di `iec61850s`, `iec61850_report_controls`, `master_datapoint_iec61850s`, `iec61850_command_formulas`. | [src/handlers.rs](../src/handlers.rs) |
+| 7 | **Cara CDC tim** (Debezium / lainnya) | Handler `CAPTURE_DATA_CHANGE` membaca format cdc_listener (`table`, `schema`, `operation`, `record`; cadangan `data`). Migrasi `0001` memasang trigger `notify_table_change()` (fungsi milik cdc_listener, harus sudah ada) di `iec61850s`, `iec61850_report_controls`, `master_datapoint_iec61850s`, `iec61850_command_formulas`. | [src/kafka/handlers/capture_data_change.rs](../src/kafka/handlers/capture_data_change.rs) |
 | 8 | **`sync_telco_status()`** | Tim backend perlu menambahkan `'iec61850s'` ke daftar tabel, kalau tidak status di `telco_statuses` selalu false. | [migrations/0002_iec61850_telco_status.sql](../migrations/0002_iec61850_telco_status.sql) |
 | 9 | **Review migrasi** `0001` (index unik parsial di `master_datapoints`, `id_rtu` UNIQUE di `iec61850s`) | Belum di-review / diuji ke Postgres. | [migrations/](../migrations/) |
 | 10 | **Field tambahan `object_reference` di DataMessage** | Tidak ditambahkan (menunggu konfirmasi consumer). | [src/kafka/mod.rs](../src/kafka/mod.rs) |
@@ -55,8 +55,8 @@ Hal yang **belum diputuskan / belum dikonfirmasi tim**. Perbarui file ini setiap
 - `reconnect_retry_count = 0` → reconnect tanpa batas.
 - Kolom non-form (`acquisition_mode`, `poll_interval_ms`, `general_interrogation_interval`, `request_timeout_ms`) tetap kolom DB + default.
 - Nilai DPS di Kafka: 0..3 apa adanya.
-- `group` di-lookup dari `master_data_objects.initial` = CDC.
-- `general_action` dari `master_general_actions` dengan `protocol='IEC61850'`.
+- `group` = `master_data_objects.id_group` (UUID) dari baris `initial` = CDC (sama dengan IEC 104).
+- `general_action` = `master_general_actions.code` apa adanya (`protocol='IEC61850'`, `name_action` = action); kode GRITA, bukan COT.
 - Grup quality mengikuti urutan IEC 104 (INVALID > SUBSTITUTED > QUESTIONABLE > GOOD).
 - `t` IEC 61850 sudah UTC, tidak dikoreksi `TIMEZONE`.
 - Cancel: action `CANCEL_RTU`. `orIdent` dari field `user`.

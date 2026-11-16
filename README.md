@@ -137,7 +137,7 @@ Perhatian saat ke IED sungguhan:
   - `by_reference(id_rtu, ref, fc)` → untuk data masuk; menerima DO/SDO/DA, prefix terpanjang menang
     (`LD/GGIO1.AnIn1.mag.f` → titik `AnIn1`, sisa `mag.f`)
   - menolak IOA ganda dan `(reference, FC)` ganda per RTU
-- Loader dari Postgres: `load_points` di [src/repository.rs](src/repository.rs) (dipakai FEP saat start/reload).
+- Loader dari Postgres: `load_points` di [src/repository/rtu_repository.rs](src/repository/rtu_repository.rs) (dipakai FEP saat start/reload).
 
 ```powershell
 # unit test mapping (tanpa DB)
@@ -233,8 +233,8 @@ Aturan yang dipakai (hasil konfirmasi):
 | `action` | `GENERAL_INTERROGATION` > `INTEGRITY` > `DATA_CHANGE` > `QUALITY_CHANGE` > `DATA_UPDATE`; polling: `POLLING` / `INTEGRITY` |
 | `quality` | urutan IEC 104: `INVALID` > `SUBSTITUTED` > `QUESTIONABLE` > `GOOD` |
 | `flag` | detailQual + `SUBSTITUTED`/`TEST`/`OPERATOR_BLOCKED` + `CLOCK_NOT_SYNC`, dipisah `\|`, kosong = `GOOD` |
-| `group` | `master_data_objects.initial` = CDC, `protocol = 'IEC61850'` |
-| `general_action` | `master_general_actions` dengan `protocol='IEC61850'`, kunci = action |
+| `group` | `master_data_objects.id_group` (UUID) dari baris `initial` = CDC dan `protocol = 'IEC61850'`; `""` kalau tidak ada. Sama dengan FEP IEC 104 (`group` = UUID) |
+| `general_action` | `master_general_actions.code` **apa adanya** dari DB untuk `name_action` = `action` dan `protocol='IEC61850'`; `null` kalau tidak ada. Kode internal GRITA, **bukan** nomor COT (IEC 104 mengirim `0` untuk `SPONTANEOUS`); nilainya bergantung isi tabel, lihat query di [docs/KAFKA_PAYLOADS.md](docs/KAFKA_PAYLOADS.md#31-rtu_datas-dan-datapoints) |
 | `time` / `time_desc` | atribut `t` (sudah UTC, **tidak** dikoreksi `TIMEZONE`) / `RTU`; tanpa `t` → waktu server / `SERVER` |
 
 Akuisisi per mode (`iec61850s.acquisition_mode`):
@@ -274,7 +274,7 @@ docker compose -f docker-compose.dev.yml exec dev cargo run
 
 > Ditulis **tanpa uji ke Kafka/Postgres**. Yang bisa diuji sekarang: `cargo test`, `cargo clippy`.
 
-File baru: [src/manager.rs](src/manager.rs), [src/handlers.rs](src/handlers.rs), [src/kafka/consumer.rs](src/kafka/consumer.rs), [src/kafka/models.rs](src/kafka/models.rs).
+File: [src/connection/manager.rs](src/connection/manager.rs), [src/kafka/handlers/](src/kafka/handlers/), [src/kafka/consumer.rs](src/kafka/consumer.rs), [src/kafka/models.rs](src/kafka/models.rs).
 
 - **Satu thread per IED** dengan saluran kontrol `Stop` / `Gi` / `Wake` (`acquisition.rs`).
   Jeda reconnect = `reconnect_time_ms`, `reconnect_retry_count` 0 = tanpa batas.
@@ -298,7 +298,11 @@ docker compose -f docker-compose.dev.yml exec -w /work dev scripts/uji_konek_ser
 - **`RTU_STATUS`**: 1 saat sesi MMS aktif, 0 saat putus/gagal (sekali per rangkaian gagal);
   heartbeat tiap `STATUS_HEARTBEAT_INTERVAL_SECS`; status sistem 1 saat start, 0 saat stop;
   status per channel dari ping ICMP (hanya IP literal, butuh root/CAP_NET_RAW).
-- **`RTU_LOGGING`**: konek, putus, gagal konek, RCB gagal (`[LEVEL] pesan`).
+- **`RTU_LOGGING`** (`[LEVEL] pesan`): konek, putus, gagal konek (sekali per rangkaian), berhenti reconnect, RCB gagal / pulih,
+  EntryID BRCB ditolak, liveness / polling timeout → reconnect, parameter OSI tidak valid, peringatan konfigurasi, hasil command
+  (`Operate ioa 3005 sukses` / `gagal: ...`), command ditolak sebelum dikirim (`[ERROR] CONTROL ... tidak dikirim`). Tanpa level:
+  baris `CONTROL TX/RX/SKIP` (selalu) dan lalu lintas data `REPORT/POLL/GI` (`LOG_DATA_TRAFFIC`). Daftar lengkap:
+  [docs/KAFKA_PAYLOADS.md](docs/KAFKA_PAYLOADS.md#33-rtu_logging).
 - Peringatan konfigurasi (WARN, log + `RTU_LOGGING`, sekali per sesi setelah konek): mode REPORT/HYBRID tanpa RCB
   `enabled`, dan datapoint `protocol = 'IEC61850'` tanpa baris `master_datapoint_iec61850s` (IOA disebut, maks 20).
 - **Consumer** (`GROUP_ID` default `IEC61850_FEP_GROUP`, sama di `.env.example` dan `kubernetes/configmap.yaml`), pesan dengan `protocol` ≠ `IEC61850` diabaikan.
@@ -357,7 +361,7 @@ Respons ke `IEC61850_BROWSE_RESPONSE` (key = `key`):
 
 > Ditulis **tanpa uji ke Kafka/Postgres**. Yang bisa diuji sekarang: `cargo test`, `cargo clippy`.
 
-[src/command.rs](src/command.rs) + `Control` di [src/iec61850/client.rs](src/iec61850/client.rs).
+[src/kafka/handlers/rtu_event/command.rs](src/kafka/handlers/rtu_event/command.rs) + [src/domain/command.rs](src/domain/command.rs) + `Control` di [src/iec61850/client.rs](src/iec61850/client.rs).
 
 Alur: event `COMMAND` di `RTU_EVENTS` → cari IED (`id_rtu` atau IP) → job dikirim ke thread IED →
 `(id_rtu, ioa)` → titik `FC = CO` → `ControlObjectClient` (di-cache per IOA selama sesi) → respons ke `RTU_COMMAND`.

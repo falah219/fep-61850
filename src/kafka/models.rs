@@ -1,5 +1,8 @@
-//! Format pesan Kafka. Disalin dari `kafka/models.rs` FEP IEC 104 (nama & bentuk field sama),
-//! hanya `protocol` diisi "IEC61850".
+//! Format pesan Kafka, berasal dari `kafka/models.rs` FEP IEC 104.
+//! Pesan PRODUCE (`DataMessage`, status, logging, manual set) nama & urutan field sama dengan IEC 104,
+//! `protocol` = "IEC61850". Pesan CONSUME sengaja lebih longgar dari IEC 104: `RtuEventMessage` punya `user`
+//! dan `ip_address` opsional, `MasterRtuEventMessage` tanpa `id_station`, `CaptureDataChangeMessage` membaca
+//! `record`, `MasterDatapointEventMessage.ioa` boleh string. Lihat docs/KAFKA_PAYLOADS.md.
 
 use serde::{Deserialize, Deserializer, Serialize};
 

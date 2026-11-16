@@ -857,8 +857,8 @@ Struct: `DataMessage` ([models.rs](../src/kafka/models.rs)), dibuat di
 | `type` | string | CDC titik (`SPS`, `DPS`, `MV`, ...) dari mapping |
 | `quality` | string | `GOOD`, `INVALID`, `SUBSTITUTED`, `QUESTIONABLE` |
 | `flag` | string | Detail quality dipisah `\|`, `GOOD` kalau kosong |
-| `group` | string | `master_data_objects.id_group` (UUID) untuk `initial` = CDC dan `protocol = 'IEC61850'`; `""` kalau tidak ada |
-| `general_action` | integer / null | `master_general_actions.code` untuk `name_action` = `action` (`protocol = 'IEC61850'`); `null` kalau tidak ada |
+| `group` | string | `master_data_objects.id_group` (UUID) untuk `initial` = CDC dan `protocol = 'IEC61850'`; `""` kalau tidak ada. Sama dengan FEP IEC 104 (lihat sampel di bagian 4) |
+| `general_action` | integer / null | `master_general_actions.code` **apa adanya** untuk `name_action` = `action` (`protocol = 'IEC61850'`); `null` kalau tidak ada |
 | `time` | integer | ms epoch UTC |
 | `time_desc` | string | `RTU` atau `SERVER` |
 
@@ -892,7 +892,20 @@ clockNotSynchronized), urutan tetap, dipisah `|`. Tidak ada satu pun → `GOOD`.
 `time_desc`: `RTU` = atribut `t` titik, atau waktu entri report kalau titik tidak punya `t` (tidak dikoreksi `TIMEZONE`);
 `SERVER` = jam server FEP (polling tanpa `t`).
 
-`general_action`: kode dari tabel `master_general_actions` (bukan konstanta FEP). Angka di contoh hanya contoh.
+`general_action`: `master_general_actions.code` apa adanya dari DB, **kode internal GRITA, bukan nomor COT** (sampel FEP IEC 104
+mengirim `0` untuk `SPONTANEOUS`). FEP tidak punya konstanta sendiri; nilainya sepenuhnya bergantung isi tabel, dan angka
+`general_action` di contoh dokumen ini **hanya contoh**. Isi tabel di lingkungan masing-masing:
+
+```text
+SELECT protocol, name_action, code
+FROM master_general_actions
+WHERE is_deleted = FALSE AND protocol IN ('IEC61850', 'IEC104')
+ORDER BY protocol, code, name_action;
+```
+
+`action` IEC 61850 yang perlu ada barisnya (`protocol = 'IEC61850'`): `GENERAL_INTERROGATION`, `INTEGRITY`, `DATA_CHANGE`,
+`QUALITY_CHANGE`, `DATA_UPDATE`, `POLLING`. Action tanpa baris → `general_action: null`. Dimuat saat start dan saat CDC
+`master_general_actions`.
 
 `value` per CDC ([mapper.rs](../src/iec61850/mapper.rs) `mms_to_json`):
 
@@ -1718,7 +1731,7 @@ Sampel asli `RTU_DATAS` FEP IEC 104 (test `rtu_datas_sama_bentuk_dengan_sampel_i
 |---|---|---|
 | `protocol` | `IEC104` (env `PROTOCOL`) | `IEC61850` |
 | `ip_address` tingkat atas RTU_EVENTS | **wajib** (tanpa itu parse error) | opsional |
-| COMMAND `data.ip_address`, `data.port` | **wajib** di dalam `data`; tanpa itu `data` gagal dibaca lalu jatuh ke field datar | opsional (`port` default 0) |
+| COMMAND `data.ip_address`, `data.port` | **wajib** di dalam `data`; tanpa itu `data` gagal dibaca lalu jatuh ke field datar | opsional; `data` salah tipe → ditolak `inactive` |
 | COMMAND port default | 2404 | port konfigurasi IED (IED tidak dikenal: `port` payload, lalu 102) |
 | COMMAND `type` | **wajib**, tipe ASDU (`C_SC_NA_1`, `C_DC_NA_1`, ...), menentukan perintah | opsional, hanya disalin ke respons; CDC dari mapping DB |
 | COMMAND `value` | **integer** (`i32`) | angka (integer/float), string angka, boolean |
@@ -1727,13 +1740,18 @@ Sampel asli `RTU_DATAS` FEP IEC 104 (test `rtu_datas_sama_bentuk_dengan_sampel_i
 | COMMAND `qualifier` | dikirim ke RTU (default 0) | tidak dikirim ke IED, dikembalikan di respons (default 0) |
 | COMMAND pencarian RTU | dari `ip_address` | `id_rtu` dulu, baru `ip_address` |
 | `RTU_DATAS.action` | COT: `SPONTANEOUS`, `PERIODIC`, `BACKGROUND_SCAN`, `INTERROGATED_BY_STATION`, `INTERROGATED_BY_GROUP_n`, ... | reason report: `DATA_CHANGE`, `QUALITY_CHANGE`, `DATA_UPDATE`, `INTEGRITY`, `GENERAL_INTERROGATION`, `POLLING` |
-| `RTU_DATAS.type` / `asdu` / `ca` | nama tipe ASDU / type id / common address | CDC / `0` / `0` |
+| `RTU_DATAS.type` / `asdu` / `ca` | nama tipe ASDU / type id / common address (sampel: `M_ME_TF_1` / `36` / `1`) | CDC / `0` / `0` (sampel: `DPS` / `0` / `0`) |
+| `RTU_DATAS.general_action` | kode dari `master_general_actions` protocol `IEC104` (sampel: `0` untuk `SPONTANEOUS`) | kode dari `master_general_actions` protocol `IEC61850` |
 | `RTU_DATAS.time_desc = RTU` | waktu RTU dikoreksi `TIMEZONE` | waktu `t` sudah UTC, tidak dikoreksi |
 | `MASTER_RTU_EVENTS.id_station` | wajib | diabaikan |
 
-`action` beda nama antara 104 dan 61850, jadi konsumen sebaiknya memakai `general_action` (kode dari
-`master_general_actions` per protocol): isi baris `IEC61850` dengan `name_action` = action 61850 dan `code` yang sama dengan
-padanan 104 (mis. `DATA_CHANGE` ↔ `SPONTANEOUS`, `GENERAL_INTERROGATION` ↔ `INTERROGATED_BY_STATION`, `INTEGRITY` ↔ `PERIODIC`).
+**Perlu dikonfirmasi backend** (dibandingkan dengan sampel asli IEC 104 di atas):
+
+1. `action`: IEC 104 `SPONTANEOUS` / `PERIODIC` / `INTERROGATED_BY_STATION` ..., IEC 61850 `DATA_CHANGE` / `INTEGRITY` /
+   `GENERAL_INTERROGATION` .... Konsumen yang memfilter `action` per nama harus mengenal keduanya, atau memakai
+   `general_action` (isi baris `master_general_actions` protocol `IEC61850` dengan `code` yang diinginkan backend).
+2. `ca` / `asdu`: IEC 104 `1` / `36`, IEC 61850 selalu `0` / `0`. Apakah ada konsumen yang memakai `ca`/`asdu` sebagai kunci?
+3. `type`: IEC 104 nama tipe ASDU (`M_ME_TF_1`), IEC 61850 CDC (`MV`, `DPS`, ...). Apakah tampilan / alarm memetakan `type`?
 
 ### 4.3 Payload COMMAND "aman untuk keduanya"
 
@@ -1768,32 +1786,33 @@ Bentuk yang terbaca kedua FEP: `ip_address` dan `port` di tingkat atas **dan** d
 
 ## 5. Catatan ketidaksesuaian
 
-Ditemukan saat menulis dokumen ini. **Kode tidak diubah**; perlu keputusan tim.
+Ditemukan saat menulis dokumen ini (2026-11-15), lalu sebagian diperbaiki (2026-11-16). Butir yang belum dicoret masih
+berlaku dan perlu keputusan tim.
 
 1. ~~CDC: `record` vs `data`~~ — **diperbaiki**: FEP membaca `record` (cadangan `data`), UPDATE kolom status `iec61850s` tidak lagi memicu reload, tabel lain diabaikan.
-2. **README `group`.** README menulis `group = master_data_objects.initial = CDC`. Di kode `group` berisi `id_group` (UUID)
-   dari baris `master_data_objects` yang `initial`-nya = CDC, bukan CDC itu sendiri.
+2. ~~README `group`~~ — **diperbaiki di README**: `group` = `master_data_objects.id_group` (UUID), sama dengan IEC 104.
 3. ~~AddCause di `RTU_COMMAND` hanya kode~~ — **diperbaiki**: `addCause=10 (blocked-by-interlocking)`.
 4. ~~COMMAND `data` gagal dibaca → diam-diam pakai field datar~~ — **diperbaiki**: ditolak `inactive` `field data tidak valid: ...`.
 5. ~~Default port COMMAND tidak seragam~~ — **diperbaiki**: port konfigurasi IED (IED tidak dikenal: `port` payload, lalu 102).
 6. ~~`qualifier` payload diabaikan~~ — **diperbaiki**: dikembalikan di respons (default 0).
 7. **Tanpa balasan** (sisa): COMMAND dengan JSON tidak valid **tanpa** `key` yang terbaca, `MANUAL_SET_EVENT` untuk `id_rtu`
-   yang tidak berjalan (sengaja: FEP lain yang menjawab) atau event selain `TOGGLE_MANUAL_SET`. COMMAND dengan `action` tidak
-   dikenal / field salah tipe / JSON tidak valid ber-`key` **sudah dibalas** `inactive`.
-8. **Cek protocol tidak berlaku** untuk `MASTER_DATA_OBJECT_EVENT` (pesan IEC104 pun memicu reload group 61850) dan
-   `CAPTURE_DATA_CHANGE`. Perbandingan protocol tidak peka huruf besar/kecil, README menulis "≠ `IEC61850`".
+   yang tidak berjalan (sengaja: FEP lain yang menjawab) atau event selain `TOGGLE_MANUAL_SET`.
+8. **Cek protocol tidak berlaku** untuk `MASTER_DATA_OBJECT_EVENT` (isi pesan tidak dibaca; pesan IEC104 pun memicu reload
+   group 61850, murah karena tanpa reconnect). Perbandingan protocol tidak peka huruf besar/kecil.
 9. ~~BROWSE tidak mencari `id_rtu` dari `ip_address`~~ — **diperbaiki**: sama dengan COMMAND.
 10. **CREATE/ADD/UPDATE dengan `ip_address` saja** hanya berhasil untuk IED yang sudah berjalan; RTU baru wajib `id_rtu`.
 11. ~~`MASTER_DATAPOINT_EVENT.ioa` harus integer~~ — **diperbaiki**: integer maupun string angka. (Tetap: `REMOVE` tidak dikenal di topic ini, hanya `DELETE`.)
 12. ~~Event GI pada mode POLLING menghasilkan `INTEGRITY`~~ — **diperbaiki**: `GENERAL_INTERROGATION`.
 13. ~~`CONTROL TX` ditulis walau tidak ada request ke IED~~ — **diperbaiki**: SELECT direct → `CONTROL SKIP`, value tidak valid / status-only → baris `[ERROR] ... tidak dikirim`.
 14. **Baris ringkas `[INFO] <n> log data dilewati ...` tanpa timestamp**, sementara baris lalu lintas lain diawali timestamp.
-15. **README fase 8** menyebut `RTU_LOGGING` hanya "konek, putus, gagal konek, RCB gagal"; kode juga mengirim hasil command,
-    liveness/reconnect, EntryID ditolak, parameter OSI, peringatan konfigurasi, RCB pulih, dan baris lalu lintas/CONTROL.
-16. **Path lama di README**: `src/repository.rs`, `src/manager.rs`, `src/handlers.rs`, `src/command.rs` sudah dipecah ke
-    `src/repository/`, `src/connection/manager.rs`, `src/kafka/handlers/`, `src/kafka/handlers/rtu_event/command.rs` +
-    `src/domain/command.rs`.
-17. **Komentar `models.rs`** "nama & bentuk field sama dengan IEC 104": `RtuEventMessage` 61850 menambah `user` dan membuat
-    `ip_address` opsional; `MasterRtuEventMessage` 61850 tidak punya `id_station`.
+15. ~~README fase 8: daftar `RTU_LOGGING` tidak lengkap~~ — **diperbaiki** di README.
+16. ~~Path lama di README~~ — **diperbaiki** (`src/repository/`, `src/connection/manager.rs`, `src/kafka/handlers/`, `src/domain/command.rs`).
+17. ~~Komentar `models.rs` "bentuk field sama dengan IEC 104"~~ — **diperbaiki**: komentar menjelaskan beda pesan consume.
 18. ~~`GROUP_ID` tidak seragam~~ — **diperbaiki**: `IEC61850_FEP_GROUP` di kode, `.env.example`, dan configmap.
 19. **BROWSE / COMMAND dengan `key` kosong**: key Kafka `"unknown"`, tetapi field `key` di isi pesan `""`.
+20. **Pencarian `id_rtu` dari IP membuang `-`** (`safe_ip`): IED yang `ip_address`-nya hostname (mis. `ied-sim-1`) tidak pernah
+    cocok, jadi event tanpa `id_rtu` untuk IED seperti itu gagal ("RTU tidak ditemukan"). IP literal tidak terpengaruh.
+21. **CDC `iec61850s` tidak membandingkan `channel_number`** (diabaikan bersama kolom `channel_*` sesuai permintaan), padahal
+    dipakai sebagai `channel` di `RTU_STATUS` ping. Perubahan `channel_number` baru terpakai setelah reload karena sebab lain.
+22. **CDC `iec61850s` untuk IED yang tidak berjalan** dengan `state_rtu = true` di `record` → IED dijalankan, termasuk IED
+    yang sebelumnya dihentikan lewat event `STATE false` tanpa DB ikut diubah. Backend sebaiknya selalu menyimpan `state_rtu`.
