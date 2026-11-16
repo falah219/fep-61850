@@ -114,6 +114,7 @@ fn contoh_consume_terbaca_handler() {
                 None
             }
             KafkaEvent::MasterDataObject => None,
+            KafkaEvent::InvalidCommand { error, .. } => panic!("{name}: contoh tidak terbaca: {error}"),
         };
         if let Some(p) = protocol {
             assert_eq!(is_ours(&p), !name.contains("ignored"), "{name}: protocol {p}");

@@ -57,7 +57,8 @@ Daftar isi:
 - **Waktu.** Field `time` / `timestamp` = **milidetik epoch UTC** (angka). Waktu di teks `logging` = ISO-8601 UTC
   mikrodetik (`2026-11-15T03:04:05.123456Z`).
 - **JSON tidak valid / field wajib tidak ada / tipe salah:** hanya log `ERROR <TOPIC> parse error: ...` di FEP.
-  Pesan dibuang, **tidak ada balasan** ke Kafka (termasuk COMMAND dan BROWSE). Field yang tidak dikenal diabaikan.
+  Pesan dibuang, **tidak ada balasan** ke Kafka. Pengecualian: `RTU_EVENTS` COMMAND dengan `protocol` IEC61850 dan
+  `key` yang masih terbaca → `RTU_COMMAND` `inactive` (`payload tidak valid: ...`). Field yang tidak dikenal diabaikan.
 - **Payload bukan UTF-8:** dibuang tanpa log.
 - **Topic tidak dikenal** (di-subscribe lewat `SUBSCRIBE_TOPICS` tapi tidak ditangani): log `WARN topik tidak dikenal`.
 
@@ -269,8 +270,8 @@ Handler: [rtu_event/command.rs](../src/kafka/handlers/rtu_event/command.rs). Com
 (urutan kedatangan terjaga: SELECT sebelum OPERATE), hasil ditunggu maks **30 detik** di task terpisah, lalu balasan ke
 `RTU_COMMAND` (bagian [3.5](#35-rtu_command)).
 
-Bentuk: objek `data` (diutamakan) **atau** field datar di tingkat atas. Kalau `data` ada tapi gagal dibaca (mis. `port`
-berupa string), FEP diam-diam memakai field datar (lihat [catatan](#5-catatan-ketidaksesuaian)).
+Bentuk: objek `data` (diutamakan) **atau** field datar di tingkat atas. Kalau `data` ada tapi salah tipe (mis. `port`
+berupa string), command **ditolak** dengan `inactive` `field data tidak valid: ...` (tidak memakai field datar).
 
 | Field | Tipe JSON | Wajib | Default | Posisi | Arti |
 |---|---|---|---|---|---|
@@ -456,7 +457,9 @@ Gagal / ditolak (semua dibalas `RTU_COMMAND` `status: "inactive"`, alasan di `ms
 
 | Kondisi | Alasan di `msg` |
 |---|---|
-| `action` tidak dikenal / kosong | **tidak ada balasan**, hanya log `WARN [COMMAND] action tidak dikenal` |
+| JSON tidak terbaca struct (salah tipe di tingkat atas / JSON rusak) tapi `event` = COMMAND, `protocol` = IEC61850, dan `key` terbaca | `payload tidak valid: <error serde>`. `event` respons dari `action` kalau terbaca, selain itu `UNKNOWN`. Tanpa `key` → tidak ada balasan (log ERROR) |
+| `data` ada tapi salah tipe | `field data tidak valid: <error serde>` |
+| `action` tidak dikenal / kosong | `action tidak dikenal: "<action>" (SELECT_RTU, OPERATE_RTU, CANCEL_RTU)`; `event` = action tanpa `_RTU` (kosong: `UNKNOWN`) |
 | `id_rtu` tidak ada dan IP tidak cocok IED yang berjalan | `RTU tidak ditemukan untuk IP ini` |
 | `ioa` kosong dan tag tanpa akhiran angka | `ioa atau tag dengan IOA wajib diisi` |
 | `value` kosong (SELECT/OPERATE) | `value wajib diisi` |
@@ -1319,7 +1322,7 @@ RTU_DATAS        DPS ... action=DATA_CHANGE        (report posisi baru dari IED)
 ### 3.5 `RTU_COMMAND`
 
 Dibuat di [rtu_event/command.rs](../src/kafka/handlers/rtu_event/command.rs). Key = `key` payload (`"unknown"` kalau kosong).
-Satu balasan per COMMAND (kecuali `action` tidak dikenal / JSON tidak valid: tanpa balasan).
+Satu balasan per COMMAND, termasuk yang gagal sebelum dieksekusi (kecuali JSON tidak valid tanpa `key` yang terbaca).
 
 | Field | Tipe | Arti |
 |---|---|---|
@@ -1723,13 +1726,13 @@ Ditemukan saat menulis dokumen ini. **Kode tidak diubah**; perlu keputusan tim.
 2. **README `group`.** README menulis `group = master_data_objects.initial = CDC`. Di kode `group` berisi `id_group` (UUID)
    dari baris `master_data_objects` yang `initial`-nya = CDC, bukan CDC itu sendiri.
 3. **AddCause di `RTU_COMMAND`** hanya berupa kode di dalam `msg` (`addCause=10`), nama hanya ada di `RTU_LOGGING`.
-4. **COMMAND `data` gagal dibaca → diam-diam pakai field datar.** Mis. `data.port` string (`"102"`) atau > 65535, `data.action`
-   bukan string. Biasanya berakhir `action tidak dikenal` **tanpa balasan** `RTU_COMMAND`.
+4. ~~COMMAND `data` gagal dibaca → diam-diam pakai field datar~~ — **diperbaiki**: ditolak `inactive` `field data tidak valid: ...`.
 5. **Default port COMMAND tidak seragam**: `data` tanpa `port` → 0, format datar → 102 (komentar menyebut "sama dengan IEC 104",
    yang default-nya 2404). Hanya terlihat di respons kalau IED tidak dikenal.
 6. **`qualifier` payload diabaikan**, respons selalu `0` (IEC 104 meneruskannya ke RTU).
-7. **Tanpa balasan**: COMMAND dengan `action` tidak dikenal, semua JSON tidak valid, `MANUAL_SET_EVENT` untuk `id_rtu` yang
-   tidak berjalan atau event selain `TOGGLE_MANUAL_SET`. GRITA bisa menunggu sampai timeout-nya sendiri.
+7. **Tanpa balasan** (sisa): COMMAND dengan JSON tidak valid **tanpa** `key` yang terbaca, `MANUAL_SET_EVENT` untuk `id_rtu`
+   yang tidak berjalan (sengaja: FEP lain yang menjawab) atau event selain `TOGGLE_MANUAL_SET`. COMMAND dengan `action` tidak
+   dikenal / field salah tipe / JSON tidak valid ber-`key` **sudah dibalas** `inactive`.
 8. **Cek protocol tidak berlaku** untuk `MASTER_DATA_OBJECT_EVENT` (pesan IEC104 pun memicu reload group 61850) dan
    `CAPTURE_DATA_CHANGE`. Perbandingan protocol tidak peka huruf besar/kecil, README menulis "≠ `IEC61850`".
 9. **BROWSE tidak mencari `id_rtu` dari `ip_address`**, beda dengan event RTU_EVENTS lain dan COMMAND.

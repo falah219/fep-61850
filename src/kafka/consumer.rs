@@ -20,12 +20,17 @@ pub enum KafkaEvent {
     CommandConfig(RtuCommandConfigMessage),
     CaptureDataChange(CaptureDataChangeMessage),
     ManualSet(ManualSetEventMessage),
+    /// COMMAND IEC61850 yang tidak terbaca `RtuEventMessage`, tapi `key` terbaca -> dibalas RTU_COMMAND inactive.
+    InvalidCommand { action: String, key: String, ip_address: String, error: String },
 }
 
 pub(crate) fn parse(topic: &str, payload: &str) -> Result<Option<KafkaEvent>, String> {
     let e = |err: serde_json::Error| format!("{topic} parse error: {err}");
     Ok(Some(match topic {
-        "RTU_EVENTS" => KafkaEvent::RtuEvent(Box::new(serde_json::from_str(payload).map_err(e)?)),
+        "RTU_EVENTS" => match serde_json::from_str(payload) {
+            Ok(m) => KafkaEvent::RtuEvent(Box::new(m)),
+            Err(err) => invalid_command(payload, &err).ok_or_else(|| e(err))?,
+        },
         "MASTER_DATAPOINT_EVENT" => KafkaEvent::MasterDatapoint(serde_json::from_str(payload).map_err(e)?),
         "MASTER_DATA_OBJECT_EVENT" => KafkaEvent::MasterDataObject,
         "MASTER_RTU_EVENTS" => KafkaEvent::MasterRtu(serde_json::from_str(payload).map_err(e)?),
@@ -34,6 +39,33 @@ pub(crate) fn parse(topic: &str, payload: &str) -> Result<Option<KafkaEvent>, St
         "MANUAL_SET_EVENT" => KafkaEvent::ManualSet(serde_json::from_str(payload).map_err(e)?),
         _ => return Ok(None),
     }))
+}
+
+/// RTU_EVENTS yang gagal di-parse: kalau jelas COMMAND IEC61850 dan `key` terbaca, jadikan InvalidCommand
+/// (protocol lain TIDAK dijawab: pesan itu milik FEP lain).
+fn invalid_command(payload: &str, err: &serde_json::Error) -> Option<KafkaEvent> {
+    let json: Option<serde_json::Value> = serde_json::from_str(payload).ok();
+    let get = |k: &str| match &json {
+        Some(v) => v.get(k).or_else(|| v.get("data").and_then(|d| d.get(k))).and_then(|x| x.as_str()).map(String::from),
+        None => scan_str(payload, k),
+    };
+    if get("event")? != "COMMAND" || !super::event_handler::is_ours(&get("protocol")?) {
+        return None;
+    }
+    Some(KafkaEvent::InvalidCommand {
+        action: get("action").unwrap_or_default(),
+        key: get("key")?,
+        ip_address: get("ip_address").unwrap_or_default(),
+        error: format!("payload tidak valid: {err}"),
+    })
+}
+
+/// Nilai string `"field": "..."` pertama di teks JSON yang rusak (tanpa escape).
+fn scan_str(raw: &str, field: &str) -> Option<String> {
+    let pat = format!("\"{field}\"");
+    let rest = &raw[raw.find(&pat)? + pat.len()..];
+    let rest = rest.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+    Some(rest[..rest.find('"')?].to_string())
 }
 
 /// Buat consumer, subscribe, lalu jalankan di thread sendiri. Event dikirim ke receiver.
@@ -111,5 +143,26 @@ mod tests {
         assert!(matches!(parse("MASTER_DATA_OBJECT_EVENT", "{}"), Ok(Some(KafkaEvent::MasterDataObject))));
         assert!(matches!(parse("TOPIK_LAIN", "{}"), Ok(None)));
         assert!(parse("RTU_EVENTS", "bukan json").is_err());
+    }
+
+    #[test]
+    fn command_tidak_valid_tetap_dijawab() {
+        let invalid = |p: &str| match parse("RTU_EVENTS", p) {
+            Ok(Some(KafkaEvent::InvalidCommand { action, key, error, .. })) => Some((action, key, error)),
+            _ => None,
+        };
+        // id_rtu salah tipe
+        let (action, key, error) =
+            invalid(r#"{"event":"COMMAND","protocol":"IEC61850","id_rtu":"9001","data":{"action":"OPERATE_RTU","key":"k1"}}"#).unwrap();
+        assert_eq!((action.as_str(), key.as_str()), ("OPERATE_RTU", "k1"));
+        assert!(error.starts_with("payload tidak valid"));
+        // JSON rusak, key masih terbaca
+        let (_, key, _) = invalid(r#"{"event":"COMMAND","protocol":"IEC61850","key":"k2","data":{"action":"#).unwrap();
+        assert_eq!(key, "k2");
+        // tanpa key / protocol lain / bukan COMMAND -> parse error biasa
+        assert!(invalid(r#"{"event":"COMMAND","protocol":"IEC61850","id_rtu":"x"}"#).is_none());
+        assert!(invalid(r#"{"event":"COMMAND","protocol":"IEC104","id_rtu":"x","key":"k"}"#).is_none());
+        assert!(invalid(r#"{"event":"GI","protocol":"IEC61850","id_rtu":"x","key":"k"}"#).is_none());
+        assert!(parse("RTU_EVENTS", r#"{"event":"COMMAND","protocol":"IEC61850","id_rtu":"x"}"#).is_err());
     }
 }

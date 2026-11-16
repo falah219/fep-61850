@@ -31,10 +31,9 @@ pub async fn handle(mgr: &Arc<Manager>, event: KafkaEvent) {
         // Hanya menunggu hasil (bisa sampai 30 detik) + kirim respons yang jalan di task sendiri,
         // supaya event lain tidak tertahan.
         KafkaEvent::RtuEvent(m) if is_ours(&m.protocol) && m.event == "COMMAND" => {
-            if let Some(wait_and_respond) = command::submit(mgr, *m) {
-                tokio::spawn(wait_and_respond);
-            }
+            tokio::spawn(command::submit(mgr, *m));
         }
+        KafkaEvent::InvalidCommand { action, key, ip_address, error } => command::reject(mgr, &action, key, ip_address, &error),
         // BROWSE: sama dengan COMMAND, masuk antrean IED sekarang, tunggu hasil di task sendiri.
         KafkaEvent::RtuEvent(m) if is_ours(&m.protocol) && m.event == "BROWSE" => {
             tokio::spawn(browse::submit(mgr, *m));

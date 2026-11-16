@@ -13,6 +13,7 @@ use tracing::{error, info, warn};
 use crate::connection::Manager;
 use crate::domain::{CommandAction, CommandJob, CommandReq};
 use crate::iec61850::acquisition::Ctl;
+use crate::kafka::event_handler::data_id_rtu;
 use crate::kafka::models::{RtuEventMessage, PROTOCOL};
 use crate::utils::timestamp::now_ms;
 
@@ -71,8 +72,10 @@ fn value_json(v: Option<f64>) -> Value {
 }
 
 /// Utamakan objek `data`; kalau tidak ada, pakai field datar (sama dengan IEC 104).
-fn parse_command_data(m: &RtuEventMessage) -> CommandData {
-    if let Some(Ok(mut cd)) = m.data.as_ref().filter(|d| d.is_object()).map(CommandData::deserialize) {
+/// `data` ada tapi salah tipe -> Err (TIDAK jatuh diam-diam ke field datar).
+fn parse_command_data(m: &RtuEventMessage) -> Result<CommandData, String> {
+    if let Some(d) = m.data.as_ref().filter(|d| d.is_object()) {
+        let mut cd = CommandData::deserialize(d).map_err(|e| format!("field data tidak valid: {e}"))?;
         if cd.ip_address.is_empty() {
             cd.ip_address = m.ip_address.clone();
         }
@@ -82,9 +85,12 @@ fn parse_command_data(m: &RtuEventMessage) -> CommandData {
         if cd.user.is_none() {
             cd.user = m.user.clone();
         }
-        return cd;
+        if cd.key.is_none() {
+            cd.key = m.key.clone();
+        }
+        return Ok(cd);
     }
-    CommandData {
+    Ok(CommandData {
         action: m.action.clone().unwrap_or_default(),
         tag: m.tag.clone(),
         ip_address: m.ip_address.clone(),
@@ -95,25 +101,61 @@ fn parse_command_data(m: &RtuEventMessage) -> CommandData {
         key: m.key.clone(),
         ioa: m.ioa.clone().map(Value::String),
         user: m.user.clone(),
+    })
+}
+
+/// Field yang masih terbaca dari payload yang gagal di-parse, hanya untuk isi respons.
+fn lenient(m: &RtuEventMessage) -> CommandData {
+    let d = m.data.as_ref();
+    let s = |k: &str| d.and_then(|d| d.get(k)).and_then(Value::as_str).map(String::from);
+    CommandData {
+        action: s("action").or_else(|| m.action.clone()).unwrap_or_default(),
+        tag: s("tag").or_else(|| m.tag.clone()),
+        ip_address: s("ip_address").unwrap_or_else(|| m.ip_address.clone()),
+        command_type: s("type").or_else(|| m.command_type.clone()),
+        id_rtu: data_id_rtu(d).or(m.id_rtu),
+        key: s("key").or_else(|| m.key.clone()),
+        value: d.and_then(|d| d.get("value")).cloned().or_else(|| m.value.clone()),
+        ..Default::default()
+    }
+}
+
+/// `event` respons: SELECT/OPERATE/CANCEL; action tidak dikenal -> teksnya tanpa `_RTU` (kosong: UNKNOWN).
+fn event_name(action: &str) -> String {
+    match CommandAction::parse(action) {
+        Some(a) => a.as_str().into(),
+        None if action.trim().is_empty() => "UNKNOWN".into(),
+        None => {
+            let a = action.trim().to_uppercase();
+            a.strip_suffix("_RTU").map_or_else(|| a.clone(), String::from)
+        }
     }
 }
 
 /// Bagian SINKRON: parse lalu masukkan command ke antrean thread IED saat itu juga, jadi urutan
 /// command ke satu IED = urutan kedatangan Kafka (SELECT selalu sebelum OPERATE).
 /// Future yang dikembalikan (tunggu hasil + kirim respons RTU_COMMAND) boleh di-`tokio::spawn`.
-pub fn submit(mgr: &Arc<Manager>, m: RtuEventMessage) -> Option<impl Future<Output = ()> + Send + 'static> {
-    let cd = parse_command_data(&m);
-    let Some(action) = CommandAction::parse(&cd.action) else {
-        warn!("[COMMAND] action tidak dikenal: {:?}", cd.action);
-        return None;
+/// Semua kegagalan sebelum eksekusi (field salah tipe, action tidak dikenal, IED tidak ada) juga dibalas
+/// RTU_COMMAND `inactive`.
+pub fn submit(mgr: &Arc<Manager>, m: RtuEventMessage) -> impl Future<Output = ()> + Send + 'static {
+    let (cd, parsed) = match parse_command_data(&m) {
+        Ok(cd) => (cd, Ok(())),
+        Err(e) => (lenient(&m), Err(e)),
     };
+    let event = event_name(&cd.action);
     let value = as_f64(cd.value.as_ref());
     let ioa = as_i32(cd.ioa.as_ref()).or_else(|| cd.tag.as_deref().and_then(ioa_from_tag));
-    info!("[COMMAND] {} ip={} id_rtu={:?} ioa={ioa:?} value={value:?} key={:?}", action.as_str(), cd.ip_address, cd.id_rtu, cd.key);
+    info!("[COMMAND] {event} ip={} id_rtu={:?} ioa={ioa:?} value={value:?} key={:?}", cd.ip_address, cd.id_rtu, cd.key);
 
-    let queued = enqueue(mgr, &cd, action, ioa, value);
+    let queued = parsed.and_then(|()| match CommandAction::parse(&cd.action) {
+        Some(action) => enqueue(mgr, &cd, action, ioa, value),
+        None => {
+            warn!("[COMMAND] action tidak dikenal: {:?}", cd.action);
+            Err(format!("action tidak dikenal: {:?} (SELECT_RTU, OPERATE_RTU, CANCEL_RTU)", cd.action))
+        }
+    });
     let mgr = Arc::clone(mgr);
-    Some(async move {
+    async move {
         let result = match queued {
             Ok(rx) => match tokio::time::timeout(COMMAND_TIMEOUT, rx).await {
                 Ok(Ok(result)) => result,
@@ -122,17 +164,24 @@ pub fn submit(mgr: &Arc<Manager>, m: RtuEventMessage) -> Option<impl Future<Outp
             },
             Err(e) => Err(e),
         };
-        respond(&mgr, &cd, action, ioa, value, &result);
-    })
+        respond(&mgr, &cd, &event, ioa, value, &result);
+    }
 }
 
-fn respond(mgr: &Manager, cd: &CommandData, action: CommandAction, ioa: Option<i32>, value: Option<f64>, result: &Result<(), String>) {
+/// COMMAND IEC61850 yang JSON-nya tidak terbaca struct (dari consumer): dibalas inactive.
+pub fn reject(mgr: &Manager, action: &str, key: String, ip_address: String, error: &str) {
+    warn!("[COMMAND] payload tidak valid key={key:?}: {error}");
+    let cd = CommandData { action: action.into(), ip_address, key: Some(key), ..Default::default() };
+    respond(mgr, &cd, &event_name(action), None, None, &Err(error.to_string()));
+}
+
+fn respond(mgr: &Manager, cd: &CommandData, event: &str, ioa: Option<i32>, value: Option<f64>, result: &Result<(), String>) {
     match result {
-        Ok(()) => info!("[COMMAND] {} sukses ioa={ioa:?}", action.as_str()),
-        Err(e) => error!("[COMMAND] {} gagal ioa={ioa:?}: {e}", action.as_str()),
+        Ok(()) => info!("[COMMAND] {event} sukses ioa={ioa:?}"),
+        Err(e) => error!("[COMMAND] {event} gagal ioa={ioa:?}: {e}"),
     }
     let cfg = cd.id_rtu.or_else(|| mgr.id_by_ip(&cd.ip_address)).and_then(|id| mgr.endpoint_of(id));
-    let response = response_json(cd, action, value, result, response_endpoint(&cd.ip_address, cd.port, cfg), now_ms());
+    let response = response_json(cd, event, value, result, response_endpoint(&cd.ip_address, cd.port, cfg), now_ms());
     let key = cd.key.as_deref().unwrap_or_default();
     let topic_key = if key.is_empty() { "unknown" } else { key };
     mgr.publisher.producer.send_raw(TOPIC_RTU_COMMAND, topic_key, &response);
@@ -141,15 +190,15 @@ fn respond(mgr: &Manager, cd: &CommandData, action: CommandAction, ioa: Option<i
 /// Isi pesan RTU_COMMAND (format sama dengan IEC 104). `endpoint` = (hostname, port).
 fn response_json(
     cd: &CommandData,
-    action: CommandAction,
+    event: &str,
     value: Option<f64>,
     result: &Result<(), String>,
     (hostname, port): (String, i32),
     time: i64,
 ) -> Value {
     let (status, msg) = match result {
-        Ok(()) => ("active", format!("{} success RTU status is Active", action.as_str())),
-        Err(e) => ("inactive", format!("{} failed: {e} - RTU status is Inactive", action.as_str())),
+        Ok(()) => ("active", format!("{event} success RTU status is Active")),
+        Err(e) => ("inactive", format!("{event} failed: {e} - RTU status is Inactive")),
     };
     json!({
         "hostname": hostname,
@@ -159,7 +208,7 @@ fn response_json(
         "command_type": cd.command_type.clone().unwrap_or_default(),
         "command_value": value_json(value),
         "qualifier": 0,
-        "event": action.as_str(),
+        "event": event,
         "status": status,
         "msg": msg,
         "key": cd.key.clone().unwrap_or_default(),
@@ -230,7 +279,7 @@ mod tests {
                 "data":{"action":"OPERATE_RTU","ioa":3001,"value":1,"type":"SPC","id_rtu":9001,"key":"k1","user":"op1"}}"#,
         )
         .unwrap();
-        let cd = parse_command_data(&nested);
+        let cd = parse_command_data(&nested).unwrap();
         assert_eq!(cd.action, "OPERATE_RTU");
         assert_eq!(cd.ip_address, "ied-sim-1");
         assert_eq!(as_i32(cd.ioa.as_ref()), Some(3001));
@@ -242,7 +291,7 @@ mod tests {
                 "action":"SELECT_RTU","ioa":"3001","value":"1","id_rtu":9001,"key":"k2"}"#,
         )
         .unwrap();
-        let cd = parse_command_data(&flat);
+        let cd = parse_command_data(&flat).unwrap();
         assert_eq!(cd.action, "SELECT_RTU");
         assert_eq!(as_i32(cd.ioa.as_ref()), Some(3001));
         assert_eq!(as_f64(cd.value.as_ref()), Some(1.0));
@@ -259,7 +308,7 @@ mod tests {
             if let Some(d) = m.data.as_ref() {
                 CommandData::deserialize(d).unwrap_or_else(|e| panic!("{name}: data: {e}"));
             }
-            let cd = parse_command_data(&m);
+            let cd = parse_command_data(&m).unwrap_or_else(|e| panic!("{name}: {e}"));
             let action = CommandAction::parse(&cd.action).unwrap_or_else(|| panic!("{name}: action {:?}", cd.action));
             assert!(as_i32(cd.ioa.as_ref()).or_else(|| cd.tag.as_deref().and_then(ioa_from_tag)).is_some(), "{name}: ioa");
             assert_eq!(as_f64(cd.value.as_ref()).is_some(), action != CommandAction::Cancel, "{name}: value");
@@ -296,7 +345,6 @@ mod tests {
         assert!(!exs.is_empty());
         for (name, v) in exs {
             let event = str_of(&v, "event");
-            let action = CommandAction::parse(&format!("{event}_RTU")).unwrap_or_else(|| panic!("{name}: event {event}"));
             let msg = str_of(&v, "msg");
             let result = match str_of(&v, "status") {
                 "active" => Ok(()),
@@ -314,9 +362,50 @@ mod tests {
                 ..Default::default()
             };
             let endpoint = (str_of(&v, "hostname").to_string(), int_of(&v, "port") as i32);
-            let out = response_json(&cd, action, v["command_value"].as_f64(), &result, endpoint, int_of(&v, "time"));
+            let out = response_json(&cd, event, v["command_value"].as_f64(), &result, endpoint, int_of(&v, "time"));
             assert_eq!(out, v, "{name}");
         }
+    }
+
+    #[test]
+    fn data_salah_tipe_tidak_jatuh_ke_field_datar() {
+        let m: RtuEventMessage = serde_json::from_str(
+            r#"{"event":"COMMAND","protocol":"IEC61850","action":"OPERATE_RTU","ioa":3001,"value":1,
+                "data":{"action":"OPERATE_RTU","ioa":3001,"value":1,"port":"102","key":"k9"}}"#,
+        )
+        .unwrap();
+        let e = parse_command_data(&m).err().expect("harus gagal");
+        assert!(e.starts_with("field data tidak valid"), "{e}");
+        // respons tetap membawa key / action dari data
+        let cd = lenient(&m);
+        assert_eq!((cd.key.as_deref(), event_name(&cd.action).as_str()), (Some("k9"), "OPERATE"));
+    }
+
+    #[test]
+    fn nama_event_respons() {
+        assert_eq!(event_name("select_rtu"), "SELECT");
+        assert_eq!(event_name("CANCEL_RTU"), "CANCEL");
+        assert_eq!(event_name("TRIP_RTU"), "TRIP");
+        assert_eq!(event_name("open"), "OPEN");
+        assert_eq!(event_name(" "), "UNKNOWN");
+    }
+
+    /// Gagal sebelum eksekusi -> respons langsung (tanpa menunggu COMMAND_TIMEOUT).
+    #[tokio::test]
+    async fn gagal_sebelum_eksekusi_tetap_dibalas() {
+        let mgr = crate::connection::testing::manager();
+        for json in [
+            // action tidak dikenal
+            r#"{"event":"COMMAND","protocol":"IEC61850","data":{"action":"TRIP_RTU","ioa":3001,"value":1,"id_rtu":9001,"key":"a"}}"#,
+            // field data salah tipe
+            r#"{"event":"COMMAND","protocol":"IEC61850","data":{"action":"OPERATE_RTU","id_rtu":[1],"key":"b"}}"#,
+            // IED tidak berjalan
+            r#"{"event":"COMMAND","protocol":"IEC61850","data":{"action":"OPERATE_RTU","ioa":3001,"value":1,"id_rtu":4242,"key":"c"}}"#,
+        ] {
+            let m: RtuEventMessage = serde_json::from_str(json).unwrap();
+            tokio::time::timeout(Duration::from_secs(2), submit(&mgr, m)).await.expect(json);
+        }
+        reject(&mgr, "OPERATE_RTU", "d".into(), String::new(), "payload tidak valid");
     }
 
     #[test]
