@@ -946,7 +946,9 @@ Tidak ada balasan (sama dengan FEP IEC 104).
 ### 3.1 `RTU_DATAS` dan `DATAPOINTS`
 
 Struct: `DataMessage` ([models.rs](../src/kafka/models.rs)), dibuat di
-[message_builder.rs](../src/kafka/publisher/message_builder.rs). Key = `id_rtu`. Urutan field sama dengan FEP IEC 104.
+[message_builder.rs](../src/kafka/publisher/message_builder.rs). Key = `id_rtu`. Urutan field sama dengan FEP IEC 104;
+tambahan IEC 61850 `source` dan `rcb` **selalu ada** dan diletakkan tepat sesudah `general_action` (field IEC 104 lain tidak
+bergeser, dicek test `rtu_datas_sama_bentuk_dengan_sampel_iec104`).
 
 - `RTU_DATAS`: **setiap** nilai titik yang dikirim. `tag` selalu `""`, `value` mentah.
 - `DATAPOINTS`: pesan yang sama, hanya kalau titik punya tag (TagResolver), tag tidak manual set, dan tag tidak kosong
@@ -968,6 +970,8 @@ Struct: `DataMessage` ([models.rs](../src/kafka/models.rs)), dibuat di
 | `flag` | string | Detail quality dipisah `\|`, `GOOD` kalau kosong |
 | `group` | string | `master_data_objects.id_group` (UUID) untuk `initial` = CDC dan `protocol = 'IEC61850'`; `""` kalau tidak ada. Sama dengan FEP IEC 104 (lihat sampel di bagian 4) |
 | `general_action` | integer / null | `master_general_actions.code` **apa adanya** untuk `name_action` = `action` (`protocol = 'IEC61850'`); `null` kalau tidak ada |
+| `source` | string | **Tambahan IEC 61850.** `REPORT` = dari report RCB; `POLLING` = dari polling, termasuk polling penuh karena event GI dan siklus integrity polling |
+| `rcb` | string / null | **Tambahan IEC 61850.** `rcb_reference` lengkap RCB yang **mengirim** report ini (format `iec61850_report_controls.rcb_reference`: `LD/LLN0.BR.<nama>` / `LD/LLN0.RP.<nama>`); `null` untuk `POLLING` |
 | `time` | integer | ms epoch UTC |
 | `time_desc` | string | `RTU` atau `SERVER` |
 
@@ -1038,6 +1042,15 @@ ORDER BY protocol, code, name_action;
 
 Nilai command `DPC` memakai pemetaan lain (`DPC_CLOSE_VALUE`, bagian [2.1 COMMAND](#command)).
 
+`source` / `rcb`:
+
+- `rcb` diambil dari konteks callback report (RCB yang menerima report), **bukan** ditebak dari dataset. Titik yang ada di
+  dataset dua RCB → `rcb` = RCB yang benar-benar mengirim report tersebut.
+- Beberapa anggota dataset untuk satu titik (`stVal` + `q` + `t`) tetap **satu** pesan dengan `rcb` yang sama.
+- Mode `HYBRID`: titik ST lewat report (`REPORT` + `rcb`), titik MX lewat polling (`POLLING`, `rcb` null).
+- Hanya ada dua jalur yang membuat pesan data titik: report dan polling. Manual set tidak membuat pesan sendiri (hanya
+  menahan `DATAPOINTS` untuk tag itu); `DATAPOINTS` membawa `source` / `rcb` yang sama dengan `RTU_DATAS`-nya.
+
 `DATA_CHANGE` (DPS dari BRCB, waktu dari `t`):
 
 `docs/examples/produce/RTU_DATAS__DATA_CHANGE.json`
@@ -1058,6 +1071,8 @@ Nilai command `DPC` memakai pemetaan lain (`DPC_CLOSE_VALUE`, bagian [2.1 COMMAN
   "flag": "GOOD",
   "group": "6f1c2a9e-3b7d-4c11-9a52-0d8e4b7f2a10",
   "general_action": 0,
+  "source": "REPORT",
+  "rcb": "BAY1LD0/LLN0.BR.brcbST01",
   "time": 1794711845123,
   "time_desc": "RTU"
 }
@@ -1083,6 +1098,8 @@ Nilai command `DPC` memakai pemetaan lain (`DPC_CLOSE_VALUE`, bagian [2.1 COMMAN
   "flag": "INVALID|FAILURE",
   "group": "a2b4c6d8-1e3f-4a5b-8c7d-9e0f1a2b3c4d",
   "general_action": 0,
+  "source": "REPORT",
+  "rcb": "BAY1LD0/LLN0.RP.urcbMX01",
   "time": 1794711845123,
   "time_desc": "RTU"
 }
@@ -1108,6 +1125,8 @@ Nilai command `DPC` memakai pemetaan lain (`DPC_CLOSE_VALUE`, bagian [2.1 COMMAN
   "flag": "GOOD",
   "group": "a2b4c6d8-1e3f-4a5b-8c7d-9e0f1a2b3c4d",
   "general_action": 2,
+  "source": "REPORT",
+  "rcb": "BAY1LD0/LLN0.RP.urcbMX01",
   "time": 1794711845123,
   "time_desc": "RTU"
 }
@@ -1133,6 +1152,8 @@ Nilai command `DPC` memakai pemetaan lain (`DPC_CLOSE_VALUE`, bagian [2.1 COMMAN
   "flag": "CLOCK_NOT_SYNC",
   "group": "0c9b8a7f-6e5d-4c3b-2a19-08f7e6d5c4b3",
   "general_action": 1,
+  "source": "REPORT",
+  "rcb": "BAY1LD0/LLN0.BR.brcbST01",
   "time": 1794711845123,
   "time_desc": "RTU"
 }
@@ -1158,7 +1179,36 @@ Nilai command `DPC` memakai pemetaan lain (`DPC_CLOSE_VALUE`, bagian [2.1 COMMAN
   "flag": "GOOD",
   "group": "a2b4c6d8-1e3f-4a5b-8c7d-9e0f1a2b3c4d",
   "general_action": 2,
+  "source": "POLLING",
+  "rcb": null,
   "time": 1794711846000,
+  "time_desc": "SERVER"
+}
+```
+
+Polling penuh karena event GI (mode POLLING):
+
+`docs/examples/produce/RTU_DATAS__GENERAL_INTERROGATION.polling.json`
+
+```json
+{
+  "ip_address": "10.10.1.22",
+  "protocol": "IEC61850",
+  "id_rtu": 9002,
+  "action": "GENERAL_INTERROGATION",
+  "tag": "",
+  "value": 50.01,
+  "address": 2003,
+  "ca": 0,
+  "asdu": 0,
+  "type": "MV",
+  "quality": "GOOD",
+  "flag": "GOOD",
+  "group": "a2b4c6d8-1e3f-4a5b-8c7d-9e0f1a2b3c4d",
+  "general_action": 1,
+  "source": "POLLING",
+  "rcb": null,
+  "time": 1794711847000,
   "time_desc": "SERVER"
 }
 ```
@@ -1183,6 +1233,8 @@ Nilai command `DPC` memakai pemetaan lain (`DPC_CLOSE_VALUE`, bagian [2.1 COMMAN
   "flag": "GOOD",
   "group": "6f1c2a9e-3b7d-4c11-9a52-0d8e4b7f2a10",
   "general_action": 0,
+  "source": "REPORT",
+  "rcb": "BAY1LD0/LLN0.BR.brcbST01",
   "time": 1794711845123,
   "time_desc": "RTU"
 }
@@ -1206,6 +1258,8 @@ Nilai command `DPC` memakai pemetaan lain (`DPC_CLOSE_VALUE`, bagian [2.1 COMMAN
   "flag": "GOOD",
   "group": "a2b4c6d8-1e3f-4a5b-8c7d-9e0f1a2b3c4d",
   "general_action": 2,
+  "source": "REPORT",
+  "rcb": "BAY1LD0/LLN0.RP.urcbMX01",
   "time": 1794711845123,
   "time_desc": "RTU"
 }

@@ -13,6 +13,8 @@
   "flag": "GOOD",
   "group": "a2b4c6d8-1e3f-4a5b-8c7d-9e0f1a2b3c4d",
   "general_action": 2,
+  "source": "POLLING",
+  "rcb": null,
   "time": 1794711846000,
   "time_desc": "SERVER"
 }

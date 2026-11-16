@@ -12,6 +12,7 @@ use crate::iec61850::acquisition::{decode, MemberPlan, RtuCtx};
 use crate::iec61850::client::{octet_bytes, Liveness};
 use crate::iec61850::mapper::{action_rank, reason_action};
 use crate::iec61850::traffic;
+use crate::kafka::publisher::Origin;
 
 pub(crate) struct ReportCtx {
     pub(crate) rtu: Arc<RtuCtx>,
@@ -66,8 +67,11 @@ pub(crate) unsafe extern "C" fn on_report(param: *mut c_void, report: ffi::Clien
         let entry_time = unsafe { ffi::ClientReport_hasTimestamp(report) }
             .then(|| unsafe { ffi::ClientReport_getTimestamp(report) } as i64)
             .filter(|&ms| ms > 0);
+        // rcb = RCB yang menerima report ini (konteks callback), bukan tebakan dari dataset:
+        // titik yang ada di dua RCB tetap ber-rcb pengirim report. stVal + q satu titik = satu pesan.
+        let origin = Origin::Report { rcb: &ctx.rcb_ref };
         for (p, action) in actions {
-            rtu.publish(p, &state[p], action, entry_time);
+            rtu.publish(p, &state[p], action, entry_time, origin);
         }
         drop(state);
         // EntryID dicatat SETELAH report diproses: saat reconnect IED melanjutkan dari entri berikutnya.

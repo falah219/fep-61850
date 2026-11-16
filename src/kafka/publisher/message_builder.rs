@@ -7,6 +7,32 @@ use crate::kafka::{DataMessage, KafkaProducer, TOPIC_DATAPOINTS, TOPIC_RTU_DATAS
 use crate::resolver::{FormulaResolver, GeneralActionResolver, GroupResolver, TagResolver};
 use crate::utils::timestamp::{message_time, now_ms};
 
+/// Asal nilai titik -> field `source` / `rcb` RTU_DATAS & DATAPOINTS. Hanya dua jalur yang mempublish
+/// data titik (manual set hanya menyaring DATAPOINTS, tidak membuat pesan sendiri).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Origin<'a> {
+    /// Report dari RCB ini (rcb_reference RCB yang menerima report, bukan tebakan dari dataset)
+    Report { rcb: &'a str },
+    /// Polling, termasuk polling penuh karena event GI dan siklus integrity polling
+    Polling,
+}
+
+impl<'a> Origin<'a> {
+    pub fn source(&self) -> &'static str {
+        match self {
+            Self::Report { .. } => "REPORT",
+            Self::Polling => "POLLING",
+        }
+    }
+
+    pub fn rcb(&self) -> Option<&'a str> {
+        match self {
+            Self::Report { rcb } => Some(rcb),
+            Self::Polling => None,
+        }
+    }
+}
+
 pub struct Publisher {
     pub producer: KafkaProducer,
     pub tags: TagResolver,
@@ -17,7 +43,7 @@ pub struct Publisher {
 
 impl Publisher {
     /// `entry_time` = waktu entri report (ms UTC), dipakai kalau titik tidak punya atribut `t`.
-    pub fn publish(&self, ip: &str, p: &Point, s: &PointState, action: &str, entry_time: Option<i64>) {
+    pub fn publish(&self, ip: &str, p: &Point, s: &PointState, action: &str, entry_time: Option<i64>, origin: Origin) {
         let flag = quality_flag(s.q, s.t.map(|(_, tq)| tq));
         let (time, time_desc) = message_time(s.t, entry_time, now_ms);
         // group: master_data_objects.initial = CDC
@@ -41,6 +67,8 @@ impl Publisher {
             flag: &flag,
             group: &group,
             general_action,
+            source: origin.source(),
+            rcb: origin.rcb(),
             time,
             time_desc,
         };
@@ -75,6 +103,14 @@ fn sanitize(text: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// (a) report brcbST01 -> REPORT + rcb; (b) polling -> POLLING + null.
+    #[test]
+    fn origin_ke_source_dan_rcb() {
+        let r = Origin::Report { rcb: "SIMIED1LD0/LLN0.BR.brcbST01" };
+        assert_eq!((r.source(), r.rcb()), ("REPORT", Some("SIMIED1LD0/LLN0.BR.brcbST01")));
+        assert_eq!((Origin::Polling.source(), Origin::Polling.rcb()), ("POLLING", None));
+    }
 
     #[test]
     fn sanitize_tag() {

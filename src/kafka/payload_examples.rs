@@ -148,6 +148,10 @@ fn contoh_rtu_datas_dan_datapoints() {
                 ["RTU", "SERVER"].into_iter().find(|t| *t == str_of(&v, "time_desc")).unwrap_or_else(|| panic!("{name}: time_desc"));
             let action = str_of(&v, "action");
             assert!(action_rank(action) > 0, "{name}: action {action}");
+            // source REPORT selalu ber-rcb, POLLING selalu rcb null
+            let source = ["REPORT", "POLLING"].into_iter().find(|x| *x == str_of(&v, "source")).unwrap_or_else(|| panic!("{name}: source"));
+            assert!(v.get("rcb").is_some(), "{name}: rcb harus selalu ada");
+            assert_eq!(v["rcb"].is_string(), source == "REPORT", "{name}: rcb vs source");
             let flag = str_of(&v, "flag");
             assert!(flag.split('|').all(|f| known.contains(&f)), "{name}: flag {flag}");
             assert_eq!(str_of(&v, "tag").is_empty(), topic == TOPIC_RTU_DATAS, "{name}: tag");
@@ -166,6 +170,8 @@ fn contoh_rtu_datas_dan_datapoints() {
                 flag,
                 group: str_of(&v, "group"),
                 general_action: v["general_action"].as_i64().map(|c| c as i32),
+                source,
+                rcb: v["rcb"].as_str(),
                 time: int_of(&v, "time"),
                 time_desc,
             };
@@ -174,7 +180,8 @@ fn contoh_rtu_datas_dan_datapoints() {
     }
 }
 
-/// Sampel asli RTU_DATAS FEP IEC 104: nama & tipe field sama dengan RTU_DATAS FEP IEC 61850.
+/// Sampel asli RTU_DATAS FEP IEC 104: nama & tipe field sama dengan RTU_DATAS FEP IEC 61850, kecuali tambahan
+/// IEC 61850 `source` & `rcb`; urutan field IEC 104 juga sama.
 #[test]
 fn rtu_datas_sama_bentuk_dengan_sampel_iec104() {
     let kind = |v: &Value| match v {
@@ -185,10 +192,33 @@ fn rtu_datas_sama_bentuk_dengan_sampel_iec104() {
         Value::Array(_) => "array",
         Value::Object(_) => "object",
     };
-    let shape = |v: &Value| -> Vec<(String, &str)> { v.as_object().unwrap().iter().map(|(k, x)| (k.clone(), kind(x))).collect() };
+    let extra = ["source", "rcb"];
+    let shape = |v: &Value| -> Vec<(String, &str)> {
+        v.as_object().unwrap().iter().filter(|(k, _)| !extra.contains(&k.as_str())).map(|(k, x)| (k.clone(), kind(x))).collect()
+    };
     let iec104 = example("iec104", "RTU_DATAS__iec104_real");
     assert!(!is_ours(str_of(&iec104, "protocol")));
-    assert_eq!(shape(&iec104), shape(&example("produce", "RTU_DATAS__DATA_CHANGE")));
+    let ours = example("produce", "RTU_DATAS__DATA_CHANGE");
+    assert_eq!(shape(&iec104), shape(&ours));
+    assert!(extra.iter().all(|k| ours.get(*k).is_some()));
+    // urutan JSON: field IEC 104 sama, source & rcb tepat sesudah general_action
+    let m = DataMessage {
+        ip_address: "x", protocol: "IEC61850", id_rtu: 1, action: "DATA_CHANGE", tag: "", value: &Value::Null, address: 1, ca: 0,
+        asdu: 0, typ: "SPS", quality: "GOOD", flag: "GOOD", group: "", general_action: None, source: "POLLING", rcb: None,
+        time: 0, time_desc: "SERVER",
+    };
+    let text = serde_json::to_string(&m).unwrap();
+    let pos = |k: &str| text.find(&format!("\"{k}\":")).unwrap();
+    let order: Vec<&str> = iec104.as_object().unwrap().keys().map(String::as_str).collect();
+    let mut expected: Vec<&str> = ["ip_address", "protocol", "id_rtu", "action", "tag", "value", "address", "ca", "asdu", "type",
+        "quality", "flag", "group", "general_action", "source", "rcb", "time", "time_desc"].to_vec();
+    assert!(expected.windows(2).all(|w| pos(w[0]) < pos(w[1])), "{text}");
+    expected.retain(|k| !extra.contains(k));
+    let mut sorted = expected.clone();
+    sorted.sort_unstable();
+    let mut sample = order;
+    sample.sort_unstable();
+    assert_eq!(sorted, sample, "field IEC 104");
 }
 
 #[test]

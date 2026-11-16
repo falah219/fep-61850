@@ -2,4 +2,4 @@
 
 mod message_builder;
 
-pub use message_builder::Publisher;
+pub use message_builder::{Origin, Publisher};

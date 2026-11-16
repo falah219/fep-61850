@@ -250,6 +250,7 @@ Aturan yang dipakai (hasil konfirmasi):
 | `action` | `GENERAL_INTERROGATION` > `INTEGRITY` > `DATA_CHANGE` > `QUALITY_CHANGE` > `DATA_UPDATE`; polling: `POLLING` / `INTEGRITY` |
 | `quality` | urutan IEC 104: `INVALID` > `SUBSTITUTED` > `QUESTIONABLE` > `GOOD` |
 | `flag` | detailQual + `SUBSTITUTED`/`TEST`/`OPERATOR_BLOCKED` + `CLOCK_NOT_SYNC`, dipisah `\|`, kosong = `GOOD` |
+| `source` / `rcb` | Tambahan IEC 61850, selalu ada sesudah `general_action`: `REPORT` + `rcb_reference` RCB pengirim report, atau `POLLING` + `null` (termasuk polling penuh karena GI / integrity) |
 | `group` | `master_data_objects.id_group` (UUID) dari baris `initial` = CDC dan `protocol = 'IEC61850'`; `""` kalau tidak ada. Sama dengan FEP IEC 104 (`group` = UUID) |
 | `general_action` | `master_general_actions.code` **apa adanya** dari DB untuk `name_action` = `action` dan `protocol='IEC61850'`; `null` kalau tidak ada. Kode internal GRITA, **bukan** nomor COT (IEC 104 mengirim `0` untuk `SPONTANEOUS`); nilainya bergantung isi tabel, lihat query di [docs/KAFKA_PAYLOADS.md](docs/KAFKA_PAYLOADS.md#31-rtu_datas-dan-datapoints) |
 | `time` / `time_desc` | atribut `t` (sudah UTC, **tidak** dikoreksi `TIMEZONE`) / `RTU`; tanpa `t` → waktu server / `SERVER` |

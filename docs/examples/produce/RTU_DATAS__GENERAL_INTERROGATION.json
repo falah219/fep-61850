@@ -13,6 +13,8 @@
   "flag": "CLOCK_NOT_SYNC",
   "group": "0c9b8a7f-6e5d-4c3b-2a19-08f7e6d5c4b3",
   "general_action": 1,
+  "source": "REPORT",
+  "rcb": "BAY1LD0/LLN0.BR.brcbST01",
   "time": 1794711845123,
   "time_desc": "RTU"
 }

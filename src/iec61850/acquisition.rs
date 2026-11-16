@@ -26,7 +26,7 @@ use super::traffic::{self, TrafficLog};
 use crate::domain::{ctl_value, CommandAction, CommandJob, CommandReq, CtlVal, Point, PointState, RtuConfig};
 use crate::error::Result;
 use crate::ffi;
-use crate::kafka::publisher::Publisher;
+use crate::kafka::publisher::{Origin, Publisher};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Part {
@@ -231,8 +231,8 @@ impl RtuCtx {
         self.publisher.producer.send_log_raw(&self.rtu.ip_address, self.rtu.id_rtu, &format!("{} {line}", traffic::ts()));
     }
 
-    pub(crate) fn publish(&self, i: usize, s: &PointState, action: &str, entry_time: Option<i64>) {
-        self.publisher.publish(&self.rtu.ip_address, &self.points[i], s, action, entry_time);
+    pub(crate) fn publish(&self, i: usize, s: &PointState, action: &str, entry_time: Option<i64>, origin: Origin) {
+        self.publisher.publish(&self.rtu.ip_address, &self.points[i], s, action, entry_time, origin);
     }
 
     fn entry_id(&self, rcb_ref: &str) -> Option<Vec<u8>> {
@@ -354,8 +354,7 @@ pub(crate) fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End> {
         let mut keys: Vec<(String, String)> = ctx
             .points
             .iter()
-            .filter(|p| r.acquisition_mode != "HYBRID" || p.fc == "MX")
-            .filter(|p| p.fc != "CO")
+            .filter(|p| polled(&r.acquisition_mode, p))
             .map(|p| (ln_of(&p.object_reference).to_string(), p.fc.clone()))
             .collect();
         keys.sort();
@@ -775,6 +774,12 @@ pub fn read_until_stuck<T>(
 }
 
 /// Satu siklus polling. true = ada request TIMEOUT: session() harus langsung cek liveness.
+/// Titik yang dibaca lewat polling. HYBRID: status (ST) lewat report, polling hanya measurement (MX).
+/// Titik CO tidak pernah dipolling.
+fn polled(mode: &str, p: &Point) -> bool {
+    p.fc != "CO" && (mode != "HYBRID" || p.fc == "MX")
+}
+
 /// Action siklus polling yang mengirim SEMUA titik: event GI -> GENERAL_INTERROGATION (sama dengan mode
 /// REPORT), periode integrity -> INTEGRITY. None = hanya titik yang berubah (POLLING).
 fn full_poll_action(gi_requested: bool, is_integrity: bool) -> Option<&'static str> {
@@ -828,7 +833,7 @@ fn poll_cycle(ied: &Ied, ctx: &RtuCtx, groups: &[PollGroup], sent: &mut [Option<
             (None, Some(prev)) if state_changed(prev, cur, deadband) => "POLLING",
             (None, Some(_)) => continue,
         };
-        ctx.publish(i, cur, action, None);
+        ctx.publish(i, cur, action, None, Origin::Polling);
         sent[i] = Some(cur.clone());
     }
     timed_out
@@ -861,6 +866,33 @@ mod tests {
         assert!(sends_request(CommandAction::Select, CONTROL_MODEL_SBO_ENHANCED));
         assert!(sends_request(CommandAction::Operate, CONTROL_MODEL_DIRECT_NORMAL));
         assert!(sends_request(CommandAction::Cancel, CONTROL_MODEL_DIRECT_NORMAL));
+    }
+
+    /// (c) HYBRID: ST lewat report (source REPORT + rcb), MX lewat polling (source POLLING, rcb null).
+    #[test]
+    fn hybrid_st_report_mx_polling() {
+        use crate::iec61850::mapping::default_value_attribute;
+        let pt = |fc: &str, cdc: &str| Point {
+            id_rtu: 1,
+            ioa: 1,
+            tag: None,
+            object_reference: "LD/GGIO1.X".into(),
+            fc: fc.into(),
+            cdc: cdc.into(),
+            value_attribute: default_value_attribute(cdc).unwrap_or_default().into(),
+            ctl_model: None,
+            interlock_check: false,
+            synchro_check: false,
+            deadband: None,
+            or_cat: None,
+        };
+        let (st, mx, co) = (pt("ST", "SPS"), pt("MX", "MV"), pt("CO", "SPC"));
+        assert!(!polled("HYBRID", &st) && polled("HYBRID", &mx) && !polled("HYBRID", &co));
+        assert!(polled("POLLING", &st) && polled("POLLING", &mx) && !polled("POLLING", &co));
+        // ST datang dari callback report RCB-nya, MX dari polling
+        let report = Origin::Report { rcb: "LD/LLN0.BR.brcbST01" };
+        assert_eq!((report.source(), report.rcb()), ("REPORT", Some("LD/LLN0.BR.brcbST01")));
+        assert_eq!((Origin::Polling.source(), Origin::Polling.rcb()), ("POLLING", None));
     }
 
     #[test]

@@ -24,10 +24,14 @@ G_DPS = "6f1c2a9e-3b7d-4c11-9a52-0d8e4b7f2a10"
 G_MV = "a2b4c6d8-1e3f-4a5b-8c7d-9e0f1a2b3c4d"
 G_SPS = "0c9b8a7f-6e5d-4c3b-2a19-08f7e6d5c4b3"
 
+BRCB_ST = "BAY1LD0/LLN0.BR.brcbST01"
+URCB_MX = "BAY1LD0/LLN0.RP.urcbMX01"
+
+
 def data(**kw):
     base = {"ip_address": IP, "protocol": "IEC61850", "id_rtu": 9001, "action": "DATA_CHANGE", "tag": "",
             "value": 2, "address": 1001, "ca": 0, "asdu": 0, "type": "DPS", "quality": "GOOD", "flag": "GOOD",
-            "group": G_DPS, "general_action": 0, "time": T, "time_desc": "RTU"}
+            "group": G_DPS, "general_action": 0, "source": "REPORT", "rcb": BRCB_ST, "time": T, "time_desc": "RTU"}
     base.update(kw)
     return base
 
@@ -153,15 +157,21 @@ consume = {
 produce = {
     "RTU_DATAS__DATA_CHANGE": data(),
     "RTU_DATAS__QUALITY_CHANGE": data(action="QUALITY_CHANGE", value=0.0, address=2001, type="MV", quality="INVALID",
-                                      flag="INVALID|FAILURE", group=G_MV, general_action=0),
-    "RTU_DATAS__INTEGRITY": data(action="INTEGRITY", value=231.4, address=2001, type="MV", group=G_MV, general_action=2),
+                                      flag="INVALID|FAILURE", group=G_MV, general_action=0, rcb=URCB_MX),
+    "RTU_DATAS__INTEGRITY": data(action="INTEGRITY", value=231.4, address=2001, type="MV", group=G_MV, general_action=2,
+                                 rcb=URCB_MX),
     "RTU_DATAS__GENERAL_INTERROGATION": data(action="GENERAL_INTERROGATION", value=1, address=1002, type="SPS",
                                              group=G_SPS, general_action=1, flag="CLOCK_NOT_SYNC"),
     "RTU_DATAS__POLLING": data(ip_address="10.10.1.22", id_rtu=9002, action="POLLING", value=49.98, address=2003,
-                               type="MV", group=G_MV, general_action=2, time=T + 877, time_desc="SERVER"),
+                               type="MV", group=G_MV, general_action=2, source="POLLING", rcb=None, time=T + 877,
+                               time_desc="SERVER"),
+    # Polling penuh karena event GI (mode POLLING / HYBRID MX): source POLLING, rcb null
+    "RTU_DATAS__GENERAL_INTERROGATION.polling": data(ip_address="10.10.1.22", id_rtu=9002, action="GENERAL_INTERROGATION",
+                                                     value=50.01, address=2003, type="MV", group=G_MV, general_action=1,
+                                                     source="POLLING", rcb=None, time=T + 1877, time_desc="SERVER"),
     "DATAPOINTS__DATA_CHANGE": data(tag="BAY1_CB_1001"),
     "DATAPOINTS__INTEGRITY": data(action="INTEGRITY", tag="BAY1_ANIN1_2001", value=2.314, address=2001, type="MV",
-                                  group=G_MV, general_action=2),
+                                  group=G_MV, general_action=2, rcb=URCB_MX),
     "RTU_STATUS__connection": {"ip_address": IP, "id_rtu": 9001, "protocol": "IEC61850", "status": 1, "time": T},
     "RTU_STATUS__channel": {"ip_address": IP, "id_rtu": 9001, "protocol": "IEC61850", "channel": 1, "status": 0, "time": T},
     "RTU_STATUS__system": {"ip_address": "system", "id_rtu": 0, "protocol": "IEC61850", "status": 1, "time": T},

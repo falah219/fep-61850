@@ -497,7 +497,9 @@ Tidak ada balasan (sama dengan FEP IEC 104).
 ### 3.1 `RTU_DATAS` dan `DATAPOINTS`
 
 Struct: `DataMessage` ([models.rs](../src/kafka/models.rs)), dibuat di
-[message_builder.rs](../src/kafka/publisher/message_builder.rs). Key = `id_rtu`. Urutan field sama dengan FEP IEC 104.
+[message_builder.rs](../src/kafka/publisher/message_builder.rs). Key = `id_rtu`. Urutan field sama dengan FEP IEC 104;
+tambahan IEC 61850 `source` dan `rcb` **selalu ada** dan diletakkan tepat sesudah `general_action` (field IEC 104 lain tidak
+bergeser, dicek test `rtu_datas_sama_bentuk_dengan_sampel_iec104`).
 
 - `RTU_DATAS`: **setiap** nilai titik yang dikirim. `tag` selalu `""`, `value` mentah.
 - `DATAPOINTS`: pesan yang sama, hanya kalau titik punya tag (TagResolver), tag tidak manual set, dan tag tidak kosong
@@ -519,6 +521,8 @@ Struct: `DataMessage` ([models.rs](../src/kafka/models.rs)), dibuat di
 | `flag` | string | Detail quality dipisah `\|`, `GOOD` kalau kosong |
 | `group` | string | `master_data_objects.id_group` (UUID) untuk `initial` = CDC dan `protocol = 'IEC61850'`; `""` kalau tidak ada. Sama dengan FEP IEC 104 (lihat sampel di bagian 4) |
 | `general_action` | integer / null | `master_general_actions.code` **apa adanya** untuk `name_action` = `action` (`protocol = 'IEC61850'`); `null` kalau tidak ada |
+| `source` | string | **Tambahan IEC 61850.** `REPORT` = dari report RCB; `POLLING` = dari polling, termasuk polling penuh karena event GI dan siklus integrity polling |
+| `rcb` | string / null | **Tambahan IEC 61850.** `rcb_reference` lengkap RCB yang **mengirim** report ini (format `iec61850_report_controls.rcb_reference`: `LD/LLN0.BR.<nama>` / `LD/LLN0.RP.<nama>`); `null` untuk `POLLING` |
 | `time` | integer | ms epoch UTC |
 | `time_desc` | string | `RTU` atau `SERVER` |
 
@@ -589,6 +593,15 @@ ORDER BY protocol, code, name_action;
 
 Nilai command `DPC` memakai pemetaan lain (`DPC_CLOSE_VALUE`, bagian [2.1 COMMAND](#command)).
 
+`source` / `rcb`:
+
+- `rcb` diambil dari konteks callback report (RCB yang menerima report), **bukan** ditebak dari dataset. Titik yang ada di
+  dataset dua RCB → `rcb` = RCB yang benar-benar mengirim report tersebut.
+- Beberapa anggota dataset untuk satu titik (`stVal` + `q` + `t`) tetap **satu** pesan dengan `rcb` yang sama.
+- Mode `HYBRID`: titik ST lewat report (`REPORT` + `rcb`), titik MX lewat polling (`POLLING`, `rcb` null).
+- Hanya ada dua jalur yang membuat pesan data titik: report dan polling. Manual set tidak membuat pesan sendiri (hanya
+  menahan `DATAPOINTS` untuk tag itu); `DATAPOINTS` membawa `source` / `rcb` yang sama dengan `RTU_DATAS`-nya.
+
 `DATA_CHANGE` (DPS dari BRCB, waktu dari `t`):
 
 @@produce/RTU_DATAS__DATA_CHANGE@@
@@ -608,6 +621,10 @@ Nilai command `DPC` memakai pemetaan lain (`DPC_CLOSE_VALUE`, bagian [2.1 COMMAN
 `POLLING` (tanpa `t` → waktu server):
 
 @@produce/RTU_DATAS__POLLING@@
+
+Polling penuh karena event GI (mode POLLING):
+
+@@produce/RTU_DATAS__GENERAL_INTERROGATION.polling@@
 
 `DATAPOINTS` (tag terisi; nilai MV setelah formula):
 
