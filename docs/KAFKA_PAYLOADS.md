@@ -3,6 +3,9 @@
 Daftar lengkap pesan Kafka yang **dikonsumsi** dan **diproduksi** FEP IEC 61850 (`fep-iec61850`).
 Sumber kebenaran: **kode** di branch `iec61850`, bukan README lama. Kalau kode berubah, dokumen ini ikut diubah.
 
+> File ini **dihasilkan**: edit [docs/tools/KAFKA_PAYLOADS.tmpl.md](tools/KAFKA_PAYLOADS.tmpl.md) (teks) atau
+> [scripts/gen_kafka_docs.py](../scripts/gen_kafka_docs.py) (contoh JSON), lalu jalankan `python3 scripts/gen_kafka_docs.py`.
+
 - Semua contoh JSON ada juga sebagai file di [docs/examples/](examples/) (`consume/` dan `produce/`).
 - Test `kafka::payload_examples` (+ test contoh di `rtu_event/command.rs` dan `rtu_event/browse.rs`) memastikan:
   - setiap contoh consume bisa dibaca struct yang dipakai handler;

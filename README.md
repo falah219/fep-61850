@@ -4,6 +4,23 @@ Rencana kerja lengkap: [docs/IEC61850_PLAN.md](docs/IEC61850_PLAN.md).
 Semua payload Kafka (consume & produce, contoh JSON, beda dengan IEC 104): [docs/KAFKA_PAYLOADS.md](docs/KAFKA_PAYLOADS.md).
 Acuan arsitektur: repo `iconics-fep-iec104`.
 
+## Dokumen terkait
+
+| Dokumen | Isi |
+|---|---|
+| [docs/IEC61850_PLAN.md](docs/IEC61850_PLAN.md) | Rencana kerja per fase |
+| [docs/KAFKA_PAYLOADS.md](docs/KAFKA_PAYLOADS.md) | Semua payload Kafka consume/produce, contoh JSON ([docs/examples/](docs/examples/)), beda dengan IEC 104, catatan ketidaksesuaian |
+| [docs/CATATAN_TERBUKA.md](docs/CATATAN_TERBUKA.md) | Hal yang menunggu keputusan tim |
+
+`docs/KAFKA_PAYLOADS.md` dan `docs/examples/**.json` **dihasilkan**, jangan diedit langsung:
+
+```bash
+# teks: docs/tools/KAFKA_PAYLOADS.tmpl.md, contoh JSON: scripts/gen_kafka_docs.py
+python3 scripts/gen_kafka_docs.py          # dari root repo, tanpa paket tambahan
+git diff --stat docs                      # tanpa perubahan template/contoh = kosong
+docker compose -f docker-compose.dev.yml exec -w /work dev cargo test payload   # contoh harus cocok dengan kode
+```
+
 ## Fase 1 — Lingkungan dev + simulator IED
 
 Isi:
