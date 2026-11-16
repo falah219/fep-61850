@@ -32,6 +32,17 @@ data:
   OPER_TIMEOUT_MS: "10000"
   # value DPC untuk CLOSE (1 atau 2), OPEN = lainnya. Menunggu konfirmasi tim.
   DPC_CLOSE_VALUE: "2"
+  # orCat command (0..8), 3 = remote-control; override per titik di iec61850_command_formulas.or_cat
+  CONTROL_OR_CAT: "3"
+  # Tolak SELECT DPC kalau posisi IED 00/11 atau q invalid (tanpa mengirim ke perangkat)
+  CONTROL_PRECHECK_POSITION: "false"
+  # Log ringkas struktur command yang dikirim
+  CONTROL_DEBUG: "false"
+  # Max PDU yang diusulkan saat initiate MMS; kosongkan / hapus = default library (65000)
+  # MMS_MAX_PDU_SIZE: "65000"
+  # BROWSE: batas total (ms) + baca nilai (tipe stVal fallback, ctlModel, sboTimeout)
+  BROWSE_TIMEOUT_MS: "300000"
+  BROWSE_READ_VALUES: "true"
   # Tunggu thread IED berhenti saat shutdown (detik); harus < terminationGracePeriodSeconds
   SHUTDOWN_WAIT_SECS: "5"
   # none | local | remote. BELUM dikonfirmasi tim (docs/CATATAN_TERBUKA.md)

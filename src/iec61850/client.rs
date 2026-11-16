@@ -171,6 +171,11 @@ fn apply_osi(con: ffi::IedConnection, o: &OsiParams) -> Result<()> {
     Ok(())
 }
 
+/// Env MMS_MAX_PDU_SIZE (> 0). Tidak diisi = default library.
+pub fn max_pdu_from_env() -> Option<i32> {
+    std::env::var("MMS_MAX_PDU_SIZE").ok().and_then(|v| v.trim().parse::<i32>().ok()).filter(|n| *n > 0)
+}
+
 /// Error yang berarti koneksi MMS sudah mati: sesi harus diakhiri lalu reconnect.
 pub fn is_connection_error(err: ffi::IedClientError) -> bool {
     matches!(err, ffi::IED_ERROR_CONNECTION_LOST | ffi::IED_ERROR_NOT_CONNECTED)
@@ -239,6 +244,10 @@ impl Ied {
             if let Some(local) = &c_local {
                 ffi::IedConnection_setLocalAddress(ied.con, local.as_ptr(), 0);
             }
+            // MMS_MAX_PDU_SIZE: localDetail yang diusulkan saat initiate (default & batas atas library 65000)
+            if let Some(n) = max_pdu_from_env() {
+                ffi::MmsConnection_setLocalDetail(ffi::IedConnection_getMmsConnection(ied.con), n);
+            }
         }
         if let Some(o) = p.osi {
             apply_osi(ied.con, o)?;
@@ -248,6 +257,33 @@ impl Ied {
         check(err)?;
         ied.alive.touch();
         Ok(ied)
+    }
+
+    /// Max PDU size hasil negosiasi initiate (setelah konek: nilai dari IED, dibatasi library).
+    pub fn max_pdu_size(&self) -> i32 {
+        // SAFETY: koneksi valid; hanya membaca parameter lokal
+        unsafe { ffi::MmsConnection_getLocalDetail(ffi::IedConnection_getMmsConnection(self.con)) }
+    }
+
+    /// Semua nama variabel MMS satu LD (GetNameList), format `LN$FC$DO$DA`. Dipakai browse kalau
+    /// getVariableSpecification gagal.
+    pub fn logical_device_variables(&self, ld: &str) -> Result<Vec<String>> {
+        let c = cstring(ld)?;
+        let mut err = ffi::IED_ERROR_OK;
+        // SAFETY: koneksi valid, c hidup selama pemanggilan; list jadi milik kita
+        let list = unsafe { ffi::IedConnection_getLogicalDeviceVariables(self.con, &mut err, c.as_ptr()) };
+        self.note(err);
+        take_strings(list, err)
+    }
+
+    /// Nama anggota satu kelas ACSI (BRCB, URCB, ...) di LN `ln_ref` (`LD/LN`), dari model GetNameList.
+    pub fn logical_node_directory(&self, ln_ref: &str, class: ffi::ACSIClass) -> Result<Vec<String>> {
+        let c = cstring(ln_ref)?;
+        let mut err = ffi::IED_ERROR_OK;
+        // SAFETY: koneksi valid, c hidup selama pemanggilan; list jadi milik kita
+        let list = unsafe { ffi::IedConnection_getLogicalNodeDirectory(self.con, &mut err, c.as_ptr(), class) };
+        self.note(err);
+        take_strings(list, err)
     }
 
     /// Catat hasil satu request: sukses / dijawab IED = tanda hidup; error koneksi = sesi mati.
@@ -512,6 +548,42 @@ impl OwnedValue {
     pub fn as_ptr(&self) -> *mut ffi::MmsValue {
         self.0
     }
+
+    /// Tipe dasar nilai (untuk browse fallback: tipe `stVal`).
+    pub fn spec_type(&self) -> SpecType {
+        // SAFETY: self.0 non-null (dicek read_object)
+        match unsafe { ffi::MmsValue_getType(self.0) } {
+            ffi::MMS_STRUCTURE => SpecType::Struct,
+            ffi::MMS_BOOLEAN => SpecType::Bool,
+            ffi::MMS_BIT_STRING => SpecType::BitString,
+            ffi::MMS_INTEGER | ffi::MMS_UNSIGNED => SpecType::Int,
+            _ => SpecType::Other,
+        }
+    }
+
+    /// Nilai integer / unsigned. None untuk tipe lain.
+    pub fn as_i64(&self) -> Option<i64> {
+        // SAFETY: self.0 non-null; tipe dicek sebelum konversi
+        unsafe {
+            match ffi::MmsValue_getType(self.0) {
+                ffi::MMS_INTEGER => Some(ffi::MmsValue_toInt64(self.0)),
+                ffi::MMS_UNSIGNED => Some(i64::from(ffi::MmsValue_toUint32(self.0))),
+                _ => None,
+            }
+        }
+    }
+
+    /// Dbpos (BIT STRING 2 bit): 0 intermediate, 1 off, 2 on, 3 bad. None kalau bukan bit string.
+    pub fn dbpos(&self) -> Option<i32> {
+        // SAFETY: self.0 non-null; tipe dicek
+        unsafe { (ffi::MmsValue_getType(self.0) == ffi::MMS_BIT_STRING).then(|| ffi::Dbpos_fromMmsValue(self.0) as i32) }
+    }
+
+    /// Quality (BIT STRING `q`). None kalau bukan bit string.
+    pub fn quality(&self) -> Option<u16> {
+        // SAFETY: self.0 valid selama &self hidup
+        unsafe { super::mapper::mms_quality(self.0) }
+    }
 }
 
 /// Isi octet string (mis. EntryID report). None kalau null / bukan octet string.
@@ -624,6 +696,17 @@ impl Rcb {
     pub fn is_buffered(&self) -> bool {
         // SAFETY: rcb valid (dicek di read)
         unsafe { ffi::ClientReportControlBlock_isBuffered(self.rcb) }
+    }
+
+    pub fn rpt_ena(&self) -> bool {
+        // SAFETY: rcb valid
+        unsafe { ffi::ClientReportControlBlock_getRptEna(self.rcb) }
+    }
+
+    pub fn rpt_id(&self) -> Option<String> {
+        // SAFETY: string milik rcb, langsung disalin
+        let p = unsafe { ffi::ClientReportControlBlock_getRptId(self.rcb) };
+        (!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()).filter(|s| !s.is_empty())
     }
 
     /// Dataset yang terpasang di RCB, format ACSI (`LD/LLN0.Events`).
@@ -754,11 +837,44 @@ struct Termination {
     cv: Condvar,
 }
 
+/// Lama menunggu LastApplError (InformationReport) setelah IED menolak perintah.
+const APPL_ERROR_WAIT: Duration = Duration::from_millis(300);
+
+/// LastApplError (dari objek kontrol atau dari koneksi).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ApplError {
+    pub ctl_num: u32,
+    pub error: i32,
+    pub add_cause: i32,
+}
+
+impl ApplError {
+    fn from_ffi(a: ffi::LastApplError) -> Self {
+        Self { ctl_num: a.ctlNum as u32, error: a.error as i32, add_cause: a.addCause as i32 }
+    }
+
+    fn is_set(&self) -> bool {
+        self.error != 0 || self.add_cause != 0
+    }
+}
+
+/// LastApplError untuk perintah dengan ctlNum `want`: milik objek kontrol dulu, lalu milik koneksi
+/// (nama objek di LastApplError IED bisa beda format sehingga tidak tercatat di objek).
+pub fn pick_appl_error(object: ApplError, connection: ApplError, want: u8) -> Option<ApplError> {
+    [object, connection].into_iter().find(|a| a.is_set() && a.ctl_num == u32::from(want))
+}
+
 /// Objek kontrol (ControlObjectClient) untuk satu DO kontrol, mis. `LD/CSWI1.Pos`.
 pub struct Control {
     ctl: ffi::ControlObjectClient,
+    /// Koneksi pemilik (LastApplError level koneksi). Control selalu di-drop sebelum Ied.
+    con: ffi::IedConnection,
     // Box: alamat harus tetap, dipegang callback C
     termination: Box<Termination>,
+    /// Cermin ctlNum libIEC61850 (di-set eksplisit sebelum tiap perintah): ctlNum yang terakhir dikirim
+    ctl_num: Cell<u8>,
+    /// LastApplError perintah terakhir yang ditolak (dicocokkan dengan ctlNum)
+    last_appl: Cell<Option<ApplError>>,
 }
 
 unsafe extern "C" fn on_termination(param: *mut c_void, ctl: ffi::ControlObjectClient) {
@@ -783,7 +899,7 @@ impl Control {
         if ctl.is_null() {
             return Err(format!("objek kontrol {reference} tidak ditemukan / tidak bisa dibaca").into());
         }
-        let me = Self { ctl, termination: Box::default() };
+        let me = Self { ctl, con: ied.raw(), termination: Box::default(), ctl_num: Cell::new(0), last_appl: Cell::new(None) };
         let param = &*me.termination as *const Termination as *mut c_void;
         // SAFETY: Termination di heap, hidup selama Control (handler ikut hilang saat destroy)
         unsafe { ffi::ControlObjectClient_setCommandTerminationHandler(me.ctl, Some(on_termination), param) };
@@ -801,26 +917,53 @@ impl Control {
         unsafe { ffi::ControlObjectClient_setControlModel(self.ctl, m) };
     }
 
-    /// orIdent + orCat (remote-control), interlock & synchro check.
-    pub fn prepare(&self, or_ident: &str, interlock: bool, synchro: bool) -> Result<()> {
+    /// orIdent + orCat (env CONTROL_OR_CAT / override per titik), interlock & synchro check.
+    pub fn prepare(&self, or_ident: &str, or_cat: i32, interlock: bool, synchro: bool) -> Result<()> {
         let ident = cstring(or_ident)?;
         // SAFETY: ctl valid; orIdent disalin library
         unsafe {
-            ffi::ControlObjectClient_setOrigin(self.ctl, ident.as_ptr(), ffi::CONTROL_ORCAT_REMOTE_CONTROL as i32);
+            ffi::ControlObjectClient_setOrigin(self.ctl, ident.as_ptr(), or_cat);
             ffi::ControlObjectClient_setInterlockCheck(self.ctl, interlock);
             ffi::ControlObjectClient_setSynchroCheck(self.ctl, synchro);
         }
         Ok(())
     }
 
+    /// ctlNum yang akan dibawa perintah berikutnya (sama dengan urutan libIEC61850: select / SBOw dan
+    /// operate direct menaikkan ctlNum, operate SBO dan cancel memakai ctlNum yang sama).
+    pub fn next_ctl_num(&self, increments: bool) -> u8 {
+        let cur = self.ctl_num.get();
+        if increments { cur.wrapping_add(1) } else { cur }
+    }
+
+    /// Set ctlNum library ke cermin (sebelum perintah) lalu catat yang akan dikirim.
+    fn begin(&self, increments: bool) {
+        self.last_appl.set(None);
+        // SAFETY: ctl valid; hanya mengubah objek lokal
+        unsafe { ffi::ControlObjectClient_setCtlNum(self.ctl, self.ctl_num.get()) };
+        self.ctl_num.set(self.next_ctl_num(increments));
+    }
+
     /// SBO normal: select; SBO enhanced: select-with-value; model direct: tidak ada yang perlu dipilih.
+    /// Nilai juga dicatat sebagai ctlVal untuk Cancel berikutnya.
     pub fn select(&self, value: &OwnedValue) -> Result<()> {
-        // SAFETY: ctl & value valid; value tidak diambil alih library
-        let ok = match self.control_model() {
-            ffi::CONTROL_MODEL_SBO_NORMAL => unsafe { ffi::ControlObjectClient_select(self.ctl) },
-            ffi::CONTROL_MODEL_SBO_ENHANCED => unsafe { ffi::ControlObjectClient_selectWithValue(self.ctl, value.as_ptr()) },
-            ffi::CONTROL_MODEL_STATUS_ONLY => return Err("ctlModel status-only, tidak bisa dikontrol".into()),
-            _ => return Ok(()),
+        let model = self.control_model();
+        if model == ffi::CONTROL_MODEL_STATUS_ONLY {
+            return Err("ctlModel status-only, tidak bisa dikontrol".into());
+        }
+        if !matches!(model, ffi::CONTROL_MODEL_SBO_NORMAL | ffi::CONTROL_MODEL_SBO_ENHANCED) {
+            return Ok(());
+        }
+        self.begin(true);
+        // SAFETY: ctl & value valid; value disalin (MmsValue_update / ditulis), tidak diambil alih library
+        let ok = unsafe {
+            // tipe beda (mis. APC) -> false: Cancel memakai ctlVal library
+            ffi::ControlObjectClient_setLastCtlVal(self.ctl, value.as_ptr());
+            if model == ffi::CONTROL_MODEL_SBO_NORMAL {
+                ffi::ControlObjectClient_select(self.ctl)
+            } else {
+                ffi::ControlObjectClient_selectWithValue(self.ctl, value.as_ptr())
+            }
         };
         if ok { Ok(()) } else { Err(self.error("select")) }
     }
@@ -830,6 +973,8 @@ impl Control {
         if let Ok(mut r) = self.termination.result.lock() {
             *r = None;
         }
+        let sbo = matches!(self.control_model(), ffi::CONTROL_MODEL_SBO_NORMAL | ffi::CONTROL_MODEL_SBO_ENHANCED);
+        self.begin(!sbo);
         // SAFETY: ctl & value valid; operTime 0 = langsung
         if !unsafe { ffi::ControlObjectClient_operate(self.ctl, value.as_ptr(), 0) } {
             return Err(self.error("operate"));
@@ -849,13 +994,19 @@ impl Control {
         self.error("CommandTermination-")
     }
 
-    /// AddCause dari LastApplError perintah terakhir.
+    /// AddCause dari LastApplError perintah terakhir yang ditolak (ctlNum sama). 0 = tidak diterima.
     pub fn add_cause(&self) -> i32 {
-        // SAFETY: ctl valid
-        unsafe { ffi::ControlObjectClient_getLastApplError(self.ctl) }.addCause as i32
+        self.last_appl.get().map_or(0, |a| a.add_cause)
     }
 
+    /// ctlNum yang dibawa perintah terakhir.
+    pub fn ctl_num(&self) -> u8 {
+        self.ctl_num.get()
+    }
+
+    /// Cancel: ctlNum & ctlVal sama dengan SELECT terakhir.
     pub fn cancel(&self) -> Result<()> {
+        self.begin(false);
         // SAFETY: ctl valid
         if unsafe { ffi::ControlObjectClient_cancel(self.ctl) } {
             Ok(())
@@ -870,15 +1021,45 @@ impl Control {
         is_connection_error(unsafe { ffi::ControlObjectClient_getLastError(self.ctl) })
     }
 
+    /// LastApplError untuk ctlNum perintah terakhir. InformationReport LastApplError diproses thread
+    /// penerima libIEC61850 dan bisa tiba sesaat setelah jawaban write, jadi ditunggu maks `wait`.
+    fn wait_appl_error(&self, wait: Duration) -> Option<ApplError> {
+        let want = self.ctl_num.get();
+        let deadline = Instant::now() + wait;
+        loop {
+            // SAFETY: ctl & con valid (Control di-drop sebelum Ied); getter mengembalikan salinan struct
+            let (object, connection) = unsafe {
+                (
+                    ApplError::from_ffi(ffi::ControlObjectClient_getLastApplError(self.ctl)),
+                    ApplError::from_ffi(ffi::IedConnection_getLastApplError(self.con)),
+                )
+            };
+            if let Some(a) = pick_appl_error(object, connection, want) {
+                return Some(a);
+            }
+            if Instant::now() >= deadline {
+                // objek di-reset tiap perintah: kalau terisi, pasti milik perintah ini (mis. tanpa ctlNum)
+                return object.is_set().then_some(object);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// Error perintah terakhir. Ada kode IedClientError -> `Mms` (bisa dicek timeout/putus);
     /// ditolak IED tanpa kode (LastApplError saja) -> `Other`.
     fn error(&self, what: &str) -> Iec61850Error {
         // SAFETY: ctl valid
-        let (err, appl) = unsafe {
-            (ffi::ControlObjectClient_getLastError(self.ctl), ffi::ControlObjectClient_getLastApplError(self.ctl))
-        };
+        let err = unsafe { ffi::ControlObjectClient_getLastError(self.ctl) };
+        // timeout / koneksi putus: IED tidak menjawab, tidak ada LastApplError yang ditunggu
+        let answered = err != ffi::IED_ERROR_TIMEOUT && !is_connection_error(err);
+        let appl = if answered { self.wait_appl_error(APPL_ERROR_WAIT) } else { None };
+        self.last_appl.set(appl);
         let base = check(err).err().map_or_else(|| "ditolak IED".to_string(), |e| e.to_string());
-        let msg = format!("{what} gagal: {base} ({})", super::traffic::appl_error(appl.error as i32, appl.addCause as i32));
+        let detail = appl.map_or_else(
+            || "LastApplError tidak diterima".to_string(),
+            |a| format!("{}, ctlNum={}", super::traffic::appl_error(a.error, a.add_cause), a.ctl_num),
+        );
+        let msg = format!("{what} gagal: {base} ({detail})");
         if err == ffi::IED_ERROR_OK {
             Iec61850Error::Other(msg)
         } else {
@@ -941,6 +1122,22 @@ fn take_strings(list: ffi::LinkedList, err: ffi::IedClientError) -> Result<Vec<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn last_appl_error_sesuai_ctl_num() {
+        let a = |ctl_num, error, add_cause| ApplError { ctl_num, error, add_cause };
+        let none = a(0, 0, 0);
+        // dari objek kontrol, ctlNum sama
+        assert_eq!(pick_appl_error(a(5, 1, 1), none, 5), Some(a(5, 1, 1)));
+        // objek tidak terisi (nama objek beda format) -> level koneksi dengan ctlNum sama
+        assert_eq!(pick_appl_error(none, a(5, 1, 10), 5), Some(a(5, 1, 10)));
+        // ctlNum lain = milik perintah lain -> tidak dipakai
+        assert_eq!(pick_appl_error(a(4, 1, 1), a(3, 1, 2), 5), None);
+        // objek beda ctlNum tapi koneksi cocok -> koneksi
+        assert_eq!(pick_appl_error(a(4, 1, 1), a(5, 1, 18), 5), Some(a(5, 1, 18)));
+        // belum ada LastApplError
+        assert_eq!(pick_appl_error(none, none, 5), None);
+    }
 
     #[test]
     fn klasifikasi_error() {

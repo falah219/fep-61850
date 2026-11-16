@@ -30,6 +30,12 @@ pub struct RtuConfig {
     pub oper_timeout_ms: u64,
     /// Tidak ada di DB: value payload DPC untuk CLOSE, 1 atau 2 (env DPC_CLOSE_VALUE)
     pub dpc_close_value: i32,
+    /// Tidak ada di DB: orCat command (env CONTROL_OR_CAT, default 3 = remote-control)
+    pub control_or_cat: i32,
+    /// Tidak ada di DB: baca stVal & q DPC sebelum SELECT, tolak kalau posisi tidak valid (env CONTROL_PRECHECK_POSITION)
+    pub precheck_position: bool,
+    /// Tidak ada di DB: log ringkas struktur command yang dikirim (env CONTROL_DEBUG)
+    pub control_debug: bool,
     /// Tidak ada di DB: env OSI_PARAMS_SIDE
     pub osi_side: OsiSide,
     pub ap_title: String,

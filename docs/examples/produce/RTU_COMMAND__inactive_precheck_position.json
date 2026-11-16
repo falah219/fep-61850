@@ -1,0 +1,14 @@
+{
+  "hostname": "192.168.212.14",
+  "port": 102,
+  "protocol": "IEC61850",
+  "tag": "BAY1_CB_3005",
+  "command_type": "DPC",
+  "command_value": 2,
+  "qualifier": 0,
+  "event": "SELECT",
+  "status": "inactive",
+  "msg": "SELECT failed: posisi tidak valid di IED (stVal=00 (intermediate), q=INVALID|FAILURE), SELECT tidak dikirim - RTU status is Inactive",
+  "key": "cmd-20261117-0001",
+  "time": 1794711845123
+}

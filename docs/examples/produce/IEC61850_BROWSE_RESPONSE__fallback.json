@@ -1,0 +1,53 @@
+{
+  "key": "browse-9302-01",
+  "id_rtu": 9302,
+  "status": "SUCCESS",
+  "message": "3 objek, 1 node gagal (lihat errors)",
+  "objects": [
+    {
+      "object_reference": "BaselineLD0/XSWI1.OpCnt",
+      "fc": "ST",
+      "cdc": "INS"
+    },
+    {
+      "object_reference": "BaselineLD0/XSWI1.Pos",
+      "fc": "ST",
+      "cdc": "DPC"
+    },
+    {
+      "object_reference": "BaselineLD0/XSWI1.Pos",
+      "fc": "CO",
+      "cdc": "DPC",
+      "control": {
+        "ctl_model": "sbo-with-enhanced-security",
+        "sbo_timeout_ms": 30000,
+        "sbow": true,
+        "oper": true,
+        "cancel": true
+      }
+    }
+  ],
+  "part": 1,
+  "total_parts": 1,
+  "errors": [
+    {
+      "ref": "BaselineLD0/XSWI1[ST]",
+      "error": "getVariableSpecification: malformed-message; pakai GetNameList"
+    }
+  ],
+  "rcbs": [
+    {
+      "reference": "BaselineLD0/LLN0.BR.brcbST01",
+      "buffered": true,
+      "rpt_id": "BaselineLD0/LLN0$BR$brcbST01",
+      "rpt_ena": false,
+      "dataset": "BaselineLD0/LLN0.dsStatus",
+      "trg_ops": "dchg,qchg,gi",
+      "intg_pd_ms": 0,
+      "members": [
+        "BaselineLD0/XSWI1.Pos.stVal[ST]",
+        "BaselineLD0/XSWI1.Pos.q[ST]"
+      ]
+    }
+  ]
+}

@@ -21,6 +21,12 @@ Source disalin dari tag di atas. Perubahannya:
   `mms_utility` yang disertakan. Keduanya dipakai `docker/Dockerfile.dev`. Contoh lain dihapus.
 - `examples/CMakeLists.txt` **diubah**: hanya memanggil `add_subdirectory` untuk dua contoh di atas.
 - Test & fuzzing yang tidak dipakai dihapus: `fuzz/`, `dotnet/tests/`, `pyiec61850/test_pyiec61850.py`.
+- **Patch kode** (ditandai komentar `fep-iec61850` di source):
+  - `src/iec61850/client/client_control.c` + `inc/iec61850_client.h`: fungsi baru
+    `ControlObjectClient_setLastCtlVal()` supaya Cancel membawa ctlVal SELECT terakhir, juga kalau SELECT
+    ditolak IED (aslinya ctlVal hanya diperbarui setelah select/operate sukses).
+  - `src/iec61850/client/ied_connection.c` (`handleLastApplErrorMessage`): `error` / `ctlNum` / `addCause`
+    diterima sebagai INTEGER maupun UNSIGNED. Aslinya LastApplError dengan tipe lain dibuang diam-diam.
 
 File lain (termasuk `COPYING`, `README.md`, `CHANGELOG`) tidak diubah.
 
@@ -35,5 +41,5 @@ konfirmasi tim (docs/CATATAN_TERBUKA.md no. 11).
 
 1. Unduh source tag baru dari https://github.com/mz-automation/libiec61850.
 2. Ganti isi `native/libiec61850/` dengan source itu, lalu ulangi perubahan di atas (hapus `.git`, contoh
-   yang tidak dipakai, dan test; sesuaikan `examples/CMakeLists.txt`).
+   yang tidak dipakai, dan test; sesuaikan `examples/CMakeLists.txt`), dan terapkan lagi patch kode di atas.
 3. Perbarui versi & commit di file ini, lalu build ulang image dev dan produksi.

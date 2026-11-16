@@ -23,7 +23,7 @@ fn main() {
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         // Konstanta enum pakai nama aslinya dari C, mis. IED_ERROR_OK, IEC61850_FC_MX
         .prepend_enum_name(false)
-        .allowlist_function("IedConnection_.*|IedClientError_.*|MmsValue_.*|LinkedList_.*|ClientDataSet_.*|ClientReport.*|MmsVariableSpecification_.*|Quality_.*|Dbpos_.*|FunctionalConstraint_.*|ControlObjectClient_.*|IsoConnectionParameters_.*|MmsConnection_getIsoConnectionParameters")
+        .allowlist_function("IedConnection_.*|IedClientError_.*|MmsValue_.*|LinkedList_.*|ClientDataSet_.*|ClientReport.*|MmsVariableSpecification_.*|Quality_.*|Dbpos_.*|FunctionalConstraint_.*|ControlObjectClient_.*|IsoConnectionParameters_.*|MmsConnection_getIsoConnectionParameters|MmsConnection_setLocalDetail|MmsConnection_getLocalDetail")
         // konstanta #define (bit TrgOps, OptFlds, mask elemen RCB, reason code)
         .allowlist_var("TRG_OPT_.*|RCB_ELEMENT_.*|IEC61850_REASON_.*|QUALITY_.*|CONTROL_ORCAT_.*|RPT_OPT_.*")
         .wrap_unsafe_ops(true)

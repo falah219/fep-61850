@@ -18,6 +18,8 @@ pub struct Point {
     pub interlock_check: bool,
     pub synchro_check: bool,
     pub deadband: Option<f64>,
+    /// orCat khusus titik ini (iec61850_command_formulas.or_cat), None = env CONTROL_OR_CAT
+    pub or_cat: Option<i32>,
 }
 
 /// Nilai terakhir satu titik (gabungan value + q + t dari anggota-anggota dataset).

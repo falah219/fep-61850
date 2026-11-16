@@ -1,47 +1,384 @@
-//! Browse model IED (event BROWSE): LD -> LN -> DO -> FC, plus CDC yang ditebak dari struktur DO.
-//! Asalnya `tools/iec61850-cli` (bin `browse`), di sini satu request `getVariableSpecification`
-//! per LN + FC (bukan per DO), jadi IED besar tetap cepat.
+//! Browse model IED (event BROWSE): LD -> LN -> DO -> FC, CDC tebakan dari struktur DO, info kontrol & RCB.
 //!
-//! CDC dari tipe MMS: ENS/ENC tidak bisa dibedakan dari INS/INC (sama-sama integer) -> INS / INC.
+//! Per LN: satu `getVariableSpecification` per FC (cepat). Kalau gagal (mis. `malformed-message`: respons type
+//! spec LN terlalu besar untuk PDU / tidak bisa di-parse libIEC61850), struktur dibangun dari GetNameList
+//! (`getLogicalDeviceVariables`, nama MMS `LN$FC$DO$DA`); tipe `stVal` dari read nilai (BROWSE_READ_VALUES).
+//! Kegagalan satu node dicatat di `errors` dan browse lanjut ke node berikutnya.
+//!
+//! Dikerjakan bertahap (`BrowseJob::step`, satu LN per langkah) di thread IED, diselingi polling & command,
+//! dibatasi BROWSE_TIMEOUT_MS. CDC dari tipe MMS: ENS/ENC tidak bisa dibedakan dari INS/INC -> INS / INC.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use super::client::{fc_from_str, Ied, SpecNode, SpecType};
-use crate::error::Result;
+use super::client::{cstring, fc_from_str, Ied, Rcb, SpecNode, SpecType};
+use super::mapper::trg_ops_text;
+use crate::error::{Iec61850Error, Result};
+use crate::ffi;
 
 /// FC yang bisa dimapping (CHECK `functional_constraint` di `master_datapoint_iec61850s`).
 const FCS: [&str; 4] = ["ST", "MX", "CO", "SP"];
 /// Kedalaman sub-DO yang dicari kalau CDC DO tidak dikenali (mis. WYE.phsA -> CMV).
 const MAX_DEPTH: usize = 3;
+/// Default BROWSE_TIMEOUT_MS (batas total satu browse).
+pub const DEFAULT_BROWSE_TIMEOUT_MS: u64 = 300_000;
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BrowseObject {
     pub object_reference: String,
     pub fc: String,
     pub cdc: Option<String>,
+    /// Hanya objek FC `CO`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<ControlInfo>,
 }
 
-/// Jalan di thread IED (blocking). Error koneksi -> Err; LN yang tidak punya FC tertentu dilewati.
-pub fn browse(ied: &Ied) -> Result<Vec<BrowseObject>> {
-    let mut out = Vec::new();
-    for ld in ied.logical_devices()? {
-        for ln in ied.logical_nodes(&ld)? {
-            let ln_ref = format!("{ld}/{ln}");
-            let mut specs = Vec::new();
-            for fc in FCS {
-                match ied.variable_spec(&ln_ref, fc_from_str(fc)?) {
-                    Ok(s) => specs.push((fc, s.tree())),
-                    // IED menjawab "tidak ada" / spec kosong: LN ini tidak punya FC tsb
-                    Err(e) if e.is_server_response() || e.code().is_none() => {}
-                    Err(e) => return Err(e),
+/// Info kontrol satu DO (FC CO).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ControlInfo {
+    /// Teks sama dengan kolom `ctl_model` (`sbo-with-enhanced-security`, ...); null = tidak dibaca / gagal
+    pub ctl_model: Option<String>,
+    /// CF `sboTimeout` (ms); null = tidak ada / tidak dibaca
+    pub sbo_timeout_ms: Option<i64>,
+    pub sbow: bool,
+    pub oper: bool,
+    pub cancel: bool,
+}
+
+/// Node yang gagal dibrowse (browse tetap lanjut).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BrowseError {
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub error: String,
+}
+
+/// RCB (BRCB `.BR.` / URCB `.RP.`) untuk setup mode REPORT.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RcbInfo {
+    pub reference: String,
+    pub buffered: bool,
+    pub rpt_id: Option<String>,
+    pub rpt_ena: bool,
+    /// Format ACSI `LD/LLN0.DataSet`
+    pub dataset: Option<String>,
+    /// `dchg,qchg,dupd,integrity,gi` (format kolom trg_ops)
+    pub trg_ops: String,
+    pub intg_pd_ms: u32,
+    /// Anggota dataset, contoh `LD/XSWI1.Pos.stVal[ST]`
+    pub members: Vec<String>,
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub struct BrowseResult {
+    pub objects: Vec<BrowseObject>,
+    pub errors: Vec<BrowseError>,
+    pub rcbs: Vec<RcbInfo>,
+    /// false = BROWSE_TIMEOUT_MS tercapai sebelum semua LN dibrowse
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BrowseOptions {
+    /// BROWSE_READ_VALUES (default true): baca tipe stVal (fallback), ctlModel & sboTimeout
+    pub read_values: bool,
+    pub timeout: Duration,
+}
+
+impl BrowseOptions {
+    pub fn from_env() -> Self {
+        let read_values = crate::logger::env_flag(std::env::var("BROWSE_READ_VALUES").ok().as_deref(), true);
+        Self { read_values, timeout: browse_timeout() }
+    }
+}
+
+/// Env BROWSE_TIMEOUT_MS (> 0), default 300000.
+pub fn browse_timeout() -> Duration {
+    let ms = std::env::var("BROWSE_TIMEOUT_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()).filter(|v| *v > 0);
+    Duration::from_millis(ms.unwrap_or(DEFAULT_BROWSE_TIMEOUT_MS))
+}
+
+/// ctlModel (CF) -> teks kolom `ctl_model`.
+pub fn ctl_model_name(v: i64) -> String {
+    match v {
+        0 => "status-only",
+        1 => "direct-with-normal-security",
+        2 => "sbo-with-normal-security",
+        3 => "direct-with-enhanced-security",
+        4 => "sbo-with-enhanced-security",
+        _ => return v.to_string(),
+    }
+    .into()
+}
+
+/// IED menjawab "tidak ada" / spec kosong: node ini memang tidak punya FC / atribut tsb.
+fn is_absent(e: &Iec61850Error) -> bool {
+    e.is_server_response() || e.code().is_none()
+}
+
+/// Browse bertahap. `start` (daftar LD/LN) lalu `step` berulang sampai true, lalu `finish`.
+pub struct BrowseJob {
+    pending: VecDeque<(String, String)>,
+    /// Cache GetNameList per LD (fallback); Err = gagal, sudah dicatat
+    ld_names: HashMap<String, std::result::Result<Vec<String>, String>>,
+    /// Cache anggota dataset
+    datasets: HashMap<String, Vec<String>>,
+    opts: BrowseOptions,
+    deadline: Instant,
+    result: BrowseResult,
+}
+
+impl BrowseJob {
+    /// Daftar LD & LN (GetNameList). Err hanya kalau daftar LD tidak terbaca / koneksi putus.
+    pub fn start(ied: &Ied, opts: BrowseOptions) -> Result<Self> {
+        let mut job = Self {
+            pending: VecDeque::new(),
+            ld_names: HashMap::new(),
+            datasets: HashMap::new(),
+            opts,
+            deadline: Instant::now() + opts.timeout,
+            result: BrowseResult { complete: true, ..Default::default() },
+        };
+        for ld in ied.logical_devices()? {
+            match ied.logical_nodes(&ld) {
+                Ok(lns) => job.pending.extend(lns.into_iter().map(|ln| (ld.clone(), ln))),
+                Err(e) if e.is_connection_lost() => return Err(e),
+                Err(e) => job.error(&ld, &e),
+            }
+        }
+        Ok(job)
+    }
+
+    /// Satu LN. Ok(true) = selesai (semua LN atau BROWSE_TIMEOUT_MS). Err = koneksi putus.
+    pub fn step(&mut self, ied: &Ied) -> Result<bool> {
+        if Instant::now() >= self.deadline && !self.pending.is_empty() {
+            let left = self.pending.len();
+            let ms = self.opts.timeout.as_millis();
+            self.error("browse", &format!("BROWSE_TIMEOUT_MS ({ms} ms) tercapai, {left} LN belum dibrowse"));
+            self.result.complete = false;
+            self.pending.clear();
+        }
+        let Some((ld, ln)) = self.pending.pop_front() else { return Ok(true) };
+        self.browse_ln(ied, &ld, &ln)?;
+        Ok(self.pending.is_empty())
+    }
+
+    pub fn finish(self) -> BrowseResult {
+        self.result
+    }
+
+    fn error(&mut self, reference: &str, e: &dyn std::fmt::Display) {
+        self.result.errors.push(BrowseError { reference: reference.into(), error: e.to_string() });
+    }
+
+    fn browse_ln(&mut self, ied: &Ied, ld: &str, ln: &str) -> Result<()> {
+        let ln_ref = format!("{ld}/{ln}");
+        let mut specs = Vec::new();
+        let mut spec_failed = false;
+        for fc in FCS {
+            match ied.variable_spec(&ln_ref, fc_from_str(fc)?) {
+                Ok(s) => specs.push((fc, s.tree())),
+                Err(e) if is_absent(&e) => {}
+                Err(e) if e.is_connection_lost() => return Err(e),
+                Err(e) => {
+                    self.error(&format!("{ln_ref}[{fc}]"), &format!("getVariableSpecification: {e}; pakai GetNameList"));
+                    spec_failed = true;
+                    break;
                 }
             }
-            out.extend(ln_objects(&ln_ref, &specs));
+        }
+        if spec_failed {
+            specs = match self.ld_names(ied, ld)? {
+                Some(names) => tree_from_names(ln, names),
+                None => Vec::new(),
+            };
+            if self.opts.read_values {
+                if let Some((_, st)) = specs.iter_mut().find(|(f, _)| *f == "ST") {
+                    fill_stval_types(ied, &ln_ref, st, 0, &mut self.result.errors)?;
+                }
+            }
+        }
+        let mut objects = ln_objects(&ln_ref, &specs);
+        for o in objects.iter_mut().filter(|o| o.fc == "CO") {
+            o.control = Some(control_info(ied, &ln_ref, &specs, &o.object_reference, self.opts.read_values, &mut self.result.errors)?);
+        }
+        self.result.objects.extend(objects);
+        self.rcbs(ied, &ln_ref)
+    }
+
+    /// Nama variabel MMS satu LD (sekali per LD).
+    fn ld_names(&mut self, ied: &Ied, ld: &str) -> Result<Option<&[String]>> {
+        if !self.ld_names.contains_key(ld) {
+            let names = match ied.logical_device_variables(ld) {
+                Ok(v) => Ok(v),
+                Err(e) if e.is_connection_lost() => return Err(e),
+                Err(e) => {
+                    self.error(&format!("{ld} (GetNameList)"), &e);
+                    Err(e.to_string())
+                }
+            };
+            self.ld_names.insert(ld.to_string(), names);
+        }
+        Ok(self.ld_names.get(ld).and_then(|r| r.as_ref().ok()).map(Vec::as_slice))
+    }
+
+    fn rcbs(&mut self, ied: &Ied, ln_ref: &str) -> Result<()> {
+        for (class, tag) in [(ffi::ACSI_CLASS_BRCB, "BR"), (ffi::ACSI_CLASS_URCB, "RP")] {
+            let names = match ied.logical_node_directory(ln_ref, class) {
+                Ok(n) => n,
+                Err(e) if e.is_connection_lost() => return Err(e),
+                Err(e) => {
+                    self.error(&format!("{ln_ref} ({tag})"), &e);
+                    continue;
+                }
+            };
+            for name in names {
+                let reference = format!("{ln_ref}.{tag}.{name}");
+                let rcb = match Rcb::read(ied, &reference) {
+                    Ok(r) => r,
+                    Err(e) if e.is_connection_lost() => return Err(e),
+                    Err(e) => {
+                        self.error(&reference, &e);
+                        continue;
+                    }
+                };
+                let cur = rcb.current();
+                let members = match &cur.dataset {
+                    Some(ds) => self.members(ied, ds)?,
+                    None => Vec::new(),
+                };
+                self.result.rcbs.push(RcbInfo {
+                    reference,
+                    buffered: cur.buffered,
+                    rpt_id: rcb.rpt_id(),
+                    rpt_ena: rcb.rpt_ena(),
+                    dataset: cur.dataset,
+                    trg_ops: trg_ops_text(cur.trg_ops),
+                    intg_pd_ms: cur.intg_pd_ms,
+                    members,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn members(&mut self, ied: &Ied, ds: &str) -> Result<Vec<String>> {
+        if let Some(m) = self.datasets.get(ds) {
+            return Ok(m.clone());
+        }
+        let m = match ied.dataset_directory(ds) {
+            Ok(m) => m,
+            Err(e) if e.is_connection_lost() => return Err(e),
+            Err(e) => {
+                self.error(ds, &e);
+                Vec::new()
+            }
+        };
+        self.datasets.insert(ds.to_string(), m.clone());
+        Ok(m)
+    }
+}
+
+/// Fallback GetNameList: nama MMS LD (`LN$FC$DO$DA...`) -> struktur per FC untuk LN `ln` (urutan FCS).
+/// Tipe leaf `Other` (kecuali diisi `fill_stval_types`).
+pub fn tree_from_names(ln: &str, names: &[String]) -> Vec<(&'static str, SpecNode)> {
+    let mut roots: Vec<(&'static str, SpecNode)> = Vec::new();
+    for name in names {
+        let mut parts = name.split('$');
+        if parts.next() != Some(ln) {
+            continue;
+        }
+        let Some(fc) = parts.next().and_then(|f| FCS.iter().copied().find(|x| *x == f)) else { continue };
+        let path: Vec<&str> = parts.collect();
+        if path.is_empty() {
+            continue;
+        }
+        let i = match roots.iter().position(|(f, _)| *f == fc) {
+            Some(i) => i,
+            None => {
+                roots.push((fc, SpecNode { name: ln.into(), ty: SpecType::Struct, children: Vec::new() }));
+                roots.len() - 1
+            }
+        };
+        insert_path(&mut roots[i].1, &path);
+    }
+    roots.sort_by_key(|(f, _)| FCS.iter().position(|x| x == f));
+    roots
+}
+
+fn insert_path(node: &mut SpecNode, path: &[&str]) {
+    let Some((first, rest)) = path.split_first() else { return };
+    node.ty = SpecType::Struct;
+    let i = match node.children.iter().position(|c| c.name == *first) {
+        Some(i) => i,
+        None => {
+            node.children.push(SpecNode { name: (*first).into(), ty: SpecType::Other, children: Vec::new() });
+            node.children.len() - 1
+        }
+    };
+    insert_path(&mut node.children[i], rest);
+}
+
+/// Isi tipe `stVal` (ST) dari read nilai, untuk DO dan sub-DO (maks MAX_DEPTH).
+fn fill_stval_types(ied: &Ied, prefix: &str, node: &mut SpecNode, depth: usize, errors: &mut Vec<BrowseError>) -> Result<()> {
+    for d in node.children.iter_mut() {
+        let r = format!("{prefix}.{}", d.name);
+        if let Some(sv) = d.children.iter_mut().find(|c| c.name == "stVal") {
+            match ied.read_object(&cstring(&format!("{r}.stVal"))?, ffi::IEC61850_FC_ST) {
+                Ok(v) => sv.ty = v.spec_type(),
+                Err(e) if e.is_connection_lost() => return Err(e),
+                Err(e) => errors.push(BrowseError { reference: format!("{r}.stVal[ST]"), error: e.to_string() }),
+            }
+        } else if depth < MAX_DEPTH && d.ty == SpecType::Struct {
+            fill_stval_types(ied, &r, d, depth + 1, errors)?;
         }
     }
-    Ok(out)
+    Ok(())
+}
+
+fn node_at<'a>(n: &'a SpecNode, path: &[&str]) -> Option<&'a SpecNode> {
+    path.iter().try_fold(n, |n, p| n.children.iter().find(|c| c.name == *p))
+}
+
+/// SBOw/Oper/Cancel dari struktur CO; ctlModel & sboTimeout (CF) dari read nilai.
+fn control_info(
+    ied: &Ied,
+    ln_ref: &str,
+    specs: &[(&str, SpecNode)],
+    obj_ref: &str,
+    read_values: bool,
+    errors: &mut Vec<BrowseError>,
+) -> Result<ControlInfo> {
+    let mut info = control_flags(ln_ref, specs, obj_ref);
+    if read_values {
+        info.ctl_model = read_cf_int(ied, obj_ref, "ctlModel", true, errors)?.map(ctl_model_name);
+        info.sbo_timeout_ms = read_cf_int(ied, obj_ref, "sboTimeout", false, errors)?;
+    }
+    Ok(info)
+}
+
+/// SBOw / Oper / Cancel yang ada di struktur CO objek ini.
+fn control_flags(ln_ref: &str, specs: &[(&str, SpecNode)], obj_ref: &str) -> ControlInfo {
+    let path: Vec<&str> = obj_ref.get(ln_ref.len() + 1..).unwrap_or_default().split('.').collect();
+    let co = specs.iter().find(|(f, _)| *f == "CO").and_then(|(_, n)| node_at(n, &path));
+    let has = |name: &str| co.is_some_and(|c| c.children.iter().any(|x| x.name == name));
+    ControlInfo { sbow: has("SBOw"), oper: has("Oper"), cancel: has("Cancel"), ..Default::default() }
+}
+
+/// Baca atribut CF integer. `required` = gagal dicatat walau IED menjawab "tidak ada".
+fn read_cf_int(ied: &Ied, obj_ref: &str, attr: &str, required: bool, errors: &mut Vec<BrowseError>) -> Result<Option<i64>> {
+    match ied.read_object(&cstring(&format!("{obj_ref}.{attr}"))?, ffi::IEC61850_FC_CF) {
+        Ok(v) => Ok(v.as_i64()),
+        Err(e) if e.is_connection_lost() => Err(e),
+        Err(e) => {
+            if required || !is_absent(&e) {
+                errors.push(BrowseError { reference: format!("{obj_ref}.{attr}[CF]"), error: e.to_string() });
+            }
+            Ok(None)
+        }
+    }
 }
 
 /// Satu DO (atau sub-DO) dilihat dari tiap FC: (fc, struktur di FC itu).
@@ -88,7 +425,7 @@ fn walk(r: &str, parts: &PartsRef, depth: usize) -> Vec<BrowseObject> {
 fn objects(r: &str, parts: &PartsRef, cdc: Option<&str>) -> Vec<BrowseObject> {
     parts
         .iter()
-        .map(|(fc, _)| BrowseObject { object_reference: r.to_string(), fc: fc.to_string(), cdc: cdc.map(String::from) })
+        .map(|(fc, _)| BrowseObject { object_reference: r.to_string(), fc: fc.to_string(), cdc: cdc.map(String::from), control: None })
         .collect()
 }
 
@@ -142,7 +479,7 @@ mod tests {
         SpecNode { name: name.into(), ty: SpecType::Struct, children }
     }
     fn obj(r: &str, fc: &str, cdc: Option<&str>) -> BrowseObject {
-        BrowseObject { object_reference: r.into(), fc: fc.into(), cdc: cdc.map(String::from) }
+        BrowseObject { object_reference: r.into(), fc: fc.into(), cdc: cdc.map(String::from), control: None }
     }
 
     #[test]
@@ -182,5 +519,70 @@ mod tests {
                 obj("LD/XCBR1.Str", "ST", Some("ACD")),
             ]
         );
+    }
+
+    /// Nama GetNameList contoh (bentuk Schneider Baseline Ed2): termasuk node antara (`XSWI1$ST`),
+    /// FC yang tidak dimapping (CF/DC), dan LN lain berawalan sama (`GGIO10` vs `GGIO1`).
+    fn names() -> Vec<String> {
+        [
+            "XSWI1", "XSWI1$ST", "XSWI1$ST$Pos", "XSWI1$ST$Pos$stVal", "XSWI1$ST$Pos$q", "XSWI1$ST$Pos$t",
+            "XSWI1$CO", "XSWI1$CO$Pos", "XSWI1$CO$Pos$SBOw", "XSWI1$CO$Pos$SBOw$ctlVal", "XSWI1$CO$Pos$Oper",
+            "XSWI1$CO$Pos$Oper$ctlVal", "XSWI1$CO$Pos$Cancel", "XSWI1$CF$Pos$ctlModel", "XSWI1$CF$Pos$sboTimeout",
+            "XSWI1$DC$Pos$d", "XSWI1$ST$OpCnt$stVal", "XSWI1$MX$A$phsA$cVal$mag$f", "XSWI1$MX$A$phsB$cVal$mag$f",
+            "GGIO10$ST$Ind1$stVal", "GGIO1$ST$Ind1$stVal",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
+    fn set_type(specs: &mut [(&str, SpecNode)], fc: &str, path: &[&str], ty: SpecType) {
+        let root = &mut specs.iter_mut().find(|(f, _)| *f == fc).unwrap().1;
+        let node = path.iter().fold(root, |n, p| n.children.iter_mut().find(|c| c.name == *p).unwrap());
+        node.ty = ty;
+    }
+
+    #[test]
+    fn fallback_getnamelist_ke_struktur() {
+        let mut specs = tree_from_names("XSWI1", &names());
+        // hanya FC yang dimapping, urutan FCS; CF/DC dan LN lain dibuang
+        assert_eq!(specs.iter().map(|(f, _)| *f).collect::<Vec<_>>(), vec!["ST", "MX", "CO"]);
+        let st = &specs[0].1;
+        assert_eq!(st.children.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), vec!["Pos", "OpCnt"]);
+        assert_eq!(st.children[0].children.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), vec!["stVal", "q", "t"]);
+        let r = "LD/XSWI1";
+        // tanpa read nilai (BROWSE_READ_VALUES=false): tipe stVal tidak diketahui -> cdc null
+        let objs = ln_objects(r, &specs);
+        assert!(objs.iter().any(|o| o.object_reference == "LD/XSWI1.Pos" && o.fc == "CO" && o.cdc.is_none()));
+        // dengan tipe dari read nilai: Pos BIT STRING + Oper -> DPC, OpCnt integer -> INS, A.phsA -> CMV
+        set_type(&mut specs, "ST", &["Pos", "stVal"], SpecType::BitString);
+        set_type(&mut specs, "ST", &["OpCnt", "stVal"], SpecType::Int);
+        assert_eq!(
+            ln_objects(r, &specs),
+            vec![
+                obj("LD/XSWI1.A.phsA", "MX", Some("CMV")),
+                obj("LD/XSWI1.A.phsB", "MX", Some("CMV")),
+                obj("LD/XSWI1.OpCnt", "ST", Some("INS")),
+                obj("LD/XSWI1.Pos", "ST", Some("DPC")),
+                obj("LD/XSWI1.Pos", "CO", Some("DPC")),
+            ]
+        );
+        assert_eq!(
+            control_flags(r, &specs, "LD/XSWI1.Pos"),
+            ControlInfo { sbow: true, oper: true, cancel: true, ..Default::default() }
+        );
+        assert_eq!(control_flags(r, &specs, "LD/XSWI1.OpCnt"), ControlInfo::default());
+        // LN berawalan sama tidak tercampur
+        let g = tree_from_names("GGIO1", &names());
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].1.children.len(), 1);
+        assert!(tree_from_names("TIDAKADA", &names()).is_empty());
+    }
+
+    #[test]
+    fn nama_ctl_model() {
+        assert_eq!(ctl_model_name(4), "sbo-with-enhanced-security");
+        assert_eq!(ctl_model_name(1), "direct-with-normal-security");
+        assert_eq!(ctl_model_name(9), "9");
     }
 }

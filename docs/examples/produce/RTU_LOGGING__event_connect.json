@@ -2,6 +2,6 @@
   "ip_address": "10.10.1.21",
   "protocol": "IEC61850",
   "id_rtu": 9001,
-  "logging": "[INFO] terkoneksi MMS 10.10.1.21:102 mode REPORT",
+  "logging": "[INFO] terkoneksi MMS 10.10.1.21:102 mode REPORT, max PDU 65000",
   "time": 1794711845123
 }

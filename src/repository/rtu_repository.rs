@@ -56,6 +56,9 @@ pub async fn load_rtus(c: &Client, id: Option<i32>) -> DbResult<Vec<RtuConfig>> 
     let liveness_secs = env_u64("LIVENESS_SECS", 30).max(1);
     let oper_timeout_ms = env_u64("OPER_TIMEOUT_MS", 10_000).max(1);
     let dpc_close_value = crate::domain::dpc_close_value(std::env::var("DPC_CLOSE_VALUE").ok().as_deref());
+    let control_or_cat = control_or_cat(env::var("CONTROL_OR_CAT").ok().as_deref());
+    let flag = |k: &str| crate::logger::env_flag(env::var(k).ok().as_deref(), false);
+    let (precheck_position, control_debug) = (flag("CONTROL_PRECHECK_POSITION"), flag("CONTROL_DEBUG"));
     let osi_side = osi_side_from_env();
     let rows = c
         .query(
@@ -90,6 +93,9 @@ pub async fn load_rtus(c: &Client, id: Option<i32>) -> DbResult<Vec<RtuConfig>> 
                 liveness_secs,
                 oper_timeout_ms,
                 dpc_close_value,
+                control_or_cat,
+                precheck_position,
+                control_debug,
                 osi_side,
                 ap_title: r.try_get(13)?,
                 ae_qualifier: r.try_get(14)?,
@@ -179,7 +185,43 @@ fn to_point(row: &Row) -> Result<Point, tokio_postgres::Error> {
         interlock_check: row.try_get(8)?,
         synchro_check: row.try_get(9)?,
         deadband: row.try_get(10)?,
+        or_cat: None,
     })
+}
+
+/// Env CONTROL_OR_CAT (0..=8, IEC 61850-7-3 orCategory). Default / tidak valid = 3 (remote-control).
+pub fn control_or_cat(env: Option<&str>) -> i32 {
+    match env.map(str::trim).filter(|v| !v.is_empty()) {
+        None => 3,
+        Some(v) => match v.parse::<i32>() {
+            Ok(n) if (0..=8).contains(&n) => n,
+            _ => {
+                warn!("CONTROL_OR_CAT={v:?} tidak valid (0..8), pakai 3 (remote-control)");
+                3
+            }
+        },
+    }
+}
+
+/// Override orCat per titik dari kolom opsional `iec61850_command_formulas.or_cat`
+/// (migrations/0008_iec61850_command_formulas_or_cat.sql). Kolom belum ada -> tanpa override.
+async fn load_or_cat_overrides(c: &Client, id: Option<i32>) -> std::collections::HashMap<(i32, i32), i32> {
+    let rows = c
+        .query(
+            "SELECT md.id_rtu, md.ioa, cf.or_cat::INT FROM iec61850_command_formulas cf
+             JOIN master_datapoints md ON md.id = cf.id_master_datapoint
+             WHERE cf.is_deleted = FALSE AND md.is_deleted = FALSE AND cf.or_cat IS NOT NULL
+               AND ($1::INT IS NULL OR md.id_rtu = $1)",
+            &[&id],
+        )
+        .await;
+    match rows {
+        Ok(rows) => rows.iter().filter_map(|r| Some(((r.try_get(0).ok()?, r.try_get(1).ok()?), r.try_get(2).ok()?))).collect(),
+        Err(e) => {
+            tracing::debug!("override or_cat per titik tidak dipakai (kolom iec61850_command_formulas.or_cat belum ada?): {e}");
+            std::collections::HashMap::new()
+        }
+    }
 }
 
 pub async fn load_points(c: &Client, id: Option<i32>) -> DbResult<PointMap> {
@@ -200,9 +242,10 @@ pub async fn load_points(c: &Client, id: Option<i32>) -> DbResult<PointMap> {
         )
         .await
         .map_err(db_err("query mapping titik"))?;
+    let or_cats = load_or_cat_overrides(c, id).await;
     let mut map = PointMap::default();
     for row in &rows {
-        match to_point(row) {
+        match to_point(row).map(|p| Point { or_cat: or_cats.get(&(p.id_rtu, p.ioa)).copied(), ..p }) {
             Ok(p) if p.object_reference.trim().is_empty() => {
                 warn!(id_rtu = p.id_rtu, ioa = p.ioa, "datapoint IEC61850 tanpa object_reference, dilewati");
             }
@@ -220,6 +263,15 @@ pub async fn load_points(c: &Client, id: Option<i32>) -> DbResult<PointMap> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn or_cat_dari_env() {
+        assert_eq!(control_or_cat(None), 3);
+        assert_eq!(control_or_cat(Some(" 2 ")), 2);
+        assert_eq!(control_or_cat(Some("0")), 0);
+        assert_eq!(control_or_cat(Some("9")), 3);
+        assert_eq!(control_or_cat(Some("x")), 3);
+    }
 
     #[test]
     fn resv_tms_lebih_pendek_dari_retry_rcb() {

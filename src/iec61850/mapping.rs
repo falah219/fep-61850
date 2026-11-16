@@ -119,6 +119,7 @@ mod tests {
             interlock_check: false,
             synchro_check: false,
             deadband: None,
+            or_cat: None,
         }
     }
 

@@ -1,0 +1,7 @@
+{
+  "ip_address": "10.10.1.21",
+  "protocol": "IEC61850",
+  "id_rtu": 9001,
+  "logging": "[ERROR] CONTROL SELECT BaselineLD0/XSWI1.Pos tidak dikirim: posisi tidak valid di IED (stVal=00 (intermediate), q=INVALID|FAILURE), SELECT tidak dikirim",
+  "time": 1794711845123
+}

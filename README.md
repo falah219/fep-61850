@@ -372,7 +372,19 @@ Respons ke `IEC61850_BROWSE_RESPONSE` (key = `key`):
   `general` → ACT/ACD, `actVal` → BCR, `valWTr`+`Oper` → BSC, `mxVal`+`Oper` → APC, `mag` → MV, `cVal` → CMV
   (sub-DO seperti `WYE.phsA` dicari sampai 3 level). ENS/ENC tidak bisa dibedakan dari INS/INC lewat MMS.
   Tidak dikenali → `null`.
-- Selama browse, polling IED itu tertahan (report tetap diterima).
+- Dikerjakan **bertahap** (satu LN per langkah, 200 ms per putaran) di thread IED: polling & command tetap jalan.
+  Batas total `BROWSE_TIMEOUT_MS` (default 300000) → hasil sebagian + `complete: false`.
+- **Toleran**: `getVariableSpecification` LN gagal (mis. `malformed-message` di Schneider Baseline Ed2) → dicatat di `errors`,
+  struktur LN dibangun dari GetNameList (`LN$FC$DO$DA`), tipe `stVal` dari read nilai (`BROWSE_READ_VALUES`, default `true`).
+- Field opsional baru: `objects[].control` (ctlModel, sboTimeout, SBOw/Oper/Cancel), `errors`, `rcbs` (RptEna, DatSet, RptID,
+  TrgOps, IntgPd, anggota dataset), `complete`. Detail: [docs/KAFKA_PAYLOADS.md](docs/KAFKA_PAYLOADS.md#37-iec61850_browse_response).
+- Max PDU hasil negosiasi ditulis di log koneksi; usulan FEP: `MMS_MAX_PDU_SIZE` (default library 65000, juga batas atasnya).
+- Debug satu objek (getVariableSpecification per FC + nama GetNameList):
+
+  ```powershell
+  docker compose -f docker-compose.dev.yml exec -w /work dev cargo run --bin varspec -- 192.168.212.14 102 BaselineLD0/XSWI1
+  docker compose -f docker-compose.dev.yml exec -e MMS_MAX_PDU_SIZE=65000 -w /work dev cargo run --bin varspec -- 192.168.212.14 102 BaselineLD0/XSWI1.Pos CO CF
+  ```
 
 ## Fase 9 — Command (select / operate / cancel)
 
@@ -390,7 +402,17 @@ Alur: event `COMMAND` di `RTU_EVENTS` → cari IED (`id_rtu` atau IP) → job di
 | `CANCEL_RTU` | `cancel` |
 
 - `ctlModel`: dibaca dari IED, ditimpa `iec61850_command_formulas.ctl_model` kalau diisi.
-- `orCat = remote-control`, `orIdent` = field `user` di payload (default `FEP-IEC61850`).
+- `orCat` = env `CONTROL_OR_CAT` (default 3 = remote-control), override per titik: kolom opsional
+  `iec61850_command_formulas.or_cat` ([migrations/0008](migrations/0008_iec61850_command_formulas_or_cat.sql), usulan; tanpa kolom ini FEP tetap jalan).
+  `orIdent` = field `user` di payload (default `FEP-IEC61850`).
+- `ctlNum` dicatat per objek kontrol. AddCause di `msg` RTU_COMMAND / `CONTROL RX` diambil dari LastApplError dengan **ctlNum
+  yang sama** (objek kontrol, lalu level koneksi; ditunggu maks 300 ms). CANCEL membawa ctlVal & ctlNum SELECT terakhir.
+- `CONTROL_PRECHECK_POSITION=true`: sebelum SELECT titik DPC, `stVal` & `q` DO kontrol dibaca; posisi 00/11 atau q invalid →
+  ditolak `posisi tidak valid di IED (...)` tanpa dikirim ke perangkat.
+- `CONTROL_DEBUG=true`: log ringkas struktur yang dikirim (ctlModel, ctlVal, origin, ctlNum, Check) dan AddCause yang diterima.
+- libIEC61850 di [native/](native/) **dipatch** (Cancel ctlVal, LastApplError INTEGER/UNSIGNED; lihat
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)): image dev & produksi harus di-build ulang
+  (`docker compose -f docker-compose.dev.yml build dev`).
 - `interlock_check` / `synchro_check` dari `iec61850_command_formulas` (join `id_master_datapoint`, `is_deleted = false`; tanpa baris = false).
 - IOA dari field `ioa`, atau dari akhiran tag `NAMA_123` (sama dengan IEC 104).
 - Nilai (`value` boleh integer, float, atau string angka): `SPC` value≠0 → true; `INC`/`ENC` bilangan bulat; **`DPC` 2 → CLOSE (true), 1 → OPEN (false)** (default, dibalik dengan env `DPC_CLOSE_VALUE=1`) — pemetaan standar DCS IEC 104,

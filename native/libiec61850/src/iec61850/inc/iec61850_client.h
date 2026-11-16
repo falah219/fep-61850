@@ -2424,6 +2424,14 @@ LIB61850_API void
 ControlObjectClient_setOrigin(ControlObjectClient self, const char* orIdent, int orCat);
 
 /**
+ * \brief (fep-iec61850) Set the ctlVal used by the next Cancel to the value of the last SELECT
+ *
+ * \return false when the value type does not match the control object (e.g. APC analogue value)
+ */
+LIB61850_API bool
+ControlObjectClient_setLastCtlVal(ControlObjectClient self, MmsValue* ctlVal);
+
+/**
  * \brief Use a constant T parameter for all command (select, operate, cancel) of a single control sequence
  *
  * NOTE: Some non-standard compliant servers may require this to accept oper/cancel requests

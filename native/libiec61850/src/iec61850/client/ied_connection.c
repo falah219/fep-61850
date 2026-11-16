@@ -596,8 +596,12 @@ handleLastApplErrorMessage(IedConnection self, MmsValue* lastApplError)
     MmsValue* ctlNum = MmsValue_getElement(lastApplError, 3);
     MmsValue* addCause = MmsValue_getElement(lastApplError, 4);
 
-    if (MmsValue_getType(cntrlObj) != MMS_VISIBLE_STRING || MmsValue_getType(error) != MMS_INTEGER || MmsValue_getType(ctlNum) != MMS_UNSIGNED
-        || MmsValue_getType(addCause) != MMS_INTEGER)
+    /* fep-iec61850: terima INTEGER maupun UNSIGNED untuk error / ctlNum / addCause (sebagian IED
+     * mengirim tipe berbeda; aslinya LastApplError seperti itu dibuang diam-diam -> addCause 0). */
+#define FEP_IS_INT(v) ((MmsValue_getType(v) == MMS_INTEGER) || (MmsValue_getType(v) == MMS_UNSIGNED))
+    if (MmsValue_getType(cntrlObj) != MMS_VISIBLE_STRING || !FEP_IS_INT(error) || !FEP_IS_INT(ctlNum)
+        || !FEP_IS_INT(addCause))
+#undef FEP_IS_INT
     {
         if (DEBUG_IED_CLIENT)
             printf("IED_CLIENT: LastApplError has wrong type!\n");

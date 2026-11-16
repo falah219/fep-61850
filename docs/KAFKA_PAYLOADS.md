@@ -338,6 +338,17 @@ Aksi IEC 61850 per `ctlModel` (dibaca dari IED, ditimpa `iec61850_command_formul
 | `CANCEL_RTU` | `cancel` | `cancel` | `cancel` |
 
 `interlock_check` / `synchro_check` dari `iec61850_command_formulas` (tanpa baris = false). `status-only` → ditolak.
+`orCat` = env `CONTROL_OR_CAT` (default 3 = remote-control), bisa ditimpa per titik dengan kolom opsional
+`iec61850_command_formulas.or_cat` (migrations/0008). `ctlNum` dicatat FEP per objek kontrol: SELECT/SBOw dan OPERATE direct
+menaikkan ctlNum, OPERATE SBO dan CANCEL memakai ctlNum yang sama; CANCEL juga membawa ctlVal SELECT terakhir.
+
+Env terkait command:
+
+| Env | Default | Arti |
+|---|---|---|
+| `CONTROL_OR_CAT` | `3` | orCat (0..8) untuk semua command; tidak valid → 3 |
+| `CONTROL_PRECHECK_POSITION` | `false` | `true`: sebelum SELECT titik DPC, baca `stVal` & `q` DO kontrol; posisi 00/11 atau q invalid → ditolak tanpa dikirim ke IED |
+| `CONTROL_DEBUG` | `false` | `true`: log ringkas struktur yang dikirim (ctlModel, ctlVal, origin, ctlNum, Check) + AddCause yang diterima |
 
 Minimal:
 
@@ -500,18 +511,31 @@ Gagal / ditolak (semua dibalas `RTU_COMMAND` `status: "inactive"`, alasan di `ms
 | `value` tidak cocok CDC | mis. `value DPC harus 1 (OPEN) atau 2 (CLOSE), bukan 0`, `value BSC harus 0 (stop), 1 (lower), atau 2 (higher), bukan 5`, `value INC harus bilangan bulat, bukan 1.5` |
 | Objek kontrol tidak ada di IED | `objek kontrol <ref> tidak ditemukan / tidak bisa dibaca` |
 | `ctlModel` status-only | `ctlModel status-only, tidak bisa dikontrol` |
-| IED menolak (negative response) | `<select\|operate\|cancel> gagal: <teks IedClientError atau "ditolak IED"> (LastApplError error=<0..3>, addCause=<kode> (<nama>))` |
-| CommandTermination negatif | `CommandTermination- gagal: ... (LastApplError error=..., addCause=<kode> (<nama>))` |
+| `CONTROL_PRECHECK_POSITION=true` dan posisi tidak valid | `posisi tidak valid di IED (stVal=00 (intermediate), q=INVALID\|FAILURE), SELECT tidak dikirim` |
+| IED menolak (negative response) | `<select\|operate\|cancel> gagal: <teks IedClientError atau "ditolak IED"> (LastApplError error=<0..3>, addCause=<kode> (<nama>), ctlNum=<n>)`. LastApplError diambil dari InformationReport dengan **ctlNum yang sama** (objek kontrol, lalu level koneksi), ditunggu maks 300 ms; tidak ada → `(LastApplError tidak diterima)` |
+| CommandTermination negatif | `CommandTermination- gagal: ... (LastApplError error=..., addCause=<kode> (<nama>), ctlNum=<n>)` |
 | CommandTermination tidak datang | `CommandTermination tidak diterima (timeout)` |
 | Tidak ada hasil dalam 30 detik | `timeout menunggu hasil command` |
 | Thread IED berhenti di tengah | `thread IED berhenti sebelum command selesai` |
 
 #### BROWSE
 
-Handler: [rtu_event/browse.rs](../src/kafka/handlers/rtu_event/browse.rs). Dijalankan di thread IED (antrean yang sama dengan
-COMMAND): LD → LN → DO → FC (`ST`, `MX`, `CO`, `SP`), satu `getVariableSpecification` per LN + FC. Hasil ditunggu maks
-**300 detik**. Selama browse, polling IED itu tertahan (report tetap diterima). Balasan ke `IEC61850_BROWSE_RESPONSE`
-(bagian [3.7](#37-iec61850_browse_response)).
+Handler: [rtu_event/browse.rs](../src/kafka/handlers/rtu_event/browse.rs), browse: [iec61850/browse.rs](../src/iec61850/browse.rs).
+Dijalankan di thread IED **bertahap** (satu LN per langkah, jatah 200 ms per putaran), diselingi polling dan command, dengan
+koneksi MMS yang sama. LD → LN → DO → FC (`ST`, `MX`, `CO`, `SP`):
+
+1. Satu `getVariableSpecification` per LN + FC.
+2. Gagal (mis. `malformed-message`: respons type spec LN terlalu besar untuk PDU atau tidak bisa di-parse libIEC61850) →
+   dicatat di `errors`, lalu struktur LN dibangun dari **GetNameList** (`getLogicalDeviceVariables`, nama MMS `LN$FC$DO$DA`).
+   Tipe `stVal` (untuk CDC) dibaca dari nilainya kalau `BROWSE_READ_VALUES=true` (default).
+3. Objek FC `CO`: `control` (SBOw/Oper/Cancel dari struktur, `ctlModel` & `sboTimeout` dari CF kalau `BROWSE_READ_VALUES`).
+4. RCB tiap LN (`.BR.` / `.RP.`): `RptEna`, `DatSet`, `RptID`, `TrgOps`, `IntgPd`, dan anggota dataset → `rcbs`.
+
+Kegagalan satu LN / DO / RCB **tidak** menggagalkan browse (dicatat di `errors`). Batas total `BROWSE_TIMEOUT_MS`
+(default 300000): tercapai → `SUCCESS` dengan hasil sebagian, `complete: false`. Timeout per request = `request_timeout_ms`.
+Max PDU hasil negosiasi ada di log koneksi (`RTU_LOGGING` `terkoneksi MMS ..., max PDU N`); usulan FEP bisa diatur dengan
+`MMS_MAX_PDU_SIZE`. Debug satu objek: `cargo run --bin varspec -- <host> <port> <LD/LN.DO>` (lihat README).
+Balasan ke `IEC61850_BROWSE_RESPONSE` (bagian [3.7](#37-iec61850_browse_response)).
 
 | Field | Tipe JSON | Wajib | Default | Posisi | Arti |
 |---|---|---|---|---|---|
@@ -545,7 +569,9 @@ COMMAND): LD → LN → DO → FC (`ST`, `MX`, `CO`, `SP`), satu `getVariableSpe
 
 Gagal: tanpa `id_rtu` dan `ip_address` → `FAILED` `id_rtu atau ip_address wajib diisi`; IP tidak cocok IED yang berjalan →
 `FAILED` `RTU tidak ditemukan untuk IP <ip>`; IED tidak berjalan / belum terkoneksi → `FAILED` `IED tidak terkoneksi`;
-lebih dari 300 detik → `FAILED` `timeout menunggu hasil browse`; error MMS → `FAILED` dengan teks error.
+browse lain untuk IED yang sama masih berjalan → `FAILED` `browse lain masih berjalan untuk IED ini`; daftar LD tidak terbaca /
+koneksi putus di tengah → `FAILED` dengan teks error; tidak ada jawaban thread IED dalam `BROWSE_TIMEOUT_MS` + 30 detik →
+`FAILED` `timeout menunggu hasil browse`.
 
 ### 2.2 `MASTER_DATAPOINT_EVENT`
 
@@ -1260,7 +1286,7 @@ Tiga jenis isi `logging`:
 
 | Pesan | Level |
 |---|---|
-| `terkoneksi MMS <ip>:<port> mode <REPORT\|POLLING\|HYBRID>` | INFO |
+| `terkoneksi MMS <ip>:<port> mode <REPORT\|POLLING\|HYBRID>, max PDU <n>[ (diminta <MMS_MAX_PDU_SIZE>)]` | INFO |
 | `koneksi MMS terputus` | WARN |
 | `gagal konek MMS: <error>` (sekali per rangkaian gagal) | ERROR |
 | `berhenti reconnect, batas percobaan tercapai` | ERROR |
@@ -1309,7 +1335,7 @@ Command yang ditolak FEP **sebelum** dikirim (value tidak cocok CDC, `value` kos
   "ip_address": "10.10.1.21",
   "protocol": "IEC61850",
   "id_rtu": 9001,
-  "logging": "[INFO] terkoneksi MMS 10.10.1.21:102 mode REPORT",
+  "logging": "[INFO] terkoneksi MMS 10.10.1.21:102 mode REPORT, max PDU 65000",
   "time": 1794711845123
 }
 ```
@@ -1458,6 +1484,18 @@ Command yang ditolak FEP **sebelum** dikirim (value tidak cocok CDC, `value` kos
 }
 ```
 
+`docs/examples/produce/RTU_LOGGING__control_rejected_position.json`
+
+```json
+{
+  "ip_address": "10.10.1.21",
+  "protocol": "IEC61850",
+  "id_rtu": 9001,
+  "logging": "[ERROR] CONTROL SELECT BaselineLD0/XSWI1.Pos tidak dikirim: posisi tidak valid di IED (stVal=00 (intermediate), q=INVALID|FAILURE), SELECT tidak dikirim",
+  "time": 1794711845123
+}
+```
+
 ### 3.4 Urutan pesan satu command (SBO normal, sukses)
 
 ```text
@@ -1545,7 +1583,7 @@ Ditolak IED dengan AddCause 10 (`blocked-by-interlocking`):
   "qualifier": 0,
   "event": "OPERATE",
   "status": "inactive",
-  "msg": "OPERATE failed: operate gagal: ditolak IED (LastApplError error=1, addCause=10 (blocked-by-interlocking)) - RTU status is Inactive",
+  "msg": "OPERATE failed: operate gagal: ditolak IED (LastApplError error=1, addCause=10 (blocked-by-interlocking), ctlNum=5) - RTU status is Inactive",
   "key": "cmd-20261115-0001",
   "time": 1794711845123
 }
@@ -1585,6 +1623,27 @@ Ditolak IED dengan AddCause 10 (`blocked-by-interlocking`):
   "status": "inactive",
   "msg": "OPERATE failed: IED tidak terkoneksi - RTU status is Inactive",
   "key": "cmd-20261115-0001",
+  "time": 1794711845123
+}
+```
+
+Ditolak FEP sebelum dikirim karena posisi saklar tidak valid (`CONTROL_PRECHECK_POSITION=true`, kasus 00 + `INVALID|FAILURE`):
+
+`docs/examples/produce/RTU_COMMAND__inactive_precheck_position.json`
+
+```json
+{
+  "hostname": "192.168.212.14",
+  "port": 102,
+  "protocol": "IEC61850",
+  "tag": "BAY1_CB_3005",
+  "command_type": "DPC",
+  "command_value": 2,
+  "qualifier": 0,
+  "event": "SELECT",
+  "status": "inactive",
+  "msg": "SELECT failed: posisi tidak valid di IED (stVal=00 (intermediate), q=INVALID|FAILURE), SELECT tidak dikirim - RTU status is Inactive",
+  "key": "cmd-20261117-0001",
   "time": 1794711845123
 }
 ```
@@ -1671,11 +1730,15 @@ Dibuat di [rtu_event/browse.rs](../src/kafka/handlers/rtu_event/browse.rs). Key 
 | `key` | string | `key` payload (`""` kalau tidak ada) |
 | `id_rtu` | integer / null | `id_rtu` payload (`null` kalau tidak diisi) |
 | `status` | string | `SUCCESS` / `FAILED` |
-| `message` | string | SUCCESS: `<total> objek` (jumlah semua bagian); FAILED: alasan |
+| `message` | string | SUCCESS: `<total> objek` (jumlah semua bagian), `, <n> node gagal (lihat errors)` kalau ada error, `, belum lengkap (BROWSE_TIMEOUT_MS)` kalau batas waktu tercapai; FAILED: alasan |
 | `objects` | array | Objek di bagian ini (`[]` kalau FAILED) |
 | `objects[].object_reference` | string | `LD/LN.DO` atau `LD/LN.DO.SDO` (untuk `master_datapoint_iec61850s.object_reference`) |
 | `objects[].fc` | string | `ST`, `MX`, `CO`, `SP` |
-| `objects[].cdc` | string / null | CDC tebakan dari struktur DO: `SPS DPS INS SPC DPC INC ACT ACD BCR BSC APC MV CMV`; `null` = tidak dikenali. ENS/ENC terbaca INS/INC |
+| `objects[].cdc` | string / null | CDC tebakan dari struktur DO: `SPS DPS INS SPC DPC INC ACT ACD BCR BSC APC MV CMV`; `null` = tidak dikenali (juga fallback GetNameList dengan `BROWSE_READ_VALUES=false`). ENS/ENC terbaca INS/INC |
+| `objects[].control` | object | **Opsional**, hanya objek FC `CO`: `ctl_model` (teks kolom `ctl_model`, null = tidak dibaca), `sbo_timeout_ms` (CF `sboTimeout`, null = tidak ada), `sbow` / `oper` / `cancel` (boolean: ada di struktur CO) |
+| `errors` | array | **Opsional** (bagian 1, kalau ada): `[{ref, error}]` node yang gagal (`LD/LN[FC]`, `LD/LN.DO.stVal[ST]`, `LD/LN.BR.rcb`, ...) |
+| `rcbs` | array | **Opsional** (bagian 1, kalau ada): `reference`, `buffered`, `rpt_id`, `rpt_ena`, `dataset` (ACSI `LD/LN.DS`), `trg_ops` (format kolom `trg_ops`), `intg_pd_ms`, `members` (anggota dataset `LD/LN.DO.DA[FC]`) |
+| `complete` | boolean | **Opsional**: hanya ada (`false`) kalau `BROWSE_TIMEOUT_MS` tercapai sebelum semua LN dibrowse |
 | `part` | integer | Nomor bagian, mulai 1 |
 | `total_parts` | integer | Jumlah bagian |
 
@@ -1766,6 +1829,67 @@ Multi-part (di sini dibagi dengan batas kecil supaya contoh pendek; FEP memakai 
   ],
   "part": 2,
   "total_parts": 2
+}
+```
+
+Fallback GetNameList + info kontrol & RCB (**bentuk contoh**, nama objek ilustrasi untuk IED seperti Schneider Baseline
+yang `getVariableSpecification`-nya gagal `malformed-message`):
+
+`docs/examples/produce/IEC61850_BROWSE_RESPONSE__fallback.json`
+
+```json
+{
+  "key": "browse-9302-01",
+  "id_rtu": 9302,
+  "status": "SUCCESS",
+  "message": "3 objek, 1 node gagal (lihat errors)",
+  "objects": [
+    {
+      "object_reference": "BaselineLD0/XSWI1.OpCnt",
+      "fc": "ST",
+      "cdc": "INS"
+    },
+    {
+      "object_reference": "BaselineLD0/XSWI1.Pos",
+      "fc": "ST",
+      "cdc": "DPC"
+    },
+    {
+      "object_reference": "BaselineLD0/XSWI1.Pos",
+      "fc": "CO",
+      "cdc": "DPC",
+      "control": {
+        "ctl_model": "sbo-with-enhanced-security",
+        "sbo_timeout_ms": 30000,
+        "sbow": true,
+        "oper": true,
+        "cancel": true
+      }
+    }
+  ],
+  "part": 1,
+  "total_parts": 1,
+  "errors": [
+    {
+      "ref": "BaselineLD0/XSWI1[ST]",
+      "error": "getVariableSpecification: malformed-message; pakai GetNameList"
+    }
+  ],
+  "rcbs": [
+    {
+      "reference": "BaselineLD0/LLN0.BR.brcbST01",
+      "buffered": true,
+      "rpt_id": "BaselineLD0/LLN0$BR$brcbST01",
+      "rpt_ena": false,
+      "dataset": "BaselineLD0/LLN0.dsStatus",
+      "trg_ops": "dchg,qchg,gi",
+      "intg_pd_ms": 0,
+      "members": [
+        "BaselineLD0/XSWI1.Pos.stVal[ST]",
+        "BaselineLD0/XSWI1.Pos.q[ST]"
+      ]
+    }
+  ]
 }
 ```
 

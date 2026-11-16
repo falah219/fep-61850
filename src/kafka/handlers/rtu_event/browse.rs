@@ -1,5 +1,6 @@
 //! Event BROWSE (RTU_EVENTS): browse model IED di thread IED -> IEC61850_BROWSE_RESPONSE.
 //! IED besar bisa ribuan objek -> dikirim per bagian (`part` 1..=`total_parts`) maks ~900 KB.
+//! `errors` / `rcbs` (opsional) hanya di bagian 1.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -12,15 +13,19 @@ use tracing::{info, warn};
 
 use crate::connection::Manager;
 use crate::iec61850::acquisition::Ctl;
-use crate::iec61850::browse::BrowseObject;
+use crate::iec61850::browse::{browse_timeout, BrowseError, BrowseObject, BrowseResult, RcbInfo};
 use crate::kafka::event_handler::data_id_rtu;
 use crate::kafka::models::RtuEventMessage;
 use crate::kafka::TOPIC_BROWSE_RESPONSE;
 
-/// Browse = beberapa request MMS per LN; IED besar bisa butuh lama.
-const BROWSE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Di atas BROWSE_TIMEOUT_MS: thread IED membalas hasil sebagian sendiri saat batas waktunya tercapai.
+const REPLY_MARGIN: Duration = Duration::from_secs(30);
 /// Di bawah batas default Kafka 1 MB (message.max.bytes), sisa untuk field lain.
 const MAX_PART_BYTES: usize = 900 * 1024;
+
+fn is_empty<T>(s: &&[T]) -> bool {
+    s.is_empty()
+}
 
 #[derive(Debug, Serialize)]
 struct BrowseResponse<'a> {
@@ -31,6 +36,15 @@ struct BrowseResponse<'a> {
     objects: &'a [BrowseObject],
     part: usize,
     total_parts: usize,
+    /// Node yang gagal dibrowse (bagian 1 saja)
+    #[serde(skip_serializing_if = "is_empty")]
+    errors: &'a [BrowseError],
+    /// RCB + anggota dataset (bagian 1 saja)
+    #[serde(skip_serializing_if = "is_empty")]
+    rcbs: &'a [RcbInfo],
+    /// Hanya ada (false) kalau BROWSE_TIMEOUT_MS tercapai sebelum semua LN dibrowse
+    #[serde(skip_serializing_if = "Option::is_none")]
+    complete: Option<bool>,
 }
 
 /// Bagian SINKRON: kirim ke antrean thread IED. Future (tunggu + kirim respons) boleh di-spawn.
@@ -52,7 +66,7 @@ pub fn submit(mgr: &Arc<Manager>, m: RtuEventMessage) -> impl Future<Output = ()
     let mgr = Arc::clone(mgr);
     async move {
         let result = match queued {
-            Ok(rx) => match tokio::time::timeout(BROWSE_TIMEOUT, rx).await {
+            Ok(rx) => match tokio::time::timeout(browse_timeout() + REPLY_MARGIN, rx).await {
                 Ok(Ok(r)) => r,
                 Ok(Err(_)) => Err("thread IED berhenti sebelum browse selesai".into()),
                 Err(_) => Err("timeout menunggu hasil browse".into()),
@@ -67,22 +81,45 @@ pub fn submit(mgr: &Arc<Manager>, m: RtuEventMessage) -> impl Future<Output = ()
 }
 
 /// Pesan respons (satu atau lebih bagian, tiap bagian <= `limit` byte objek) sebagai JSON.
-fn responses(key: &str, id_rtu: Option<i32>, result: &Result<Vec<BrowseObject>, String>, limit: usize) -> Vec<Value> {
-    let (status, message, objects): (_, String, &[BrowseObject]) = match result {
-        Ok(o) => ("SUCCESS", format!("{} objek", o.len()), o),
+fn responses(key: &str, id_rtu: Option<i32>, result: &Result<BrowseResult, String>, limit: usize) -> Vec<Value> {
+    let empty = BrowseResult::default();
+    let (status, message, r) = match result {
+        Ok(r) => {
+            let mut m = format!("{} objek", r.objects.len());
+            if !r.errors.is_empty() {
+                m.push_str(&format!(", {} node gagal (lihat errors)", r.errors.len()));
+            }
+            if !r.complete {
+                m.push_str(", belum lengkap (BROWSE_TIMEOUT_MS)");
+            }
+            ("SUCCESS", m, r)
+        }
         Err(e) => {
             warn!("[BROWSE] id_rtu={id_rtu:?} gagal: {e}");
-            ("FAILED", e.clone(), &[])
+            ("FAILED", e.clone(), &empty)
         }
     };
-    let parts = split_parts(objects, limit);
+    let complete = (status == "SUCCESS" && !r.complete).then_some(false);
+    let parts = split_parts(&r.objects, limit);
     let total_parts = parts.len();
     parts
         .iter()
         .enumerate()
         .map(|(i, objects)| {
-            let r = BrowseResponse { key, id_rtu, status, message: &message, objects, part: i + 1, total_parts };
-            serde_json::to_value(r).unwrap_or(Value::Null)
+            let first = i == 0;
+            let resp = BrowseResponse {
+                key,
+                id_rtu,
+                status,
+                message: &message,
+                objects,
+                part: i + 1,
+                total_parts,
+                errors: if first { r.errors.as_slice() } else { &[] },
+                rcbs: if first { r.rcbs.as_slice() } else { &[] },
+                complete,
+            };
+            serde_json::to_value(resp).unwrap_or(Value::Null)
         })
         .collect()
 }
@@ -109,7 +146,11 @@ mod tests {
     use super::*;
 
     fn obj(i: usize) -> BrowseObject {
-        BrowseObject { object_reference: format!("LD/GGIO1.Ind{i}"), fc: "ST".into(), cdc: Some("SPS".into()) }
+        BrowseObject { object_reference: format!("LD/GGIO1.Ind{i}"), fc: "ST".into(), cdc: Some("SPS".into()), control: None }
+    }
+
+    fn ok(objects: Vec<BrowseObject>) -> Result<BrowseResult, String> {
+        Ok(BrowseResult { objects, complete: true, ..Default::default() })
     }
 
     #[test]
@@ -132,40 +173,59 @@ mod tests {
         assert_eq!(r[0]["message"], "IED tidak terkoneksi");
         assert_eq!(r[0]["objects"], serde_json::json!([]));
         assert_eq!((r[0]["part"].as_u64(), r[0]["total_parts"].as_u64()), (Some(1), Some(1)));
+        // field opsional tidak muncul
+        assert!(r[0].get("errors").is_none() && r[0].get("rcbs").is_none() && r[0].get("complete").is_none());
 
-        let r = responses("k2", Some(9001), &Ok(vec![obj(1)]), MAX_PART_BYTES);
+        let r = responses("k2", Some(9001), &ok(vec![obj(1)]), MAX_PART_BYTES);
         assert_eq!(r[0]["status"], "SUCCESS");
         assert_eq!(r[0]["objects"][0]["object_reference"], "LD/GGIO1.Ind1");
         assert_eq!(r[0]["objects"][0]["cdc"], "SPS");
+        assert!(r[0]["objects"][0].get("control").is_none());
+    }
+
+    #[test]
+    fn errors_rcbs_hanya_di_bagian_pertama_dan_belum_lengkap() {
+        let res = Ok(BrowseResult {
+            objects: (0..4).map(obj).collect(),
+            errors: vec![BrowseError { reference: "LD/XSWI1[ST]".into(), error: "malformed-message".into() }],
+            rcbs: vec![RcbInfo { reference: "LD/LLN0.BR.brcbST01".into(), ..Default::default() }],
+            complete: false,
+        });
+        let r = responses("k3", Some(9302), &res, 160);
+        assert!(r.len() > 1);
+        assert_eq!(r[0]["errors"][0]["ref"], "LD/XSWI1[ST]");
+        assert_eq!(r[0]["rcbs"][0]["reference"], "LD/LLN0.BR.brcbST01");
+        assert!(r[1].get("errors").is_none() && r[1].get("rcbs").is_none());
+        assert!(r.iter().all(|p| p["complete"] == false));
+        assert_eq!(r[0]["message"], "4 objek, 1 node gagal (lihat errors), belum lengkap (BROWSE_TIMEOUT_MS)");
+    }
+
+    fn field<T: serde::de::DeserializeOwned>(v: &Value, k: &str) -> Vec<T> {
+        v.get(k).cloned().map_or_else(Vec::new, |x| serde_json::from_value(x).unwrap())
     }
 
     /// Contoh IEC61850_BROWSE_RESPONSE di docs/examples/produce = keluaran responses().
     #[test]
     fn contoh_dokumen_browse() {
-        use crate::kafka::payload_examples::{examples_of, str_of};
+        use crate::kafka::payload_examples::{examples_of, int_of, str_of};
         let ex: std::collections::BTreeMap<String, Value> = examples_of("produce", TOPIC_BROWSE_RESPONSE).into_iter().collect();
-        assert_eq!(ex.len(), 4, "contoh BROWSE baru: tambahkan di test ini");
         let get = |n: &str| ex.get(&format!("{TOPIC_BROWSE_RESPONSE}__{n}")).cloned().unwrap_or_else(|| panic!("contoh {n}"));
-        let objs = |v: &Value| -> Vec<BrowseObject> {
-            v["objects"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|o| BrowseObject {
-                    object_reference: str_of(o, "object_reference").into(),
-                    fc: str_of(o, "fc").into(),
-                    cdc: o["cdc"].as_str().map(String::from),
-                })
-                .collect()
+        let result = |v: &Value| -> Result<BrowseResult, String> {
+            if str_of(v, "status") == "FAILED" {
+                return Err(str_of(v, "message").into());
+            }
+            let complete = v.get("complete").and_then(Value::as_bool).unwrap_or(true);
+            Ok(BrowseResult { objects: field(v, "objects"), errors: field(v, "errors"), rcbs: field(v, "rcbs"), complete })
         };
-        let s = get("success");
-        assert_eq!(responses("browse-9001-01", Some(9001), &Ok(objs(&s)), MAX_PART_BYTES), vec![s]);
+        // semua contoh satu bagian
+        for (name, v) in ex.iter().filter(|(_, v)| v["total_parts"] == 1) {
+            let id = Some(int_of(v, "id_rtu") as i32);
+            assert_eq!(responses(str_of(v, "key"), id, &result(v), MAX_PART_BYTES), vec![v.clone()], "{name}");
+        }
         // multi-part dengan batas kecil supaya contoh pendek (FEP memakai MAX_PART_BYTES)
         let (p1, p2) = (get("multipart_1"), get("multipart_2"));
-        let all: Vec<_> = objs(&p1).into_iter().chain(objs(&p2)).collect();
-        assert_eq!(responses("browse-9001-02", Some(9001), &Ok(all), 160), vec![p1, p2]);
-        let f = get("failed");
-        assert_eq!(responses("browse-9002-01", Some(9002), &Err("IED tidak terkoneksi".into()), MAX_PART_BYTES), vec![f]);
+        let all: Vec<BrowseObject> = field(&p1, "objects").into_iter().chain(field(&p2, "objects")).collect();
+        assert_eq!(responses("browse-9001-02", Some(9001), &ok(all), 160), vec![p1, p2]);
     }
 
     #[tokio::test]
@@ -178,7 +238,7 @@ mod tests {
                 match ctl {
                     Ctl::Browse(reply) => {
                         let _ = seen_tx.send(());
-                        let _ = reply.send(Ok(vec![]));
+                        let _ = reply.send(ok(vec![]));
                     }
                     Ctl::Stop => break,
                     _ => {}

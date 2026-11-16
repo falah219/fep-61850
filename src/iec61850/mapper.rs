@@ -116,6 +116,22 @@ pub fn parse_trg_ops(s: &str) -> Result<Option<i32>, String> {
     Ok((bits != 0).then_some(bits as i32))
 }
 
+/// Bitmask TrgOps -> teks format kolom `trg_ops` (`dchg,qchg,dupd,integrity,gi`). Kebalikan `parse_trg_ops`.
+pub fn trg_ops_text(bits: i32) -> String {
+    [
+        (ffi::TRG_OPT_DATA_CHANGED, "dchg"),
+        (ffi::TRG_OPT_QUALITY_CHANGED, "qchg"),
+        (ffi::TRG_OPT_DATA_UPDATE, "dupd"),
+        (ffi::TRG_OPT_INTEGRITY, "integrity"),
+        (ffi::TRG_OPT_GI, "gi"),
+    ]
+    .into_iter()
+    .filter(|(b, _)| bits as u32 & b != 0)
+    .map(|(_, n)| n)
+    .collect::<Vec<_>>()
+    .join(",")
+}
+
 pub fn float_value(v: f64) -> Value {
     serde_json::Number::from_f64(v).map_or(Value::Null, Value::Number)
 }
@@ -214,5 +230,8 @@ mod tests {
         assert_eq!(parse_trg_ops("dchg,qchg,integrity,gi"), Ok(Some(1 | 2 | 8 | 16)));
         assert_eq!(parse_trg_ops(""), Ok(None));
         assert!(parse_trg_ops("xyz").is_err());
+        assert_eq!(trg_ops_text(1 | 2 | 8 | 16), "dchg,qchg,integrity,gi");
+        assert_eq!(trg_ops_text(0), "");
+        assert_eq!(parse_trg_ops(&trg_ops_text(1 | 4 | 16)), Ok(Some(1 | 4 | 16)));
     }
 }

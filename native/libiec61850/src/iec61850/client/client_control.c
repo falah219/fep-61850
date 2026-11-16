@@ -1167,6 +1167,17 @@ createCancelParameters(ControlObjectClient self)
     return cancelParameters;
 }
 
+/* fep-iec61850: ctlVal yang dibawa Cancel = nilai SELECT terakhir, juga kalau SELECT ditolak IED
+ * (aslinya self->ctlVal hanya diperbarui setelah select/operate sukses). */
+bool
+ControlObjectClient_setLastCtlVal(ControlObjectClient self, MmsValue* ctlVal)
+{
+    if ((self == NULL) || (self->ctlVal == NULL) || (ctlVal == NULL))
+        return false;
+
+    return MmsValue_update(self->ctlVal, ctlVal);
+}
+
 bool
 ControlObjectClient_cancel(ControlObjectClient self)
 {

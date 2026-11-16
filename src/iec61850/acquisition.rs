@@ -21,7 +21,7 @@ use super::callbacks::report::{on_report, ReportCtx};
 use super::mapper::{mms_quality, mms_time, mms_to_json};
 use super::mapping::split_fc;
 use crate::connection::ConnectGate;
-use super::browse::{browse, BrowseObject};
+use super::browse::{ctl_model_name, BrowseJob, BrowseOptions, BrowseResult};
 use super::traffic::{self, TrafficLog};
 use crate::domain::{ctl_value, CommandAction, CommandJob, CommandReq, CtlVal, Point, PointState, RtuConfig};
 use crate::error::Result;
@@ -268,11 +268,14 @@ pub enum Ctl {
     Wake,
     /// Select / operate / cancel (event COMMAND). Hasil dikirim lewat `reply`.
     Command(Box<CommandJob>),
-    /// Browse model IED (event BROWSE). Thread IED tertahan selama browse (report tetap masuk antrean library).
+    /// Browse model IED (event BROWSE). Dikerjakan bertahap (satu LN per langkah, diselingi polling).
     Browse(BrowseReply),
 }
 
-pub type BrowseReply = tokio::sync::oneshot::Sender<std::result::Result<Vec<BrowseObject>, String>>;
+pub type BrowseReply = tokio::sync::oneshot::Sender<std::result::Result<BrowseResult, String>>;
+
+/// Jatah waktu browse per putaran loop sesi, supaya polling / command tetap jalan selama browse.
+const BROWSE_SLICE: Duration = Duration::from_millis(200);
 
 pub(crate) enum End {
     /// Diminta berhenti lewat Ctl::Stop
@@ -319,7 +322,12 @@ pub(crate) fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End> {
     };
     ctx.connected.store(true, Ordering::SeqCst);
     producer.send_status(&r.ip_address, r.id_rtu, 1);
-    let msg = format!("terkoneksi MMS {}:{} mode {}", r.ip_address, r.port, r.acquisition_mode);
+    // max PDU hasil negosiasi initiate (MMS_MAX_PDU_SIZE = usulan FEP, IED bisa menjawab lebih kecil)
+    let pdu = match crate::iec61850::client::max_pdu_from_env() {
+        Some(asked) => format!("max PDU {} (diminta {asked})", ied.max_pdu_size()),
+        None => format!("max PDU {}", ied.max_pdu_size()),
+    };
+    let msg = format!("terkoneksi MMS {}:{} mode {}, {pdu}", r.ip_address, r.port, r.acquisition_mode);
     producer.send_log(&r.ip_address, r.id_rtu, "INFO", &msg);
     info!(id_rtu = r.id_rtu, "{msg}");
 
@@ -382,6 +390,7 @@ pub(crate) fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End> {
     let mut gi_poll = false;
     let mut sent: Vec<Option<PointState>> = vec![None; ctx.points.len()];
     let mut controls: HashMap<i32, Control> = HashMap::new();
+    let mut browse_job: Option<(BrowseJob, BrowseReply)> = None;
 
     loop {
         let gi_due = last_gi.is_none_or(|t| gi_every.is_some_and(|every| t.elapsed() >= every));
@@ -436,10 +445,26 @@ pub(crate) fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End> {
             }
         }
 
+        if let Some((job, _)) = browse_job.as_mut() {
+            let slice_end = Instant::now() + BROWSE_SLICE;
+            let mut done = Ok(false);
+            while matches!(done, Ok(false)) && Instant::now() < slice_end {
+                done = job.step(&ied);
+            }
+            if !matches!(done, Ok(false)) {
+                if let Some((job, reply)) = browse_job.take() {
+                    info!(id_rtu = r.id_rtu, "browse selesai");
+                    let _ = reply.send(done.map(|_| job.finish()).map_err(|e| e.to_string()));
+                }
+            }
+        }
+
         if !ied.is_connected() || ied.lost() {
             return Ok(End::Disconnected);
         }
-        let wait = if groups.is_empty() {
+        let wait = if browse_job.is_some() {
+            Duration::ZERO
+        } else if groups.is_empty() {
             Duration::from_millis(200)
         } else {
             next_poll.saturating_duration_since(Instant::now()).min(Duration::from_millis(200))
@@ -462,9 +487,17 @@ pub(crate) fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End> {
                 producer.send_log(&r.ip_address, r.id_rtu, if result.is_ok() { "INFO" } else { "WARN" }, &msg);
                 let _ = job.reply.send(result.map_err(|e| e.to_string()));
             }
+            Ok(Ctl::Browse(reply)) if browse_job.is_some() => {
+                let _ = reply.send(Err("browse lain masih berjalan untuk IED ini".into()));
+            }
             Ok(Ctl::Browse(reply)) => {
                 info!(id_rtu = r.id_rtu, "browse model IED");
-                let _ = reply.send(browse(&ied).map_err(|e| e.to_string()));
+                match BrowseJob::start(&ied, BrowseOptions::from_env()) {
+                    Ok(job) => browse_job = Some((job, reply)),
+                    Err(e) => {
+                        let _ = reply.send(Err(e.to_string()));
+                    }
+                }
             }
             Ok(Ctl::Wake) | Err(RecvTimeoutError::Timeout) => {}
         }
@@ -484,6 +517,38 @@ fn send_gi(ied: &Ied, ctx: &RtuCtx, rcb: &Rcb) {
 /// false = tidak ada request MMS: SELECT pada ctlModel direct (operate langsung tanpa select).
 fn sends_request(action: CommandAction, model: ffi::ControlModel) -> bool {
     !(action == CommandAction::Select && matches!(model, ffi::CONTROL_MODEL_DIRECT_NORMAL | ffi::CONTROL_MODEL_DIRECT_ENHANCED))
+}
+
+/// stVal (Dbpos) & q DO kontrol, untuk CONTROL_PRECHECK_POSITION. Gagal baca -> None (tidak memblok command).
+fn read_position(ied: &Ied, ctx: &RtuCtx, reference: &str) -> (Option<i32>, Option<u16>) {
+    let read = |attr: &str| {
+        let c = CString::new(format!("{reference}.{attr}")).ok()?;
+        match ied.read_object(&c, ffi::IEC61850_FC_ST) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                warn!(id_rtu = ctx.rtu.id_rtu, "precheck posisi: baca {reference}.{attr} gagal: {e}");
+                None
+            }
+        }
+    };
+    (read("stVal").and_then(|v| v.dbpos()), read("q").and_then(|v| v.quality()))
+}
+
+/// Posisi tidak valid = q invalid atau stVal 00 (intermediate) / 11 (bad-state). Nilai yang tidak terbaca tidak memblok.
+fn check_position(stval: Option<i32>, q: Option<u16>) -> std::result::Result<(), String> {
+    let invalid = q.is_some_and(|q| q & 0b11 == ffi::QUALITY_VALIDITY_INVALID as u16);
+    if !invalid && !matches!(stval, Some(0 | 3)) {
+        return Ok(());
+    }
+    let pos = match stval {
+        Some(0) => "00 (intermediate)",
+        Some(1) => "01 (off)",
+        Some(2) => "10 (on)",
+        Some(3) => "11 (bad-state)",
+        _ => "tidak terbaca",
+    };
+    let q = q.map_or_else(|| "tidak terbaca".to_string(), |q| super::mapper::quality_flag(Some(q), None));
+    Err(format!("posisi tidak valid di IED (stVal={pos}, q={q}), SELECT tidak dikirim"))
 }
 
 /// Command ditolak FEP sebelum ada request ke IED: baris `[ERROR]` di RTU_LOGGING (bukan CONTROL TX).
@@ -510,7 +575,8 @@ fn execute_command(ied: &Ied, ctx: &RtuCtx, controls: &mut HashMap<i32, Control>
             e.insert(ctl)
         }
     };
-    ctl.prepare(&req.or_ident, p.interlock_check, p.synchro_check)?;
+    let or_cat = p.or_cat.unwrap_or(ctx.rtu.control_or_cat);
+    ctl.prepare(&req.or_ident, or_cat, p.interlock_check, p.synchro_check)?;
 
     let action = req.action.as_str();
     let r = &p.object_reference;
@@ -530,13 +596,39 @@ fn execute_command(ied: &Ied, ctx: &RtuCtx, controls: &mut HashMap<i32, Control>
         ctx.log_control(&traffic::control_skip(action, r));
         return Ok(());
     }
+    // CONTROL_PRECHECK_POSITION: posisi DPC tidak valid di IED -> tolak tanpa mengirim ke perangkat
+    if req.action == CommandAction::Select && ctx.rtu.precheck_position && p.cdc == "DPC" {
+        let (stval, q) = read_position(ied, ctx, r);
+        if let Err(e) = check_position(stval, q) {
+            return Err(control_rejected(ctx, action, r, e));
+        }
+    }
     let owned = val.map(|v| match v {
         CtlVal::Bool(b) => OwnedValue::boolean(b),
         CtlVal::Int(i) => OwnedValue::int32(i),
         CtlVal::Float(f) => OwnedValue::float(f),
         CtlVal::Tcmd(t) => OwnedValue::tcmd(t),
     });
-    ctx.log_control(&traffic::control_tx(action, r, val.map(traffic::ctl_val_text).as_deref(), &req.or_ident));
+    let ctl_text = val.map(traffic::ctl_val_text);
+    if ctx.rtu.control_debug {
+        let sbo = matches!(model, ffi::CONTROL_MODEL_SBO_NORMAL | ffi::CONTROL_MODEL_SBO_ENHANCED);
+        let increments = match req.action {
+            CommandAction::Select => true,
+            CommandAction::Operate => !sbo,
+            CommandAction::Cancel => false,
+        };
+        info!(
+            id_rtu = ctx.rtu.id_rtu,
+            "CONTROL DEBUG {action} {r}: ctlModel={} ctlVal={} origin{{orCat={or_cat}, orIdent={}}} ctlNum={} Check{{interlock={}, synchro={}}} Test=false",
+            ctl_model_name(model as i64),
+            ctl_text.as_deref().unwrap_or("(nilai SELECT terakhir)"),
+            req.or_ident,
+            ctl.next_ctl_num(increments),
+            p.interlock_check,
+            p.synchro_check,
+        );
+    }
+    ctx.log_control(&traffic::control_tx(action, r, ctl_text.as_deref(), &req.or_ident));
     // Ok(true) = operate enhanced security: CommandTermination masih ditunggu
     let sent = match (req.action, &owned) {
         (CommandAction::Select, Some(v)) => ctl.select(v).map(|()| false),
@@ -563,6 +655,9 @@ fn execute_command(ied: &Ied, ctx: &RtuCtx, controls: &mut HashMap<i32, Control>
         Ok(false) => Ok(()),
         Err(e) => Err(e),
     };
+    if ctx.rtu.control_debug && result.is_err() {
+        info!(id_rtu = ctx.rtu.id_rtu, "CONTROL DEBUG {action} {r}: ctlNum={} AddCause={}", ctl.ctl_num(), traffic::add_cause_name(ctl.add_cause()));
+    }
     if result.is_ok() {
         ied.touch();
     } else if ctl.connection_lost() {
@@ -745,6 +840,19 @@ mod tests {
     use serde_json::{json, Value};
 
     #[test]
+    fn precheck_posisi() {
+        let invalid_failure = 2 | ffi::QUALITY_DETAIL_FAILURE as u16;
+        // temuan pcap: posisi 00 + q INVALID|FAILURE -> ditolak sebelum dikirim
+        let e = check_position(Some(0), Some(invalid_failure)).unwrap_err();
+        assert!(e.contains("stVal=00 (intermediate)") && e.contains("INVALID|FAILURE"), "{e}");
+        assert!(check_position(Some(3), Some(0)).is_err());
+        assert!(check_position(Some(2), Some(2)).is_err()); // q invalid
+        assert!(check_position(Some(1), Some(0)).is_ok());
+        assert!(check_position(Some(2), None).is_ok());
+        assert!(check_position(None, None).is_ok()); // tidak terbaca: tidak memblok
+    }
+
+    #[test]
     fn select_direct_tanpa_request() {
         use ffi::{CONTROL_MODEL_DIRECT_ENHANCED, CONTROL_MODEL_DIRECT_NORMAL, CONTROL_MODEL_SBO_ENHANCED, CONTROL_MODEL_SBO_NORMAL};
         assert!(!sends_request(CommandAction::Select, CONTROL_MODEL_DIRECT_NORMAL));
@@ -857,6 +965,7 @@ mod tests {
             interlock_check: false,
             synchro_check: false,
             deadband: None,
+            or_cat: None,
         };
         let rcb = |r: &str| (r.to_string(), RcbSettings::default());
         assert_eq!(probe_reference(&[pt("BAY1LD0/XCBR1.Pos")], &[rcb("X/LLN0.BR.b")]).as_deref(), Some("BAY1LD0/LLN0.Mod.stVal"));
