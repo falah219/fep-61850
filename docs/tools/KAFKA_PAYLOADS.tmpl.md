@@ -522,7 +522,7 @@ bergeser, dicek test `rtu_datas_sama_bentuk_dengan_sampel_iec104`).
 | `group` | string | `master_data_objects.id_group` (UUID) untuk `initial` = CDC dan `protocol = 'IEC61850'`; `""` kalau tidak ada. Sama dengan FEP IEC 104 (lihat sampel di bagian 4) |
 | `general_action` | integer / null | `master_general_actions.code` **apa adanya** untuk `name_action` = `action` (`protocol = 'IEC61850'`); `null` kalau tidak ada |
 | `source` | string | **Tambahan IEC 61850.** `REPORT` = dari report RCB; `POLLING` = dari polling, termasuk polling penuh karena event GI dan siklus integrity polling |
-| `rcb` | string / null | **Tambahan IEC 61850.** `rcb_reference` lengkap RCB yang **mengirim** report ini (format `iec61850_report_controls.rcb_reference`: `LD/LLN0.BR.<nama>` / `LD/LLN0.RP.<nama>`); `null` untuk `POLLING` |
+| `rcb` | string / null | **Tambahan IEC 61850.** `rcb_reference` lengkap RCB yang **mengirim** report ini : nilai kolom `iec61850_report_controls.rcb_reference` **apa adanya** (`LD/LLN0.BR.<nama>` / `LD/LLN0.RP.<nama>`, bukan format MMS `LLN0$BR$...`), jadi bisa langsung di-join ke tabel itu; `null` untuk `POLLING` |
 | `time` | integer | ms epoch UTC |
 | `time_desc` | string | `RTU` atau `SERVER` |
 

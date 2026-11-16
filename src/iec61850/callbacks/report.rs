@@ -24,6 +24,14 @@ pub(crate) struct ReportCtx {
     pub(crate) alive: Arc<Liveness>,
 }
 
+impl ReportCtx {
+    /// `source`/`rcb` pesan dari report ini: RCB yang MENERIMA report (konteks callback), bukan tebakan dari
+    /// dataset. `rcb_ref` = `iec61850_report_controls.rcb_reference` apa adanya (bukan format MMS `LLN0$BR$...`).
+    pub(crate) fn origin(&self) -> Origin<'_> {
+        Origin::Report { rcb: &self.rcb_ref }
+    }
+}
+
 pub(crate) unsafe extern "C" fn on_report(param: *mut c_void, report: ffi::ClientReport) {
     // Panic tidak boleh menyeberang ke C.
     let res = catch_unwind(AssertUnwindSafe(|| {
@@ -67,9 +75,8 @@ pub(crate) unsafe extern "C" fn on_report(param: *mut c_void, report: ffi::Clien
         let entry_time = unsafe { ffi::ClientReport_hasTimestamp(report) }
             .then(|| unsafe { ffi::ClientReport_getTimestamp(report) } as i64)
             .filter(|&ms| ms > 0);
-        // rcb = RCB yang menerima report ini (konteks callback), bukan tebakan dari dataset:
-        // titik yang ada di dua RCB tetap ber-rcb pengirim report. stVal + q satu titik = satu pesan.
-        let origin = Origin::Report { rcb: &ctx.rcb_ref };
+        // titik yang ada di dua RCB tetap ber-rcb pengirim report. stVal + q + t satu titik = satu pesan.
+        let origin = ctx.origin();
         for (p, action) in actions {
             rtu.publish(p, &state[p], action, entry_time, origin);
         }
@@ -90,5 +97,36 @@ pub(crate) unsafe extern "C" fn on_report(param: *mut c_void, report: ffi::Clien
     }));
     if res.is_err() {
         warn!("panic di report handler (diabaikan)");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connection::ConnectGate;
+    use crate::iec61850::client::RcbSettings;
+
+    /// ReportCtx seperti dibuat setup_rcb: satu per baris iec61850_report_controls, rcb_ref = rcb_reference DB.
+    fn report_ctxs(rcbs: &[&str]) -> Vec<ReportCtx> {
+        let mgr = crate::connection::testing::manager();
+        let rows = rcbs.iter().map(|r| (r.to_string(), RcbSettings::default())).collect();
+        let rtu = Arc::new(RtuCtx::new(crate::connection::testing::rtu(1), rows, vec![], Arc::clone(&mgr.publisher), Arc::new(ConnectGate::new(1))));
+        rtu.rcbs
+            .iter()
+            .map(|(r, _)| ReportCtx { rtu: Arc::clone(&rtu), rcb_ref: r.clone(), dataset: "LD/LLN0.ds".into(), members: vec![], alive: Arc::default() })
+            .collect()
+    }
+
+    /// (a) BRCB, (b) URCB, (e) format = rcb_reference DB; dua RCB dataset sama -> rcb masing-masing.
+    #[tokio::test]
+    async fn rcb_dari_rcb_penerima_format_db() {
+        let db = ["iec61850SC01_LD0/LLN0.BR.brcbST01", "iec61850SC01_LD0/LLN0.BR.brcbST02", "iec61850SC01_LD0/LLN0.RP.urcbMX01"];
+        let ctxs = report_ctxs(&db);
+        for (c, want) in ctxs.iter().zip(db) {
+            let o = c.origin();
+            // persis rcb_reference DB (bukan format MMS LLN0$BR$...)
+            assert_eq!((o.source(), o.rcb()), ("REPORT", Some(want)));
+        }
+        assert!(ctxs[2].origin().rcb().is_some_and(|r| r.contains(".RP.")));
     }
 }
