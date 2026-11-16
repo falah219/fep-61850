@@ -132,7 +132,7 @@ fn lenient(m: &RtuEventMessage) -> CommandData {
         id_rtu: data_id_rtu(d).or(m.id_rtu),
         key: s("key").or_else(|| m.key.clone()),
         value: d.and_then(|d| d.get("value")).cloned().or_else(|| m.value.clone()),
-        port: d.and_then(|d| d.get("port")).and_then(Value::as_i64).and_then(|p| u16::try_from(p).ok()).or(port_of(m.port)),
+        port: d.and_then(|d| d.get("port")).and_then(Value::as_i64).and_then(|p| u16::try_from(p).ok()).or_else(|| port_of(m.port)),
         qualifier: d.and_then(|d| d.get("qualifier")).and_then(Value::as_u64).and_then(|q| u8::try_from(q).ok()).or(m.qualifier),
         ..Default::default()
     }
@@ -145,7 +145,7 @@ fn event_name(action: &str) -> String {
         None if action.trim().is_empty() => "UNKNOWN".into(),
         None => {
             let a = action.trim().to_uppercase();
-            a.strip_suffix("_RTU").map_or_else(|| a.clone(), String::from)
+            a.strip_suffix("_RTU").unwrap_or(&a).to_string()
         }
     }
 }
