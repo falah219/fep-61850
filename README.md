@@ -308,7 +308,7 @@ docker compose -f docker-compose.dev.yml exec -w /work dev scripts/uji_konek_ser
 - **Consumer** (`GROUP_ID` default `IEC61850_FEP_GROUP`, sama di `.env.example` dan `kubernetes/configmap.yaml`), pesan dengan `protocol` ≠ `IEC61850` diabaikan.
   **Hanya boleh satu instance FEP IEC 61850 aktif per lingkungan** (satu `GROUP_ID`): dua instance dengan group sama membagi
   partisi (sebagian event tidak sampai ke instance yang memegang IED-nya), dua instance dengan group beda sama-sama konek ke
-  IED yang sama dan mengirim data ganda.
+  IED yang sama, mengirim data ganda, dan **setiap COMMAND terkirim dua kali** ke IED.
   Field, contoh JSON, dan balasan tiap topic: [docs/KAFKA_PAYLOADS.md](docs/KAFKA_PAYLOADS.md).
 
 | Topik / event | Aksi |

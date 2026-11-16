@@ -49,7 +49,8 @@ Daftar isi:
   `master_general_actions` per `record.protocol`) dan `MASTER_DATA_OBJECT_EVENT` (isi pesan tidak dibaca).
 - **Consumer group.** Env `GROUP_ID`, default `IEC61850_FEP_GROUP` ([config/kafka.rs](../src/config/kafka.rs)), sama dengan
   `.env.example` dan `kubernetes/configmap.yaml` (dicek test `group_id_seragam`). Harus berbeda dengan group FEP IEC 104.
-  **Hanya satu instance FEP IEC 61850 aktif per lingkungan.**
+  **Hanya satu instance FEP IEC 61850 aktif per lingkungan**: dua instance = setiap COMMAND terkirim dua kali ke IED
+  (group beda) atau event terbagi antar-instance (group sama).
 - **Topic yang di-subscribe.** Env `SUBSCRIBE_TOPICS` (dipisah koma), default
   `RTU_EVENTS,RTU_COMMAND_CONFIG_REQUEST,MASTER_DATAPOINT_EVENT,MASTER_DATA_OBJECT_EVENT,CAPTURE_DATA_CHANGE,MASTER_RTU_EVENTS,MANUAL_SET_EVENT`.
   Nama topic dibaca dari bagian setelah titik terakhir, jadi topic berawalan (`dev.RTU_EVENTS`) tetap dikenali.
