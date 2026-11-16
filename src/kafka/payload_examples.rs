@@ -37,6 +37,11 @@ pub(crate) fn examples(sub: &str) -> Vec<(String, Value)> {
     out
 }
 
+/// Satu contoh `docs/examples/<sub>/<name>.json`.
+pub(crate) fn example(sub: &str, name: &str) -> Value {
+    examples(sub).into_iter().find(|(n, _)| n == name).map(|(_, v)| v).unwrap_or_else(|| panic!("contoh {sub}/{name} tidak ada"))
+}
+
 /// Contoh satu topic. Nama file: `TOPIC__varian.json`.
 pub(crate) fn examples_of(sub: &str, topic: &str) -> Vec<(String, Value)> {
     examples(sub).into_iter().filter(|(n, _)| topic_of(n) == topic).collect()
@@ -68,7 +73,7 @@ fn semua_contoh_ada_di_markdown() {
         .map(|b| b.split("\n```").next().unwrap_or(""))
         .map(|b| serde_json::from_str(b).unwrap_or_else(|e| panic!("blok json tidak valid di KAFKA_PAYLOADS.md: {e}\n{b}")))
         .collect();
-    for sub in ["consume", "produce"] {
+    for sub in ["consume", "produce", "iec104"] {
         for (name, v) in examples(sub) {
             assert!(blocks.contains(&v), "docs/examples/{sub}/{name}.json tidak dicantumkan (atau beda) di KAFKA_PAYLOADS.md");
         }
@@ -166,6 +171,23 @@ fn contoh_rtu_datas_dan_datapoints() {
             assert_eq!(serde_json::to_value(&m).unwrap(), v, "{name}");
         }
     }
+}
+
+/// Sampel asli RTU_DATAS FEP IEC 104: nama & tipe field sama dengan RTU_DATAS FEP IEC 61850.
+#[test]
+fn rtu_datas_sama_bentuk_dengan_sampel_iec104() {
+    let kind = |v: &Value| match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    };
+    let shape = |v: &Value| -> Vec<(String, &str)> { v.as_object().unwrap().iter().map(|(k, x)| (k.clone(), kind(x))).collect() };
+    let iec104 = example("iec104", "RTU_DATAS__iec104_real");
+    assert!(!is_ours(str_of(&iec104, "protocol")));
+    assert_eq!(shape(&iec104), shape(&example("produce", "RTU_DATAS__DATA_CHANGE")));
 }
 
 #[test]

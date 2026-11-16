@@ -1,0 +1,18 @@
+{
+  "ip_address": "192.168.212.11",
+  "protocol": "IEC104",
+  "id_rtu": 83020254,
+  "action": "SPONTANEOUS",
+  "tag": "",
+  "value": 218.3000030517578,
+  "address": 5,
+  "ca": 1,
+  "asdu": 36,
+  "type": "M_ME_TF_1",
+  "quality": "GOOD",
+  "flag": "GOOD",
+  "group": "7fc706fc-1c7a-423c-9a9c-aa627f653611",
+  "general_action": 0,
+  "time": 1794796746325,
+  "time_desc": "RTU"
+}

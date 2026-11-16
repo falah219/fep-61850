@@ -135,7 +135,17 @@ pub struct CaptureDataChangeMessage {
     pub table: String,
     pub schema: String,
     pub operation: String,
+    /// Baris LENGKAP setelah perubahan (DELETE: baris yang dihapus), dari iconics_configuration_cdc_listener.
+    /// Tidak ada nilai lama.
+    pub record: Option<serde_json::Value>,
+    /// Bentuk lama (sebelum `record`), dipakai kalau `record` tidak ada.
     pub data: Option<serde_json::Value>,
+}
+
+impl CaptureDataChangeMessage {
+    pub fn row(&self) -> Option<&serde_json::Value> {
+        self.record.as_ref().filter(|r| r.is_object()).or(self.data.as_ref())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

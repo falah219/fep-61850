@@ -280,6 +280,11 @@ impl Manager {
         self.rtus.get(&id).map(|h| (h.ctx.rtu.ip_address.clone(), h.ctx.rtu.port))
     }
 
+    /// Konfigurasi IED yang sedang berjalan (untuk membandingkan CDC `iec61850s`).
+    pub fn config_of(&self, id: i32) -> Option<RtuConfig> {
+        self.rtus.get(&id).map(|h| h.ctx.rtu.clone())
+    }
+
     pub fn ip_of(&self, id: i32) -> Option<String> {
         self.rtus.get(&id).map(|h| h.ctx.rtu.ip_address.clone())
     }

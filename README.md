@@ -318,7 +318,7 @@ docker compose -f docker-compose.dev.yml exec -w /work dev scripts/uji_konek_ser
 | `MASTER_DATA_OBJECT_EVENT` | muat ulang group |
 | `MASTER_RTU_EVENTS` `UPDATE_ID_RTU` | hentikan id lama, jalankan id baru |
 | `RTU_COMMAND_CONFIG_REQUEST` | dicatat (sama dengan IEC 104) |
-| `CAPTURE_DATA_CHANGE` | `formulas`, `master_data_objects`, `master_general_actions` → muat ulang resolver; `iec61850s`, `iec61850_report_controls`, `master_datapoint_iec61850s`, `iec61850_command_formulas` → restart IED terkait |
+| `CAPTURE_DATA_CHANGE` | Baca `record` (cadangan `data`). `formulas`, `manual_sets`, `master_data_objects`, `master_general_actions` (protocol IEC61850 / kosong) → muat ulang resolver tanpa reconnect; `iec61850s` → restart IED itu **hanya kalau kolom koneksi/akuisisi berubah** (kolom status `status_rtu`, `rtu_online_at`, ... diabaikan), DELETE / `is_deleted` → hentikan, INSERT → jalankan; `iec61850_report_controls`, `master_datapoint_iec61850s`, `iec61850_command_formulas` → restart IED terkait; tabel lain diabaikan |
 | `MANUAL_SET_EVENT` | toggle manual set + `MANUAL_SET_EVENT_RESPONSE` (key `IEC61850`) |
 
 Uji (di kantor, Postgres + Kafka dev):

@@ -45,8 +45,8 @@ Daftar isi:
 
 - **Protocol.** FEP IEC 104 dan FEP IEC 61850 membaca topic yang sama. Pesan dengan `protocol` selain `IEC61850`
   **diabaikan tanpa log** (`is_ours`, perbandingan tidak peka huruf besar/kecil: `iec61850` juga diterima).
-  Pengecualian: `CAPTURE_DATA_CHANGE` (tidak punya `protocol`) dan `MASTER_DATA_OBJECT_EVENT` (isi pesan tidak dibaca)
-  diproses tanpa cek protocol.
+  Pengecualian: `CAPTURE_DATA_CHANGE` (tidak punya `protocol`; disaring per tabel, `master_data_objects` /
+  `master_general_actions` per `record.protocol`) dan `MASTER_DATA_OBJECT_EVENT` (isi pesan tidak dibaca).
 - **Consumer group.** Env `GROUP_ID`, default `IEC61850_GROUP` ([config/kafka.rs](../src/config/kafka.rs));
   `kubernetes/configmap.yaml` memakai `IEC61850_FEP_GROUP`. Harus berbeda dengan group FEP IEC 104.
 - **Topic yang di-subscribe.** Env `SUBSCRIBE_TOPICS` (dipisah koma), default
@@ -574,28 +574,71 @@ Isi pesan **tidak dibaca sama sekali** (boleh `{}`; protocol tidak dicek). Efek:
 
 ### 2.4 `CAPTURE_DATA_CHANGE`
 
-Struct: `CaptureDataChangeMessage`. Handler: [capture_data_change.rs](../src/kafka/handlers/capture_data_change.rs).
-Dikirim `iconics_configuration_cdc_listener` dari trigger `notify_table_change()`.
+Struct: `CaptureDataChangeMessage`. Handler: [capture_data_change.rs](../src/kafka/handlers/capture_data_change.rs)
+(keputusan di fungsi `plan`, diuji tanpa DB). Dikirim `iconics_configuration_cdc_listener` dari trigger `notify_table_change()`.
 
 | Field | Tipe JSON | Wajib | Arti |
 |---|---|---|---|
 | `table` | string | ya | Nama tabel |
 | `schema` | string | ya | Selain `public` diabaikan |
 | `operation` | string | ya | `INSERT`, `UPDATE`, `DELETE` |
-| `data` | object | tidak | Baris yang berubah. **cdc_listener mengirimnya sebagai `record`** (lihat [catatan](#5-catatan-ketidaksesuaian)) |
+| `record` | object | tidak | Baris **lengkap** setelah perubahan (DELETE: baris yang dihapus). **Tidak ada nilai lama** |
+| `data` | object | tidak | Bentuk lama, dipakai kalau `record` tidak ada |
+| `timestamp`, `source` | string | tidak | Tidak dibaca |
 
 | `table` | Efek |
 |---|---|
-| `formulas` | muat ulang FormulaResolver |
-| `master_data_objects` | muat ulang group |
-| `master_general_actions` | muat ulang general action |
-| `iec61850s`, `iec61850_report_controls` | reload IED `data.id_rtu` (debounce); `data.id_rtu` tidak ada → reload **semua** IED |
-| `master_datapoint_iec61850s`, `iec61850_command_formulas` | `id_rtu` dicari dari `data.id_master_datapoint` lewat `master_datapoints`; gagal → reload **semua** IED |
-| lainnya | diabaikan |
+| `iec61850s` | `record.id_rtu`. `DELETE` atau `is_deleted = true` → hentikan IED. `INSERT` → jalankan IED (reload). `UPDATE` → dibandingkan dengan konfigurasi IED yang **sedang berjalan**; reload IED itu hanya kalau kolom koneksi/akuisisi berubah (tabel di bawah). IED belum berjalan → dijalankan kalau `state_rtu` tidak `false` |
+| `iec61850_report_controls` | reload IED `record.id_rtu` |
+| `master_datapoint_iec61850s`, `iec61850_command_formulas` | `id_rtu` dicari dari `record.id_master_datapoint` lewat `master_datapoints` → reload IED itu. Tidak ketemu (mis. DELETE dan datapoint sudah hilang) → reload **semua** IED + WARN |
+| `master_data_objects` | muat ulang group (tanpa reconnect). `record.protocol` ada dan bukan `IEC61850` → diabaikan |
+| `master_general_actions` | muat ulang general action (tanpa reconnect). `record.protocol` ada dan bukan `IEC61850` → diabaikan |
+| `formulas` | muat ulang formula (tanpa reconnect) |
+| `manual_sets` | muat ulang daftar tag manual set (tanpa reconnect) |
+| lainnya (`dnp3s`, `iec104s`, ...) | diabaikan, hanya log DEBUG |
 
-Tidak ada balasan. Bentuk asli dari cdc_listener:
+Kolom `iec61850s` yang memicu reload (dipakai `RtuConfig`): `ip_address`, `port`, `local_ip_address`, `acquisition_mode`,
+`poll_interval_ms`, `general_interrogation_interval`, `connect_timeout_ms`, `request_timeout_ms`, `reconnect_time_ms`,
+`reconnect_retry_count`, `state_rtu`, `ap_title`, `ae_qualifier`, `p_selector`, `s_selector`, `t_selector` (+ `is_deleted`).
+Kolom lain **diabaikan**, termasuk kolom status yang sering di-UPDATE backend saat RTU online/offline (`status_rtu`,
+`rtu_online_at`, `rtu_offline_at`, `status_channel`, `channel_*`, `created_at`, `updated_at`, `name`, ...). Kolom yang tidak ada
+di `record` dianggap tidak berubah. Angka negatif dianggap 0 (sama dengan saat dimuat).
 
-`docs/examples/consume/CAPTURE_DATA_CHANGE__iec61850s.listener.json`
+Log: `INFO [CDC] UPDATE iec61850s: reload IED`, `DEBUG [CDC] UPDATE iec61850s diabaikan: hanya kolom status / non-koneksi yang berubah`,
+`WARN [CDC] DELETE master_datapoint_iec61850s: id_rtu datapoint <uuid> tidak ditemukan, reload semua IED`. Tidak ada balasan Kafka.
+
+Sampel asli dari cdc_listener (tabel lain, diabaikan FEP; `...` apa adanya dari sampel):
+
+`docs/examples/consume/CAPTURE_DATA_CHANGE__dnp3s.real.json`
+
+```json
+{
+  "table": "dnp3s",
+  "schema": "public",
+  "operation": "UPDATE",
+  "record": {
+    "id": "30a0f2b7-...",
+    "id_rtu": 83020012,
+    "protocol": "DNP3",
+    "tcp_server_ip": "192.168.212.12",
+    "tcp_port": 20000,
+    "state_rtu": true,
+    "rtu_online_at": "1794785701262",
+    "rtu_offline_at": "1794791384243",
+    "status_rtu": "red",
+    "status_channel": false,
+    "is_deleted": false,
+    "updated_at": "2026-11-16T01:09:44.737+00:00",
+    "...": "..."
+  },
+  "timestamp": "2026-11-16T01:09:44.760Z",
+  "source": "cdc_listener"
+}
+```
+
+`iec61850s`, hanya kolom status berubah → diabaikan (konfigurasi sama dengan yang berjalan):
+
+`docs/examples/consume/CAPTURE_DATA_CHANGE__iec61850s.status_only.json`
 
 ```json
 {
@@ -605,16 +648,64 @@ Tidak ada balasan. Bentuk asli dari cdc_listener:
   "record": {
     "id": "5d0f3c1a-7b2e-4f60-9a11-2c3d4e5f6a7b",
     "id_rtu": 9001,
+    "name": "GI BAY 1",
     "ip_address": "10.10.1.21",
     "port": 102,
-    "state_rtu": true
+    "local_ip_address": "0.0.0.0",
+    "acquisition_mode": "REPORT",
+    "poll_interval_ms": 1000,
+    "general_interrogation_interval": 0,
+    "connect_timeout_ms": 1000,
+    "request_timeout_ms": 1000,
+    "reconnect_time_ms": 1000,
+    "reconnect_retry_count": 0,
+    "state_rtu": true,
+    "channel_number": 1,
+    "ap_title": "1.1.999.1",
+    "ae_qualifier": 12,
+    "p_selector": "00 00 00 01",
+    "s_selector": "00 01",
+    "t_selector": "00 01",
+    "status_rtu": "red",
+    "rtu_online_at": "1794785701262",
+    "rtu_offline_at": "1794791384243",
+    "status_channel": false,
+    "is_deleted": false,
+    "created_at": "2026-11-01T02:00:00.000+00:00",
+    "updated_at": "2026-11-16T01:09:44.737+00:00"
   },
-  "timestamp": "2026-11-15T03:04:05.123Z",
+  "timestamp": "2026-11-16T01:09:44.760Z",
   "source": "cdc_listener"
 }
 ```
 
-Bentuk yang dibaca FEP (dengan `data`):
+`iec61850_command_formulas` → reload IED pemilik datapoint:
+
+`docs/examples/consume/CAPTURE_DATA_CHANGE__iec61850_command_formulas.json`
+
+```json
+{
+  "table": "iec61850_command_formulas",
+  "schema": "public",
+  "operation": "UPDATE",
+  "record": {
+    "id": "2b3c4d5e-6f70-4a81-9b2c-3d4e5f6a7b8c",
+    "id_master_datapoint": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+    "type": "DPC",
+    "ctl_model": "sbo-with-enhanced-security",
+    "value": null,
+    "interlock_check": true,
+    "synchro_check": false,
+    "is_deleted": false,
+    "created_at": "2026-11-01T02:00:00.000+00:00",
+    "updated_at": "2026-11-16T01:10:00.000+00:00"
+  },
+  "timestamp": "2026-11-16T01:10:00.020Z",
+  "source": "cdc_listener"
+}
+```
+
+Bentuk lama (`data`), masih diterima:
 
 `docs/examples/consume/CAPTURE_DATA_CHANGE__master_datapoint_iec61850s.data.json`
 
@@ -1533,6 +1624,32 @@ Multi-part (di sini dibagi dengan batas kecil supaya contoh pendek; FEP memakai 
 Berdasarkan kode `iconics-fep-iec104` (`src/kafka/models.rs`, `src/kafka/handlers/rtu_event/command/*`,
 `src/kafka/publisher/message_builder.rs`, `src/iec104/asdu/cot_mapper.rs`).
 
+Sampel asli `RTU_DATAS` FEP IEC 104 (test `rtu_datas_sama_bentuk_dengan_sampel_iec104`: nama & tipe field sama dengan
+`RTU_DATAS` FEP IEC 61850):
+
+`docs/examples/iec104/RTU_DATAS__iec104_real.json`
+
+```json
+{
+  "ip_address": "192.168.212.11",
+  "protocol": "IEC104",
+  "id_rtu": 83020254,
+  "action": "SPONTANEOUS",
+  "tag": "",
+  "value": 218.3000030517578,
+  "address": 5,
+  "ca": 1,
+  "asdu": 36,
+  "type": "M_ME_TF_1",
+  "quality": "GOOD",
+  "flag": "GOOD",
+  "group": "7fc706fc-1c7a-423c-9a9c-aa627f653611",
+  "general_action": 0,
+  "time": 1794796746325,
+  "time_desc": "RTU"
+}
+```
+
 ### 4.1 Yang sama
 
 - Nama topic consume/produce (kecuali `IEC61850_BROWSE_RESPONSE`, hanya 61850).
@@ -1602,11 +1719,7 @@ Bentuk yang terbaca kedua FEP: `ip_address` dan `port` di tingkat atas **dan** d
 
 Ditemukan saat menulis dokumen ini. **Kode tidak diubah**; perlu keputusan tim.
 
-1. **CDC: `record` vs `data`.** `iconics_configuration_cdc_listener` mengirim baris yang berubah di field `record`
-   (`src/cdc-listener/cdc-listener.service.ts`), sedangkan FEP (dan FEP IEC 104) membaca `data`. Akibatnya untuk pesan asli:
-   - `iec61850s` / `iec61850_report_controls` → `id_rtu` tidak terbaca → reload **semua** IED (bukan hanya yang berubah);
-   - `master_datapoint_iec61850s` / `iec61850_command_formulas` → `id_master_datapoint` tidak terbaca → reload semua IED.
-   Hasil akhirnya tetap benar, tetapi semua IED konek ulang setiap ada perubahan satu baris.
+1. ~~CDC: `record` vs `data`~~ — **diperbaiki**: FEP membaca `record` (cadangan `data`), UPDATE kolom status `iec61850s` tidak lagi memicu reload, tabel lain diabaikan.
 2. **README `group`.** README menulis `group = master_data_objects.initial = CDC`. Di kode `group` berisi `id_group` (UUID)
    dari baris `master_data_objects` yang `initial`-nya = CDC, bukan CDC itu sendiri.
 3. **AddCause di `RTU_COMMAND`** hanya berupa kode di dalam `msg` (`addCause=10`), nama hanya ada di `RTU_LOGGING`.

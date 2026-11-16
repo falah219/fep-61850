@@ -1,0 +1,22 @@
+{
+  "table": "dnp3s",
+  "schema": "public",
+  "operation": "UPDATE",
+  "record": {
+    "id": "30a0f2b7-...",
+    "id_rtu": 83020012,
+    "protocol": "DNP3",
+    "tcp_server_ip": "192.168.212.12",
+    "tcp_port": 20000,
+    "state_rtu": true,
+    "rtu_online_at": "1794785701262",
+    "rtu_offline_at": "1794791384243",
+    "status_rtu": "red",
+    "status_channel": false,
+    "is_deleted": false,
+    "updated_at": "2026-11-16T01:09:44.737+00:00",
+    "...": "..."
+  },
+  "timestamp": "2026-11-16T01:09:44.760Z",
+  "source": "cdc_listener"
+}
