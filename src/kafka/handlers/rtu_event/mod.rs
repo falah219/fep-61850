@@ -26,7 +26,8 @@ pub(crate) async fn rtu_event(mgr: &Arc<Manager>, m: RtuEventMessage) {
             Ok(())
         }
         "STATE" => match m.state_rtu {
-            Some(state) => mgr.reload(id, Some(state)).await,
+            // idempoten: CDC state_rtu untuk perubahan yang sama tidak menjalankan/menghentikan lagi
+            Some(state) => mgr.set_state(id, state).await,
             None => Err("STATE tanpa state_rtu".into()),
         },
         "RESET" => {

@@ -315,7 +315,7 @@ docker compose -f docker-compose.dev.yml exec -w /work dev scripts/uji_konek_ser
 |---|---|
 | `RTU_EVENTS` `UPDATE`/`CREATE`/`ADD` | baca ulang RTU dari DB, restart thread |
 | `RTU_EVENTS` `DELETE`/`REMOVE` | hentikan thread |
-| `RTU_EVENTS` `STATE` | `false`: hentikan + status 0; `true`: baca ulang + konek |
+| `RTU_EVENTS` `STATE` | `false`: hentikan + status 0; `true`: baca ulang + konek. Idempoten: IED yang sudah jalan / berhenti tidak diapa-apakan (STATE + CDC `state_rtu` = satu aksi, DB sumber kebenaran) |
 | `RTU_EVENTS` `RESET` | status 0, restart |
 | `RTU_EVENTS` `GI` | GI ke semua RCB; mode polling: siklus polling penuh sekarang, action `GENERAL_INTERROGATION` |
 | `RTU_EVENTS` `CHANNEL` | dicatat (sama dengan IEC 104) |

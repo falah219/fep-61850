@@ -175,9 +175,26 @@ Efek: hentikan thread IED (koneksi MMS ditutup). Tidak ada balasan; `RTU_STATUS`
 
 #### STATE
 
-`state_rtu` wajib. `false`: hentikan thread + `RTU_STATUS` 0 (kalau sedang berjalan), tidak reconnect.
-`true`: baca ulang dari DB lalu konek. Nilai event **menimpa** `state_rtu` di DB (berjaga-jaga DB belum ter-update).
-Tanpa `state_rtu`: log `WARN [RTU_EVENTS] STATE RTU 9001: STATE tanpa state_rtu`.
+`state_rtu` wajib. `false`: hentikan thread + `RTU_STATUS` 0, tidak reconnect. `true`: baca ulang dari DB lalu konek.
+**Idempoten**: STATE true untuk IED yang sudah jalan dan STATE false untuk IED yang sudah berhenti tidak melakukan apa pun
+(log `INFO STATE sama dengan kondisi IED, tidak ada aksi`). Tanpa `state_rtu`: log
+`WARN [RTU_EVENTS] STATE RTU 9001: STATE tanpa state_rtu`.
+
+Alur `state_rtu` / `status_rtu` di backend (**DB adalah sumber kebenaran `state_rtu`**):
+
+```text
+frontend -> backend UPDATE iec61850s.state_rtu -> CDC iec61850s (state_rtu berubah)   ┐ dua pesan untuk
+                                               -> RTU_EVENTS STATE                    ┘ perubahan yang sama
+FEP start/stop IED -> RTU_STATUS -> backend UPDATE status_rtu / rtu_online_at / rtu_offline_at
+                                 -> CDC iec61850s (hanya kolom status) = "gema", diabaikan FEP
+```
+
+- STATE dan CDC untuk perubahan yang sama = **satu** start/stop. Urutan STATE dulu: CDC dibandingkan dengan salinan DB yang
+  sudah dimuat STATE → sama → tidak ada aksi. Urutan CDC dulu: CDC menjadwalkan cek ulang baris (debounce); STATE
+  menjalankan/menghentikan IED dan memuat baris; saat cek ulang baris sudah sama → tidak ada aksi.
+- IED yang dihentikan lewat STATE false **tidak** dijalankan lagi oleh CDC yang membawa `state_rtu = true` yang tidak berubah
+  dari salinan DB (mis. gema kolom status). Jalan lagi hanya lewat STATE true atau `state_rtu` di DB berubah false → true.
+- Backend sebaiknya selalu menyimpan `state_rtu` ke DB sebelum mengirim STATE.
 
 `docs/examples/consume/RTU_EVENTS__STATE.off.json`
 
@@ -1815,5 +1832,4 @@ berlaku dan perlu keputusan tim.
 20. **Pencarian `id_rtu` dari IP membuang `-`** (`safe_ip`): IED yang `ip_address`-nya hostname (mis. `ied-sim-1`) tidak pernah
     cocok, jadi event tanpa `id_rtu` untuk IED seperti itu gagal ("RTU tidak ditemukan"). IP literal tidak terpengaruh.
 21. ~~CDC `iec61850s` tidak membandingkan `channel_number`~~ — **diperbaiki**: perubahan `channel_number` memperbarui channel status ping tanpa reconnect MMS; pembanding CDC = salinan terakhir baris DB per IED.
-22. **CDC `iec61850s` untuk IED yang tidak berjalan** dengan `state_rtu = true` di `record` → IED dijalankan, termasuk IED
-    yang sebelumnya dihentikan lewat event `STATE false` tanpa DB ikut diubah. Backend sebaiknya selalu menyimpan `state_rtu`.
+22. ~~CDC menjalankan IED yang dihentikan lewat STATE false~~ — **diperbaiki**: CDC dibandingkan dengan salinan baris DB, STATE idempoten; alur `state_rtu` didokumentasikan di 2.1 STATE.
