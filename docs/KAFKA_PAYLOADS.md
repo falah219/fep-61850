@@ -71,7 +71,8 @@ Daftar isi:
 | COMMAND | `data.id_rtu` → `id_rtu` tingkat atas → dicari dari `data.ip_address` / `ip_address` di antara IED yang berjalan |
 | BROWSE | `id_rtu` tingkat atas → `data.id_rtu` → dicari dari `data.ip_address` / `ip_address` di antara IED yang berjalan |
 
-Tidak ketemu → event tidak dijalankan (log `WARN`), kecuali COMMAND/BROWSE yang tetap dibalas `FAILED`/`inactive`.
+IP / hostname dibandingkan **apa adanya** (trim, tidak peka huruf besar/kecil, tidak ada karakter yang dibuang): `ied-sim-1`,
+`192.168.212.25`, `IED-SIM-1` = `ied-sim-1`. Tidak ketemu → event tidak dijalankan (log `WARN`), kecuali COMMAND/BROWSE yang tetap dibalas `FAILED`/`inactive`.
 
 ---
 
@@ -1829,7 +1830,6 @@ berlaku dan perlu keputusan tim.
 17. ~~Komentar `models.rs` "bentuk field sama dengan IEC 104"~~ — **diperbaiki**: komentar menjelaskan beda pesan consume.
 18. ~~`GROUP_ID` tidak seragam~~ — **diperbaiki**: `IEC61850_FEP_GROUP` di kode, `.env.example`, dan configmap.
 19. **BROWSE / COMMAND dengan `key` kosong**: key Kafka `"unknown"`, tetapi field `key` di isi pesan `""`.
-20. **Pencarian `id_rtu` dari IP membuang `-`** (`safe_ip`): IED yang `ip_address`-nya hostname (mis. `ied-sim-1`) tidak pernah
-    cocok, jadi event tanpa `id_rtu` untuk IED seperti itu gagal ("RTU tidak ditemukan"). IP literal tidak terpengaruh.
+20. ~~Pencarian `id_rtu` dari IP membuang `-`~~ — **diperbaiki**: dibandingkan apa adanya (trim + huruf kecil), hostname seperti `ied-sim-1` cocok.
 21. ~~CDC `iec61850s` tidak membandingkan `channel_number`~~ — **diperbaiki**: perubahan `channel_number` memperbarui channel status ping tanpa reconnect MMS; pembanding CDC = salinan terakhir baris DB per IED.
 22. ~~CDC menjalankan IED yang dihentikan lewat STATE false~~ — **diperbaiki**: CDC dibandingkan dengan salinan baris DB, STATE idempoten; alur `state_rtu` didokumentasikan di 2.1 STATE.

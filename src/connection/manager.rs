@@ -20,7 +20,6 @@ use super::{run_ied, ConnectGate};
 use crate::domain::{Point, RtuConfig};
 use crate::iec61850::acquisition::{Ctl, RtuCtx};
 use crate::iec61850::client::RcbSettings;
-use crate::kafka::models::safe_ip;
 use crate::kafka::publisher::Publisher;
 use crate::repository as repo;
 
@@ -111,6 +110,12 @@ pub struct Manager {
     /// Debounce khusus cek-ulang baris CDC `iec61850s` (kunci terpisah dari `debounce`, supaya tidak
     /// menimpa reload penuh yang sedang tertunda untuk IED yang sama).
     row_debounce: Debouncer,
+}
+
+/// IP / hostname dibandingkan apa adanya: trim + huruf kecil, TIDAK ada karakter yang dibuang
+/// (hostname seperti `ied-sim-1` harus cocok).
+pub fn same_host(a: &str, b: &str) -> bool {
+    a.trim().to_lowercase() == b.trim().to_lowercase()
 }
 
 /// Tindakan setelah baris `iec61850s` dibaca ulang dari DB (dibandingkan dengan salinan terakhir).
@@ -380,9 +385,12 @@ impl Manager {
         self.rtus.get(&id).map(|h| h.ctx.rtu.ip_address.clone())
     }
 
+    /// IED yang sedang berjalan dengan `ip_address` ini (COMMAND, BROWSE, GI, STATE, ... tanpa id_rtu).
     pub fn id_by_ip(&self, ip: &str) -> Option<i32> {
-        let ip = safe_ip(ip);
-        self.rtus.iter().find(|e| e.ctx.rtu.ip_address == ip).map(|e| *e.key())
+        if ip.trim().is_empty() {
+            return None;
+        }
+        self.rtus.iter().find(|e| same_host(&e.ctx.rtu.ip_address, ip)).map(|e| *e.key())
     }
 
 }
@@ -483,6 +491,24 @@ mod tests {
         let t = Instant::now();
         assert!(!join_timeout(stuck, Duration::from_millis(100)).await);
         assert!(t.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn cari_ied_dari_ip_apa_adanya() {
+        let mgr = manager();
+        let idle = |rx: Receiver<Ctl>| while !matches!(rx.recv(), Ok(Ctl::Stop) | Err(_)) {};
+        for (id, ip) in [(1, "ied-sim-1"), (2, "192.168.212.25"), (3, "IED-Sim-2")] {
+            fake_ied_cfg(&mgr, RtuConfig { ip_address: ip.into(), ..rtu(id) }, idle);
+        }
+        assert_eq!(mgr.id_by_ip("ied-sim-1"), Some(1));
+        assert_eq!(mgr.id_by_ip(" IED-SIM-1 "), Some(1));
+        assert_eq!(mgr.id_by_ip("192.168.212.25"), Some(2));
+        assert_eq!(mgr.id_by_ip("ied-sim-2"), Some(3));
+        assert_eq!(mgr.id_by_ip("iedsim1"), None); // tidak ada karakter yang dibuang
+        assert_eq!(mgr.id_by_ip("192.168.212.2"), None);
+        assert_eq!(mgr.id_by_ip(""), None);
+        assert!(same_host("Ied-Sim-1", "ied-sim-1 "));
+        mgr.stop_all(Duration::from_secs(5)).await;
     }
 
     #[tokio::test]
