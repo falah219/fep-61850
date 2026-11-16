@@ -43,14 +43,11 @@ fn deserialize_ioa<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D:
 }
 
 /// Integer atau string angka -> i32 (`MASTER_DATAPOINT_EVENT.ioa`).
+/// Memakai `deserialize_ioa` (sama dengan RTU_EVENTS), lalu wajib bilangan bulat i32.
 fn deserialize_i32_flex<'de, D: Deserializer<'de>>(d: D) -> Result<i32, D::Error> {
     use serde::de::Error;
-    use serde_json::Value;
-    match Value::deserialize(d)? {
-        Value::Number(n) => n.as_i64().and_then(|v| i32::try_from(v).ok()).ok_or_else(|| Error::custom("ioa di luar rentang i32")),
-        Value::String(s) => s.trim().parse().map_err(|_| Error::custom(format!("ioa bukan angka: {s:?}"))),
-        _ => Err(Error::custom("ioa harus integer atau string angka")),
-    }
+    let s = deserialize_ioa(d)?.ok_or_else(|| Error::custom("ioa wajib diisi"))?;
+    s.trim().parse().map_err(|_| Error::custom(format!("ioa harus bilangan bulat i32, bukan {s:?}")))
 }
 
 /// Hanya karakter aman untuk IP (sama dengan sanitasi IEC 104).
