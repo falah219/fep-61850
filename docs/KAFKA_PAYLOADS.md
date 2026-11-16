@@ -526,7 +526,7 @@ Struct: `MasterDatapointEventMessage`. Handler: [master_datapoint.rs](../src/kaf
 |---|---|---|---|
 | `id_rtu` | integer | ya | RTU pemilik datapoint |
 | `protocol` | string | ya | `IEC61850` |
-| `ioa` | **integer** (string ditolak) | ya | IOA virtual |
+| `ioa` | integer / string angka | ya | IOA virtual (`2001` atau `"2001"`) |
 | `event` | string | ya | `ADD`, `CREATE`, `UPDATE`, `DELETE` |
 | `data.tag` | string | ADD/CREATE/UPDATE: ya | Tag baru |
 
@@ -546,6 +546,22 @@ Log: `INFO [MASTER_DATAPOINT] UPDATE id_rtu=9001 ioa=2001`. Event lain / tanpa `
   "data": {
     "tag": "BAY1_ANIN1_2001",
     "description": "Arus fasa R"
+  }
+}
+```
+
+`ioa` sebagai string:
+
+`docs/examples/consume/MASTER_DATAPOINT_EVENT__UPDATE.ioa_string.json`
+
+```json
+{
+  "id_rtu": 9001,
+  "protocol": "IEC61850",
+  "ioa": "2001",
+  "event": "UPDATE",
+  "data": {
+    "tag": "BAY1_ANIN1_2001"
   }
 }
 ```
@@ -1768,8 +1784,7 @@ Ditemukan saat menulis dokumen ini. **Kode tidak diubah**; perlu keputusan tim.
    `CAPTURE_DATA_CHANGE`. Perbandingan protocol tidak peka huruf besar/kecil, README menulis "≠ `IEC61850`".
 9. ~~BROWSE tidak mencari `id_rtu` dari `ip_address`~~ — **diperbaiki**: sama dengan COMMAND.
 10. **CREATE/ADD/UPDATE dengan `ip_address` saja** hanya berhasil untuk IED yang sudah berjalan; RTU baru wajib `id_rtu`.
-11. **`MASTER_DATAPOINT_EVENT.ioa` harus integer** (string → parse error), padahal `RTU_EVENTS.ioa` menerima string.
-    `REMOVE` tidak dikenal di topic ini (hanya `DELETE`).
+11. ~~`MASTER_DATAPOINT_EVENT.ioa` harus integer~~ — **diperbaiki**: integer maupun string angka. (Tetap: `REMOVE` tidak dikenal di topic ini, hanya `DELETE`.)
 12. ~~Event GI pada mode POLLING menghasilkan `INTEGRITY`~~ — **diperbaiki**: `GENERAL_INTERROGATION`.
 13. ~~`CONTROL TX` ditulis walau tidak ada request ke IED~~ — **diperbaiki**: SELECT direct → `CONTROL SKIP`, value tidak valid / status-only → baris `[ERROR] ... tidak dikirim`.
 14. **Baris ringkas `[INFO] <n> log data dilewati ...` tanpa timestamp**, sementara baris lalu lintas lain diawali timestamp.

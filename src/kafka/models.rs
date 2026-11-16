@@ -39,6 +39,17 @@ fn deserialize_ioa<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D:
     }
 }
 
+/// Integer atau string angka -> i32 (`MASTER_DATAPOINT_EVENT.ioa`).
+fn deserialize_i32_flex<'de, D: Deserializer<'de>>(d: D) -> Result<i32, D::Error> {
+    use serde::de::Error;
+    use serde_json::Value;
+    match Value::deserialize(d)? {
+        Value::Number(n) => n.as_i64().and_then(|v| i32::try_from(v).ok()).ok_or_else(|| Error::custom("ioa di luar rentang i32")),
+        Value::String(s) => s.trim().parse().map_err(|_| Error::custom(format!("ioa bukan angka: {s:?}"))),
+        _ => Err(Error::custom("ioa harus integer atau string angka")),
+    }
+}
+
 /// Hanya karakter aman untuk IP (sama dengan sanitasi IEC 104).
 pub fn safe_ip(ip: &str) -> String {
     ip.chars()
@@ -116,6 +127,7 @@ pub struct RtuEventMessage {
 pub struct MasterDatapointEventMessage {
     pub id_rtu: i32,
     pub protocol: String,
+    #[serde(deserialize_with = "deserialize_i32_flex")]
     pub ioa: i32,
     pub event: String,
     pub data: Option<serde_json::Value>,
@@ -237,6 +249,21 @@ mod tests {
         let b: RtuEventMessage =
             serde_json::from_str(r#"{"event":"GI","protocol":"IEC61850","ip_address":"1.2.3.4","ioa":"3001"}"#).unwrap();
         assert_eq!(b.ioa.as_deref(), Some("3001"));
+    }
+
+    #[test]
+    fn master_datapoint_ioa_integer_atau_string() {
+        let parse = |ioa: &str| {
+            serde_json::from_str::<MasterDatapointEventMessage>(&format!(r#"{{"id_rtu":1,"protocol":"IEC61850","ioa":{ioa},"event":"DELETE"}}"#))
+                .map(|m| m.ioa)
+        };
+        assert_eq!(parse("2001").unwrap(), 2001);
+        assert_eq!(parse(r#""2001""#).unwrap(), 2001);
+        assert_eq!(parse(r#"" 2001 ""#).unwrap(), 2001);
+        assert!(parse(r#""x""#).is_err());
+        assert!(parse("1.5").is_err());
+        assert!(parse("99999999999").is_err());
+        assert!(parse("null").is_err());
     }
 
     #[test]

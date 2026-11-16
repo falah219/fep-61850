@@ -1,0 +1,9 @@
+{
+  "id_rtu": 9001,
+  "protocol": "IEC61850",
+  "ioa": "2001",
+  "event": "UPDATE",
+  "data": {
+    "tag": "BAY1_ANIN1_2001"
+  }
+}
