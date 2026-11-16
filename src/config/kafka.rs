@@ -2,6 +2,9 @@
 
 use std::env;
 
+/// Default `GROUP_ID`, sama dengan `kubernetes/configmap.yaml` dan `.env.example`. HARUS beda dengan FEP IEC 104.
+pub const DEFAULT_GROUP_ID: &str = "IEC61850_FEP_GROUP";
+
 #[derive(Debug, Clone)]
 pub struct KafkaConfig {
     pub bootstrap_servers: String,
@@ -27,7 +30,7 @@ impl KafkaConfig {
             sasl_password: if sasl { need("SASL_PASSWORD")? } else { String::new() },
             security_protocol,
             client_id: env::var("CLIENT_ID").unwrap_or_else(|_| "iec61850_client".into()),
-            group_id: env::var("GROUP_ID").unwrap_or_else(|_| "IEC61850_GROUP".into()),
+            group_id: env::var("GROUP_ID").unwrap_or_else(|_| DEFAULT_GROUP_ID.into()),
             auto_offset_reset: env::var("AUTO_OFFSET_RESET").unwrap_or_else(|_| "latest".into()),
         })
     }
@@ -89,5 +92,18 @@ impl KafkaConfig {
         ];
         self.security(&mut c);
         c
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DEFAULT_GROUP_ID;
+
+    /// Default kode = .env.example = configmap Kubernetes.
+    #[test]
+    fn group_id_seragam() {
+        let read = |f: &str| std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(f)).unwrap();
+        assert!(read(".env.example").lines().any(|l| l.trim() == format!("GROUP_ID={DEFAULT_GROUP_ID}")));
+        assert!(read("kubernetes/configmap.yaml").lines().any(|l| l.trim() == format!("GROUP_ID: \"{DEFAULT_GROUP_ID}\"")));
     }
 }

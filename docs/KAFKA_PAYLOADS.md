@@ -47,8 +47,9 @@ Daftar isi:
   **diabaikan tanpa log** (`is_ours`, perbandingan tidak peka huruf besar/kecil: `iec61850` juga diterima).
   Pengecualian: `CAPTURE_DATA_CHANGE` (tidak punya `protocol`; disaring per tabel, `master_data_objects` /
   `master_general_actions` per `record.protocol`) dan `MASTER_DATA_OBJECT_EVENT` (isi pesan tidak dibaca).
-- **Consumer group.** Env `GROUP_ID`, default `IEC61850_GROUP` ([config/kafka.rs](../src/config/kafka.rs));
-  `kubernetes/configmap.yaml` memakai `IEC61850_FEP_GROUP`. Harus berbeda dengan group FEP IEC 104.
+- **Consumer group.** Env `GROUP_ID`, default `IEC61850_FEP_GROUP` ([config/kafka.rs](../src/config/kafka.rs)), sama dengan
+  `.env.example` dan `kubernetes/configmap.yaml` (dicek test `group_id_seragam`). Harus berbeda dengan group FEP IEC 104.
+  **Hanya satu instance FEP IEC 61850 aktif per lingkungan.**
 - **Topic yang di-subscribe.** Env `SUBSCRIBE_TOPICS` (dipisah koma), default
   `RTU_EVENTS,RTU_COMMAND_CONFIG_REQUEST,MASTER_DATAPOINT_EVENT,MASTER_DATA_OBJECT_EVENT,CAPTURE_DATA_CHANGE,MASTER_RTU_EVENTS,MANUAL_SET_EVENT`.
   Nama topic dibaca dari bagian setelah titik terakhir, jadi topic berawalan (`dev.RTU_EVENTS`) tetap dikenali.
@@ -1750,6 +1751,5 @@ Ditemukan saat menulis dokumen ini. **Kode tidak diubah**; perlu keputusan tim.
     `src/domain/command.rs`.
 17. **Komentar `models.rs`** "nama & bentuk field sama dengan IEC 104": `RtuEventMessage` 61850 menambah `user` dan membuat
     `ip_address` opsional; `MasterRtuEventMessage` 61850 tidak punya `id_station`.
-18. **`GROUP_ID`** default `IEC61850_GROUP` (`.env.example`, kode) berbeda dengan `IEC61850_FEP_GROUP` di
-    `kubernetes/configmap.yaml`. Keduanya berbeda dengan group IEC 104, jadi aman, tapi perlu dipilih satu.
+18. ~~`GROUP_ID` tidak seragam~~ — **diperbaiki**: `IEC61850_FEP_GROUP` di kode, `.env.example`, dan configmap.
 19. **BROWSE / COMMAND dengan `key` kosong**: key Kafka `"unknown"`, tetapi field `key` di isi pesan `""`.

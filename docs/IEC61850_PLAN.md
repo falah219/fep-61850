@@ -56,7 +56,7 @@ FEP adalah jembatan antara IED dan service backend lain. Backend tidak berbicara
 Aturan:
 - Nama topik, key, dan format JSON **harus identik** dengan versi IEC 104. Bedanya hanya `protocol: "IEC61850"`.
 - Handler yang menerima pesan dengan `protocol` selain `IEC61850` harus **mengabaikannya**, karena FEP IEC 104 dan FEP IEC 61850 membaca topik yang sama. Polanya sama seperti `RtuEventHandler::handle` yang mengecek `msg.protocol != "IEC104"`.
-- Gunakan `GROUP_ID` Kafka yang **berbeda** dari FEP IEC 104 (contoh `IEC61850_GROUP`), supaya kedua FEP sama-sama menerima semua pesan.
+- Gunakan `GROUP_ID` Kafka yang **berbeda** dari FEP IEC 104 (default `IEC61850_FEP_GROUP`), supaya kedua FEP sama-sama menerima semua pesan.
 - Sebelum menulis kode Kafka, baca dulu file-file acuan di atas dan ringkas format setiap topik ke saya.
 
 ### Yang dipakai ulang

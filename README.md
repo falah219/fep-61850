@@ -301,7 +301,10 @@ docker compose -f docker-compose.dev.yml exec -w /work dev scripts/uji_konek_ser
 - **`RTU_LOGGING`**: konek, putus, gagal konek, RCB gagal (`[LEVEL] pesan`).
 - Peringatan konfigurasi (WARN, log + `RTU_LOGGING`, sekali per sesi setelah konek): mode REPORT/HYBRID tanpa RCB
   `enabled`, dan datapoint `protocol = 'IEC61850'` tanpa baris `master_datapoint_iec61850s` (IOA disebut, maks 20).
-- **Consumer** (`GROUP_ID` default `IEC61850_GROUP`), pesan dengan `protocol` ≠ `IEC61850` diabaikan.
+- **Consumer** (`GROUP_ID` default `IEC61850_FEP_GROUP`, sama di `.env.example` dan `kubernetes/configmap.yaml`), pesan dengan `protocol` ≠ `IEC61850` diabaikan.
+  **Hanya boleh satu instance FEP IEC 61850 aktif per lingkungan** (satu `GROUP_ID`): dua instance dengan group sama membagi
+  partisi (sebagian event tidak sampai ke instance yang memegang IED-nya), dua instance dengan group beda sama-sama konek ke
+  IED yang sama dan mengirim data ganda.
   Field, contoh JSON, dan balasan tiap topic: [docs/KAFKA_PAYLOADS.md](docs/KAFKA_PAYLOADS.md).
 
 | Topik / event | Aksi |
