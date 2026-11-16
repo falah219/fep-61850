@@ -1,0 +1,13 @@
+{
+  "event": "CREATE",
+  "protocol": "IEC61850",
+  "data": {
+    "id": "4e5f6a7b-8c9d-4e0f-a1b2-c3d4e5f6a7b8",
+    "protocol": "IEC61850",
+    "code": 9,
+    "initial": "MV",
+    "information": "Measured value",
+    "id_group": "a2b4c6d8-1e3f-4a5b-8c7d-9e0f1a2b3c4d",
+    "is_deleted": false
+  }
+}

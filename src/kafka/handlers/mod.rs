@@ -2,6 +2,7 @@
 
 pub(crate) mod capture_data_change;
 pub(crate) mod manual_set;
+pub(crate) mod master_data_object;
 pub(crate) mod master_datapoint;
 pub(crate) mod master_rtu_event;
 pub(crate) mod rtu_event;

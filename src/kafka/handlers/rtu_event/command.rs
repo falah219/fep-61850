@@ -193,6 +193,17 @@ pub fn reject(mgr: &Manager, action: &str, key: String, ip_address: String, erro
     respond(mgr, &cd, &event_name(action), None, None, &Err(error.to_string()));
 }
 
+/// COMMAND tidak valid TANPA key: tidak bisa dicocokkan GRITA, jadi sengaja tidak dibalas RTU_COMMAND.
+/// Cukup log + RTU_LOGGING WARN (kalau IED-nya diketahui).
+pub fn unanswered(mgr: &Manager, ip_address: &str, id_rtu: Option<i32>, error: &str) {
+    let msg = format!("COMMAND tidak valid tanpa key, tidak dibalas: {error}");
+    warn!("[COMMAND] {msg}");
+    if let Some(id) = id_rtu.or_else(|| mgr.id_by_ip(ip_address)) {
+        let ip = mgr.ip_of(id).unwrap_or_else(|| ip_address.to_string());
+        mgr.publisher.producer.send_log(&ip, id, "WARN", &msg);
+    }
+}
+
 fn respond(mgr: &Manager, cd: &CommandData, event: &str, ioa: Option<i32>, value: Option<f64>, result: &Result<(), String>) {
     match result {
         Ok(()) => info!("[COMMAND] {event} sukses ioa={ioa:?}"),
@@ -448,6 +459,7 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(2), submit(&mgr, m)).await.expect(json);
         }
         reject(&mgr, "OPERATE_RTU", "d".into(), String::new(), "payload tidak valid");
+        unanswered(&mgr, "10.0.0.1", Some(9001), "payload tidak valid");
     }
 
     #[test]

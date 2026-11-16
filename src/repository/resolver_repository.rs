@@ -60,16 +60,17 @@ pub async fn load_formulas(c: &Client) -> DbResult<Vec<(String, String, f64, f64
         .collect())
 }
 
-pub async fn load_groups(c: &Client) -> DbResult<Vec<(String, String)>> {
+/// (id, initial, id_group) baris master_data_objects IEC61850.
+pub async fn load_groups(c: &Client) -> DbResult<Vec<(String, String, String)>> {
     let rows = c
         .query(
-            "SELECT initial, id_group::TEXT FROM master_data_objects
+            "SELECT id::TEXT, initial, id_group::TEXT FROM master_data_objects
              WHERE protocol = 'IEC61850' AND is_deleted = FALSE AND initial IS NOT NULL AND id_group IS NOT NULL",
             &[],
         )
         .await
         .map_err(db_err("query group"))?;
-    Ok(rows.iter().filter_map(|r| Some((r.try_get(0).ok()?, r.try_get(1).ok()?))).collect())
+    Ok(rows.iter().filter_map(|r| Some((r.try_get(0).ok()?, r.try_get(1).ok()?, r.try_get(2).ok()?))).collect())
 }
 
 pub async fn load_general_actions(c: &Client) -> DbResult<Vec<(String, i32)>> {

@@ -113,7 +113,7 @@ fn contoh_consume_terbaca_handler() {
                 assert_eq!((m.schema.as_str(), m.table.as_str()), ("public", ev), "{name}");
                 None
             }
-            KafkaEvent::MasterDataObject => None,
+            KafkaEvent::MasterDataObject(_) => None,
             KafkaEvent::InvalidCommand { error, .. } => panic!("{name}: contoh tidak terbaca: {error}"),
         };
         if let Some(p) = protocol {
@@ -228,13 +228,13 @@ fn contoh_rtu_logging() {
                 continue;
             }
             "traffic_dropped" => {
-                // batas 1/detik, 13 baris di detik 1 -> 12 dilewati, ringkasan di detik 2 (tanpa timestamp)
+                // batas 1/detik, 13 baris di detik 1 -> 12 dilewati, ringkasan (bertimestamp) di detik 2
                 let t = TrafficLog::new(true, 1);
                 for _ in 0..13 {
                     t.data_lines(1, || "x".into());
                 }
-                assert_eq!(t.data_lines(2, || "x".into())[0], line, "{name}");
-                continue;
+                let got = t.data_lines(2, || "x".into()).remove(0);
+                got.split_once(' ').map_or(got.clone(), |(_, b)| b.to_string())
             }
             _ => {
                 assert!(["[INFO] ", "[WARN] ", "[ERROR] "].iter().any(|p| line.starts_with(p)), "{name}: {line}");

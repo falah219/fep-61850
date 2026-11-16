@@ -2,7 +2,7 @@
 //!
 //! - Baris data (REPORT/POLL/GI): hanya kalau `LOG_DATA_TRAFFIC=true`, dibatasi
 //!   `LOG_DATA_MAX_PER_SEC` per IED (0 = tanpa batas). Baris yang lewat batas dilewati, lalu di detik
-//!   berikutnya dikirim satu baris ringkas.
+//!   berikutnya dikirim satu baris ringkas (bertimestamp, sama dengan baris data).
 //! - Baris CONTROL selalu dikirim (audit).
 //!
 //! Dipanggil juga dari thread report libIEC61850: hanya atomik + format string, tanpa lock.
@@ -45,7 +45,7 @@ impl TrafficLog {
                 self.count.store(0, Relaxed);
                 let dropped = self.dropped.swap(0, Relaxed);
                 if dropped > 0 {
-                    out.push(format!("[INFO] {dropped} log data dilewati (batas LOG_DATA_MAX_PER_SEC)"));
+                    out.push(format!("{} [INFO] {dropped} log data dilewati (batas LOG_DATA_MAX_PER_SEC)", ts()));
                 }
             }
             if self.count.fetch_add(1, Relaxed) >= self.max_per_sec {
@@ -261,7 +261,7 @@ mod tests {
         assert!(t.data_lines(100, || "d".into()).is_empty());
         // detik berikutnya: baris ringkas dulu, lalu baris data
         let lines = t.data_lines(101, || "e".into());
-        assert_eq!(lines[0], "[INFO] 2 log data dilewati (batas LOG_DATA_MAX_PER_SEC)");
+        assert_eq!(body(&lines[0]), "[INFO] 2 log data dilewati (batas LOG_DATA_MAX_PER_SEC)");
         assert_eq!(body(&lines[1]), "e");
         assert_eq!(t.data_lines(101, || "f".into()).len(), 1); // ringkas hanya sekali
     }

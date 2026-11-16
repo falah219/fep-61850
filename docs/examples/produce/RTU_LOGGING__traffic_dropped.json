@@ -2,6 +2,6 @@
   "ip_address": "10.10.1.21",
   "protocol": "IEC61850",
   "id_rtu": 9001,
-  "logging": "[INFO] 12 log data dilewati (batas LOG_DATA_MAX_PER_SEC)",
+  "logging": "2026-11-15T03:04:06.000000Z [INFO] 12 log data dilewati (batas LOG_DATA_MAX_PER_SEC)",
   "time": 1794711845123
 }

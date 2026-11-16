@@ -1,21 +1,25 @@
 use dashmap::DashMap;
 use std::sync::Arc;
 
+/// Group `master_data_objects` IEC61850: `initial` (CDC) -> `id_group`, plus `id` baris -> (initial, id_group)
+/// supaya MASTER_DATA_OBJECT_EVENT bisa memperbarui / menghapus satu baris tanpa muat ulang semua.
+#[derive(Clone, Default)]
 pub struct GroupResolver {
     mapping: Arc<DashMap<String, String>>,
+    rows: Arc<DashMap<String, (String, String)>>,
 }
 
 impl GroupResolver {
     pub fn new() -> Self {
-        Self {
-            mapping: Arc::new(DashMap::new()),
-        }
+        Self::default()
     }
 
-    pub fn load(&self, groups: Vec<(String, String)>) {
+    /// `groups` = (id, initial, id_group).
+    pub fn load(&self, groups: Vec<(String, String, String)>) {
         self.mapping.clear();
-        for (initial, id_group) in groups {
-            self.mapping.insert(initial, id_group);
+        self.rows.clear();
+        for (id, initial, id_group) in groups {
+            self.upsert_row(&id, initial, id_group);
         }
     }
 
@@ -23,36 +27,28 @@ impl GroupResolver {
         self.mapping.get(initial).map(|v| v.clone())
     }
 
-    pub fn add_group(&self, initial: String, id_group: String) {
-        self.mapping.insert(initial, id_group);
+    /// true kalau `id` baris master_data_objects IEC61850 yang sedang dipakai.
+    pub fn has_row(&self, id: &str) -> bool {
+        self.rows.contains_key(id)
     }
 
-    pub fn remove_group(&self, initial: &str) {
-        self.mapping.remove(initial);
+    /// Tambah / perbarui satu baris. `initial` berubah -> entri initial lama dihapus.
+    pub fn upsert_row(&self, id: &str, initial: String, id_group: String) {
+        self.remove_row(id);
+        self.mapping.insert(initial.clone(), id_group.clone());
+        self.rows.insert(id.to_string(), (initial, id_group));
     }
 
-    pub fn reload(&self) {
-        self.mapping.clear();
+    /// Hapus satu baris. false kalau `id` tidak dikenal (milik protokol lain).
+    // ponytail: dua baris dengan initial sama -> menghapus salah satunya bisa mengosongkan initial itu
+    // sampai muat ulang berikutnya; simpan daftar per initial kalau data seperti itu ada
+    pub fn remove_row(&self, id: &str) -> bool {
+        let Some((_, (initial, id_group))) = self.rows.remove(id) else { return false };
+        self.mapping.remove_if(&initial, |_, v| *v == id_group);
+        true
     }
 
     pub fn get_count(&self) -> usize {
         self.mapping.len()
     }
 }
-
-impl Default for GroupResolver {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Clone for GroupResolver {
-    fn clone(&self) -> Self {
-        Self {
-            mapping: Arc::clone(&self.mapping),
-        }
-    }
-}
-
-unsafe impl Send for GroupResolver {}
-unsafe impl Sync for GroupResolver {}

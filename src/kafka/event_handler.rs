@@ -9,7 +9,8 @@ use serde_json::Value;
 use tracing::info;
 
 use super::consumer::KafkaEvent;
-use super::handlers::capture_data_change::{capture_data_change, reload_groups};
+use super::handlers::capture_data_change::capture_data_change;
+use super::handlers::master_data_object::master_data_object;
 use super::handlers::manual_set::manual_set;
 use super::handlers::master_datapoint::master_datapoint;
 use super::handlers::master_rtu_event::master_rtu;
@@ -33,7 +34,10 @@ pub async fn handle(mgr: &Arc<Manager>, event: KafkaEvent) {
         KafkaEvent::RtuEvent(m) if is_ours(&m.protocol) && m.event == "COMMAND" => {
             tokio::spawn(command::submit(mgr, *m));
         }
-        KafkaEvent::InvalidCommand { action, key, ip_address, error } => command::reject(mgr, &action, key, ip_address, &error),
+        KafkaEvent::InvalidCommand { action, key: Some(key), ip_address, error, .. } => {
+            command::reject(mgr, &action, key, ip_address, &error)
+        }
+        KafkaEvent::InvalidCommand { key: None, ip_address, id_rtu, error, .. } => command::unanswered(mgr, &ip_address, id_rtu, &error),
         // BROWSE: sama dengan COMMAND, masuk antrean IED sekarang, tunggu hasil di task sendiri.
         KafkaEvent::RtuEvent(m) if is_ours(&m.protocol) && m.event == "BROWSE" => {
             tokio::spawn(browse::submit(mgr, *m));
@@ -47,7 +51,7 @@ pub async fn handle(mgr: &Arc<Manager>, event: KafkaEvent) {
         }
         KafkaEvent::ManualSet(m) if is_ours(&m.protocol) => manual_set(mgr, m),
         KafkaEvent::CaptureDataChange(m) => capture_data_change(mgr, m).await,
-        KafkaEvent::MasterDataObject => reload_groups(mgr).await,
+        KafkaEvent::MasterDataObject(v) => master_data_object(mgr, v).await,
         _ => {}
     }
 }

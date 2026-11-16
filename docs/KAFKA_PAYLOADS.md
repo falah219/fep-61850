@@ -71,7 +71,8 @@ Daftar isi:
 
 | Event | Urutan |
 |---|---|
-| CREATE/ADD/UPDATE, DELETE/REMOVE, STATE, RESET, GI, CHANNEL | `id_rtu` tingkat atas → `data.id_rtu` → dicari dari `ip_address` di antara IED yang **sedang berjalan** |
+| CREATE/ADD/UPDATE | `id_rtu` tingkat atas → `data.id_rtu` → dicari dari `ip_address` di antara IED yang **sedang berjalan** → dicari di tabel `iec61850s` (`ip_address` + `port` kalau ada, `is_deleted = false`, harus tepat satu baris) |
+| DELETE/REMOVE, STATE, RESET, GI, CHANNEL | `id_rtu` tingkat atas → `data.id_rtu` → dicari dari `ip_address` di antara IED yang **sedang berjalan** |
 | COMMAND | `data.id_rtu` → `id_rtu` tingkat atas → dicari dari `data.ip_address` / `ip_address` di antara IED yang berjalan |
 | BROWSE | `id_rtu` tingkat atas → `data.id_rtu` → dicari dari `data.ip_address` / `ip_address` di antara IED yang berjalan |
 
@@ -105,7 +106,13 @@ Efek: baca ulang RTU dari DB (`iec61850s`, RCB, mapping), hentikan thread lama (
 hasilnya terlihat di `RTU_STATUS` / `RTU_LOGGING` saat konek.
 
 Gagal: `id_rtu` tidak ada di `iec61850s` → thread dihentikan, log `WARN [RTU_EVENTS] UPDATE RTU 9001: RTU 9001 tidak ada di iec61850s`.
-DB tidak tersedia → log `WARN`. RTU **baru** harus dikirim dengan `id_rtu` (pencarian dari IP hanya untuk IED yang sudah berjalan).
+DB tidak tersedia → log `WARN`.
+
+Tanpa `id_rtu` (dan IED dengan IP itu tidak sedang berjalan): `id_rtu` dicari di tabel `iec61850s` dengan `ip_address` (trim,
+tidak peka huruf besar/kecil), `port` kalau ada di payload (atas → `data`), dan `is_deleted = false`. Tidak ada baris →
+`WARN ... tidak ada baris iec61850s untuk ip ...`; **lebih dari satu baris** (mis. dua IED di IP sama beda port, payload tanpa
+`port`) → `WARN ... N baris iec61850s cocok ..., tidak dipilih; kirim id_rtu` dan event tidak dijalankan.
+**Backend sebaiknya selalu mengirim `id_rtu`.**
 
 Minimal:
 
@@ -481,7 +488,7 @@ Gagal / ditolak (semua dibalas `RTU_COMMAND` `status: "inactive"`, alasan di `ms
 
 | Kondisi | Alasan di `msg` |
 |---|---|
-| JSON tidak terbaca struct (salah tipe di tingkat atas / JSON rusak) tapi `event` = COMMAND, `protocol` = IEC61850, dan `key` terbaca | `payload tidak valid: <error serde>`. `event` respons dari `action` kalau terbaca, selain itu `UNKNOWN`. Tanpa `key` → tidak ada balasan (log ERROR) |
+| JSON tidak terbaca struct (salah tipe di tingkat atas / JSON rusak) tapi `event` = COMMAND, `protocol` = IEC61850, dan `key` terbaca | `payload tidak valid: <error serde>`. `event` respons dari `action` kalau terbaca, selain itu `UNKNOWN`. Tanpa `key` → **sengaja** tidak dibalas (tidak bisa dicocokkan GRITA): log `WARN` + `RTU_LOGGING` `[WARN] COMMAND tidak valid tanpa key, tidak dibalas: ...` (kalau IED diketahui dari `id_rtu` / IP) |
 | `data` ada tapi salah tipe | `field data tidak valid: <error serde>` |
 | `action` tidak dikenal / kosong | `action tidak dikenal: "<action>" (SELECT_RTU, OPERATE_RTU, CANCEL_RTU)`; `event` = action tanpa `_RTU` (kosong: `UNKNOWN`) |
 | `id_rtu` tidak ada dan IP tidak cocok IED yang berjalan | `RTU tidak ditemukan untuk IP ini` |
@@ -601,18 +608,67 @@ Log: `INFO [MASTER_DATAPOINT] UPDATE id_rtu=9001 ioa=2001`. Event lain / tanpa `
 
 ### 2.3 `MASTER_DATA_OBJECT_EVENT`
 
-Isi pesan **tidak dibaca sama sekali** (boleh `{}`; protocol tidak dicek). Efek: muat ulang group
-(`master_data_objects` dengan `protocol = 'IEC61850'`). Tidak ada balasan. DB tidak tersedia → `WARN [CDC] DB tidak tersedia`.
+Handler: [master_data_object.rs](../src/kafka/handlers/master_data_object.rs) (keputusan di `group_plan`). Group di-update
+**per baris**, tanpa reconnect IED. GroupResolver menyimpan `id` tiap baris `master_data_objects` IEC61850: peta
+`id → (initial, id_group)` dan `initial → id_group`.
 
-`docs/examples/consume/MASTER_DATA_OBJECT_EVENT__UPDATE.json`
+| Pesan | Efek |
+|---|---|
+| CREATE/UPDATE, `protocol` bukan `IEC61850` | diabaikan (DEBUG) |
+| CREATE/UPDATE, `protocol` `IEC61850` | entri baris itu diperbarui; `initial` berubah → entri initial lama dihapus |
+| CREATE/UPDATE `is_deleted = true` | entri baris itu dihapus |
+| DELETE (hanya `id`) | `id` ada di peta → entri dihapus; tidak ada → diabaikan (baris milik protokol lain) |
+| Field tidak terbaca (bukan JSON, tanpa `id`, tanpa `protocol`, tanpa `initial`/`id_group`) | muat ulang semua group + `WARN` |
+
+Baris dibaca dari `data` / `record` / `new_data`, kalau tidak ada dari pesan itu sendiri; `event` dari `event` / `action` /
+`operation`. Tidak ada balasan Kafka.
+
+> Contoh di bawah adalah **bentuk contoh** sesuai deskripsi backend (CREATE/UPDATE = baris lengkap, DELETE = `id` saja),
+> **belum** sampel asli dari KaDeck. Ganti dengan sampel asli begitu tersedia.
+
+`docs/examples/consume/MASTER_DATA_OBJECT_EVENT__CREATE.json`
+
+```json
+{
+  "event": "CREATE",
+  "protocol": "IEC61850",
+  "data": {
+    "id": "4e5f6a7b-8c9d-4e0f-a1b2-c3d4e5f6a7b8",
+    "protocol": "IEC61850",
+    "code": 9,
+    "initial": "MV",
+    "information": "Measured value",
+    "id_group": "a2b4c6d8-1e3f-4a5b-8c7d-9e0f1a2b3c4d",
+    "is_deleted": false
+  }
+}
+```
+
+`docs/examples/consume/MASTER_DATA_OBJECT_EVENT__UPDATE.iec104.json`
 
 ```json
 {
   "event": "UPDATE",
-  "protocol": "IEC61850",
+  "protocol": "IEC104",
   "data": {
-    "initial": "MV",
-    "id_group": "a2b4c6d8-1e3f-4a5b-8c7d-9e0f1a2b3c4d"
+    "id": "5f6a7b8c-9d0e-4f1a-b2c3-d4e5f6a7b8c9",
+    "protocol": "IEC104",
+    "code": 13,
+    "initial": "M_ME_NC_1",
+    "information": "Measured value, float",
+    "id_group": "a2b4c6d8-1e3f-4a5b-8c7d-9e0f1a2b3c4d",
+    "is_deleted": false
+  }
+}
+```
+
+`docs/examples/consume/MASTER_DATA_OBJECT_EVENT__DELETE.json`
+
+```json
+{
+  "event": "DELETE",
+  "data": {
+    "id": "4e5f6a7b-8c9d-4e0f-a1b2-c3d4e5f6a7b8"
   }
 }
 ```
@@ -809,11 +865,13 @@ Struct: `ManualSetEventMessage`. Handler: [manual_set.rs](../src/kafka/handlers/
 | `protocol` | string | ya | `IEC61850` |
 | `tag` | string | ya | Tag datapoint |
 | `manual_set` | boolean | ya | `true` = berhenti kirim ke `DATAPOINTS`, `false` = kirim lagi |
-| `id_rtu` | integer | ya | Harus IED yang sedang berjalan di FEP ini |
+| `id_rtu` | integer | ya | IED di FEP ini; tidak berjalan / tidak dikenal → `FAILED` |
 | `user` | string | tidak | Disalin ke respons |
 
-Efek + balasan `MANUAL_SET_EVENT_RESPONSE` (bagian [3.6](#36-manual_set_event_response)). `id_rtu` bukan IED FEP ini
-→ **diam** (FEP lain yang menjawab). Event lain → `WARN [MANUAL_SET] event tidak dikenal`, tanpa balasan.
+Efek + balasan `MANUAL_SET_EVENT_RESPONSE` (bagian [3.6](#36-manual_set_event_response)). IED tidak berjalan (ada di
+`iec61850s` tapi thread-nya tidak jalan) → `FAILED` `IED tidak berjalan`; `id_rtu` tidak ada di `iec61850s` →
+`FAILED` `IED tidak dikenal` (pesan protocol lain sudah disaring sebelumnya). Event lain → `WARN [MANUAL_SET] event tidak
+dikenal`, tanpa balasan.
 Log: `INFO [MANUAL_SET] STOPPED tag=BAY1_ANIN1_2001 user=operator1`.
 
 `docs/examples/consume/MANUAL_SET_EVENT__TOGGLE_MANUAL_SET.json`
@@ -1216,8 +1274,8 @@ Tiga jenis isi `logging`:
 
 **b. Lalu lintas data** — `<timestamp> <isi>`, hanya kalau `LOG_DATA_TRAFFIC=true` (default `false`), maks
 `LOG_DATA_MAX_PER_SEC` baris per IED per detik (default 50, `0` = tanpa batas). Baris yang lewat batas dilewati, lalu
-bersama baris data pertama di detik berikutnya dikirim baris ringkas `[INFO] <n> log data dilewati (batas LOG_DATA_MAX_PER_SEC)`
-(tanpa timestamp). Format ([traffic.rs](../src/iec61850/traffic.rs)):
+bersama baris data pertama di detik berikutnya dikirim baris ringkas `<timestamp> [INFO] <n> log data dilewati (batas
+LOG_DATA_MAX_PER_SEC)`. Format ([traffic.rs](../src/iec61850/traffic.rs)):
 
 ```text
 REPORT RX - RCB: <nama RCB>, Dataset: <nama dataset>, Reason: <dchg,qchg,dupd,integrity,gi|->, Entries: <n>, SeqNum: <n|->[, EntryID: <hex>]
@@ -1323,7 +1381,7 @@ Command yang ditolak FEP **sebelum** dikirim (value tidak cocok CDC, `value` kos
   "ip_address": "10.10.1.21",
   "protocol": "IEC61850",
   "id_rtu": 9001,
-  "logging": "[INFO] 12 log data dilewati (batas LOG_DATA_MAX_PER_SEC)",
+  "logging": "2026-11-15T03:04:06.000000Z [INFO] 12 log data dilewati (batas LOG_DATA_MAX_PER_SEC)",
   "time": 1794711845123
 }
 ```
@@ -1564,7 +1622,7 @@ Struct: `ManualSetEventResponse`. Key = `"IEC61850"`.
 | `tag` | string | selalu | `tag` payload |
 | `manual_set` | boolean | SUCCESS | Nilai baru |
 | `user` | string | SUCCESS dan payload punya `user` | `user` payload |
-| `error` | string | FAILED | `Datapoint not found` |
+| `error` | string | FAILED | `Datapoint not found`, `IED tidak berjalan`, `IED tidak dikenal` |
 | `timestamp` | integer | selalu | ms epoch UTC |
 
 `docs/examples/produce/MANUAL_SET_EVENT_RESPONSE__success.json`
@@ -1588,6 +1646,18 @@ Struct: `ManualSetEventResponse`. Key = `"IEC61850"`.
   "protocol": "IEC61850",
   "tag": "TAG_TIDAK_ADA",
   "error": "Datapoint not found",
+  "timestamp": 1794711845123
+}
+```
+
+`docs/examples/produce/MANUAL_SET_EVENT_RESPONSE__failed_ied.json`
+
+```json
+{
+  "status": "FAILED",
+  "protocol": "IEC61850",
+  "tag": "BAY1_ANIN1_2001",
+  "error": "IED tidak berjalan",
   "timestamp": 1794711845123
 }
 ```
@@ -1819,8 +1889,8 @@ Bentuk yang terbaca kedua FEP: `ip_address` dan `port` di tingkat atas **dan** d
 
 ## 5. Catatan ketidaksesuaian
 
-Ditemukan saat menulis dokumen ini (2026-11-15), lalu sebagian diperbaiki (2026-11-16). Butir yang belum dicoret masih
-berlaku dan perlu keputusan tim.
+Ditemukan saat menulis dokumen ini (2026-11-15), lalu sebagian diperbaiki (2026-11-16). Semua butir sudah diperbaiki atau
+ditandai sengaja (2026-11-16).
 
 1. ~~CDC: `record` vs `data`~~ — **diperbaiki**: FEP membaca `record` (cadangan `data`), UPDATE kolom status `iec61850s` tidak lagi memicu reload, tabel lain diabaikan.
 2. ~~README `group`~~ — **diperbaiki di README**: `group` = `master_data_objects.id_group` (UUID), sama dengan IEC 104.
@@ -1828,21 +1898,19 @@ berlaku dan perlu keputusan tim.
 4. ~~COMMAND `data` gagal dibaca → diam-diam pakai field datar~~ — **diperbaiki**: ditolak `inactive` `field data tidak valid: ...`.
 5. ~~Default port COMMAND tidak seragam~~ — **diperbaiki**: port konfigurasi IED (IED tidak dikenal: `port` payload, lalu 102).
 6. ~~`qualifier` payload diabaikan~~ — **diperbaiki**: dikembalikan di respons (default 0).
-7. **Tanpa balasan** (sisa): COMMAND dengan JSON tidak valid **tanpa** `key` yang terbaca, `MANUAL_SET_EVENT` untuk `id_rtu`
-   yang tidak berjalan (sengaja: FEP lain yang menjawab) atau event selain `TOGGLE_MANUAL_SET`.
-8. **Cek protocol tidak berlaku** untuk `MASTER_DATA_OBJECT_EVENT` (isi pesan tidak dibaca; pesan IEC104 pun memicu reload
-   group 61850, murah karena tanpa reconnect). Perbandingan protocol tidak peka huruf besar/kecil.
+7. ~~Tanpa balasan~~ — **diperbaiki / sengaja**: (a) COMMAND tidak valid **tanpa** `key` sengaja tidak dibalas (tidak bisa dicocokkan), cukup log + `RTU_LOGGING` WARN; (b) `MANUAL_SET_EVENT` untuk IED tidak berjalan / tidak dikenal → `FAILED` `IED tidak berjalan` / `IED tidak dikenal`. Sisa: event selain `TOGGLE_MANUAL_SET` tanpa balasan (sama dengan IEC 104).
+8. ~~Cek protocol tidak berlaku untuk `MASTER_DATA_OBJECT_EVENT`~~ — **diperbaiki**: group di-update per baris; `protocol` bukan IEC61850 diabaikan, DELETE (hanya `id`) hanya menghapus `id` yang dikenal, field tidak terbaca → muat ulang semua + WARN. Contoh pesan masih bentuk contoh, menunggu sampel asli KaDeck.
 9. ~~BROWSE tidak mencari `id_rtu` dari `ip_address`~~ — **diperbaiki**: sama dengan COMMAND.
-10. **CREATE/ADD/UPDATE dengan `ip_address` saja** hanya berhasil untuk IED yang sudah berjalan; RTU baru wajib `id_rtu`.
+10. ~~CREATE/ADD/UPDATE dengan `ip_address` saja hanya untuk IED yang berjalan~~ — **diperbaiki**: `id_rtu` dicari di `iec61850s` (`ip_address` + `port`, `is_deleted = false`); lebih dari satu baris → WARN, tidak dipilih. Backend sebaiknya selalu mengirim `id_rtu`.
 11. ~~`MASTER_DATAPOINT_EVENT.ioa` harus integer~~ — **diperbaiki**: integer maupun string angka. (Tetap: `REMOVE` tidak dikenal di topic ini, hanya `DELETE`.)
 12. ~~Event GI pada mode POLLING menghasilkan `INTEGRITY`~~ — **diperbaiki**: `GENERAL_INTERROGATION`.
 13. ~~`CONTROL TX` ditulis walau tidak ada request ke IED~~ — **diperbaiki**: SELECT direct → `CONTROL SKIP`, value tidak valid / status-only → baris `[ERROR] ... tidak dikirim`.
-14. **Baris ringkas `[INFO] <n> log data dilewati ...` tanpa timestamp**, sementara baris lalu lintas lain diawali timestamp.
+14. ~~Baris ringkas `[INFO] <n> log data dilewati ...` tanpa timestamp~~ — **diperbaiki**: diawali timestamp UTC ISO-8601 seperti baris data lain.
 15. ~~README fase 8: daftar `RTU_LOGGING` tidak lengkap~~ — **diperbaiki** di README.
 16. ~~Path lama di README~~ — **diperbaiki** (`src/repository/`, `src/connection/manager.rs`, `src/kafka/handlers/`, `src/domain/command.rs`).
 17. ~~Komentar `models.rs` "bentuk field sama dengan IEC 104"~~ — **diperbaiki**: komentar menjelaskan beda pesan consume.
 18. ~~`GROUP_ID` tidak seragam~~ — **diperbaiki**: `IEC61850_FEP_GROUP` di kode, `.env.example`, dan configmap.
-19. **BROWSE / COMMAND dengan `key` kosong**: key Kafka `"unknown"`, tetapi field `key` di isi pesan `""`.
+19. **Sengaja, tidak diubah**: BROWSE / COMMAND dengan `key` kosong → key Kafka `"unknown"`, field `key` di isi pesan `""`. Sama dengan FEP IEC 104 (`command/response.rs` memakai `"unknown"`).
 20. ~~Pencarian `id_rtu` dari IP membuang `-`~~ — **diperbaiki**: dibandingkan apa adanya (trim + huruf kecil), hostname seperti `ied-sim-1` cocok.
 21. ~~CDC `iec61850s` tidak membandingkan `channel_number`~~ — **diperbaiki**: perubahan `channel_number` memperbarui channel status ping tanpa reconnect MMS; pembanding CDC = salinan terakhir baris DB per IED.
 22. ~~CDC menjalankan IED yang dihentikan lewat STATE false~~ — **diperbaiki**: CDC dibandingkan dengan salinan baris DB, STATE idempoten; alur `state_rtu` didokumentasikan di 2.1 STATE.

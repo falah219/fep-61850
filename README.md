@@ -330,7 +330,7 @@ docker compose -f docker-compose.dev.yml exec -w /work dev scripts/uji_konek_ser
 
 | Topik / event | Aksi |
 |---|---|
-| `RTU_EVENTS` `UPDATE`/`CREATE`/`ADD` | baca ulang RTU dari DB, restart thread |
+| `RTU_EVENTS` `UPDATE`/`CREATE`/`ADD` | baca ulang RTU dari DB, restart thread. Tanpa `id_rtu`: dicari di `iec61850s` per `ip_address` (+ `port`); lebih dari satu baris → WARN, tidak dijalankan. Backend sebaiknya selalu kirim `id_rtu` |
 | `RTU_EVENTS` `DELETE`/`REMOVE` | hentikan thread |
 | `RTU_EVENTS` `STATE` | `false`: hentikan + status 0; `true`: baca ulang + konek. Idempoten: IED yang sudah jalan / berhenti tidak diapa-apakan (STATE + CDC `state_rtu` = satu aksi, DB sumber kebenaran) |
 | `RTU_EVENTS` `RESET` | status 0, restart |
@@ -339,11 +339,11 @@ docker compose -f docker-compose.dev.yml exec -w /work dev scripts/uji_konek_ser
 | `RTU_EVENTS` `COMMAND` | select / operate / cancel (fase 9) |
 | `RTU_EVENTS` `BROWSE` | browse model IED di thread IED → `IEC61850_BROWSE_RESPONSE` (lihat di bawah) |
 | `MASTER_DATAPOINT_EVENT` | update TagResolver + restart IED (mapping bisa berubah) |
-| `MASTER_DATA_OBJECT_EVENT` | muat ulang group |
+| `MASTER_DATA_OBJECT_EVENT` | perbarui group per baris (`id` → initial, id_group), protocol bukan IEC61850 diabaikan, DELETE hanya `id` yang dikenal; tanpa reconnect |
 | `MASTER_RTU_EVENTS` `UPDATE_ID_RTU` | hentikan id lama, jalankan id baru |
 | `RTU_COMMAND_CONFIG_REQUEST` | dicatat (sama dengan IEC 104) |
 | `CAPTURE_DATA_CHANGE` | Baca `record` (cadangan `data`). `formulas`, `manual_sets`, `master_data_objects`, `master_general_actions` (protocol IEC61850 / kosong) → muat ulang resolver tanpa reconnect; `iec61850s` → restart IED itu **hanya kalau kolom koneksi/akuisisi berubah** (kolom status `status_rtu`, `rtu_online_at`, ... diabaikan), DELETE / `is_deleted` → hentikan, INSERT → jalankan; `iec61850_report_controls`, `master_datapoint_iec61850s`, `iec61850_command_formulas` → restart IED terkait; tabel lain diabaikan |
-| `MANUAL_SET_EVENT` | toggle manual set + `MANUAL_SET_EVENT_RESPONSE` (key `IEC61850`) |
+| `MANUAL_SET_EVENT` | toggle manual set + `MANUAL_SET_EVENT_RESPONSE` (key `IEC61850`); IED tidak berjalan / tidak dikenal → `FAILED` |
 
 Uji (di kantor, Postgres + Kafka dev):
 1. `cargo run` → `RTU_STATUS` berisi `{"ip_address":"system","id_rtu":0,...,"status":1}` lalu status 1 untuk RTU 9001 & 9002.

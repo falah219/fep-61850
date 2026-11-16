@@ -34,6 +34,20 @@ fn non_negative(v: i32) -> u64 {
     v.max(0) as u64
 }
 
+/// id_rtu baris `iec61850s` (is_deleted = false) dengan `ip_address` ini (trim + huruf kecil) dan `port` (kalau diisi).
+pub async fn ids_by_ip(c: &Client, ip: &str, port: Option<i32>) -> DbResult<Vec<i32>> {
+    let rows = c
+        .query(
+            "SELECT id_rtu FROM iec61850s
+             WHERE is_deleted = FALSE AND lower(trim(ip_address)) = lower(trim($1)) AND ($2::INT IS NULL OR port = $2)
+             ORDER BY id_rtu",
+            &[&ip, &port],
+        )
+        .await
+        .map_err(db_err("query iec61850s per ip"))?;
+    Ok(rows.iter().filter_map(|r| r.try_get(0).ok()).collect())
+}
+
 /// `id = None` -> semua RTU; `Some(id)` -> satu RTU (untuk reload dari event Kafka).
 pub async fn load_rtus(c: &Client, id: Option<i32>) -> DbResult<Vec<RtuConfig>> {
     let integrity_period_ms = env_u64("INTEGRITY_PERIOD_MS", 60_000);

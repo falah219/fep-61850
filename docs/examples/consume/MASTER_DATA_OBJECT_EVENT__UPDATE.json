@@ -1,8 +1,0 @@
-{
-  "event": "UPDATE",
-  "protocol": "IEC61850",
-  "data": {
-    "initial": "MV",
-    "id_group": "a2b4c6d8-1e3f-4a5b-8c7d-9e0f1a2b3c4d"
-  }
-}

@@ -456,6 +456,11 @@ pub(crate) mod testing {
         }
     }
 
+    /// Isi salinan baris DB tanpa DB (IED dikenal tapi tidak berjalan).
+    pub fn remember_db_row(mgr: &Manager, row: RtuConfig) {
+        mgr.db_rows.insert(row.id_rtu, row);
+    }
+
     /// Daftarkan "thread IED" palsu yang menjalankan `run`.
     pub fn fake_ied(mgr: &Manager, id: i32, run: impl FnOnce(Receiver<Ctl>) + Send + 'static) {
         fake_ied_cfg(mgr, rtu(id), run);

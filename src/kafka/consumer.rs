@@ -15,13 +15,15 @@ use crate::config::KafkaConfig;
 pub enum KafkaEvent {
     RtuEvent(Box<RtuEventMessage>),
     MasterDatapoint(MasterDatapointEventMessage),
-    MasterDataObject,
+    /// Isi pesan (None = bukan JSON) -> handlers::master_data_object
+    MasterDataObject(Option<serde_json::Value>),
     MasterRtu(MasterRtuEventMessage),
     CommandConfig(RtuCommandConfigMessage),
     CaptureDataChange(CaptureDataChangeMessage),
     ManualSet(ManualSetEventMessage),
-    /// COMMAND IEC61850 yang tidak terbaca `RtuEventMessage`, tapi `key` terbaca -> dibalas RTU_COMMAND inactive.
-    InvalidCommand { action: String, key: String, ip_address: String, error: String },
+    /// COMMAND IEC61850 yang tidak terbaca `RtuEventMessage`. `key` terbaca -> dibalas RTU_COMMAND inactive;
+    /// tanpa key -> tidak bisa dicocokkan, hanya log + RTU_LOGGING WARN.
+    InvalidCommand { action: String, key: Option<String>, ip_address: String, id_rtu: Option<i32>, error: String },
 }
 
 pub(crate) fn parse(topic: &str, payload: &str) -> Result<Option<KafkaEvent>, String> {
@@ -32,7 +34,7 @@ pub(crate) fn parse(topic: &str, payload: &str) -> Result<Option<KafkaEvent>, St
             Err(err) => invalid_command(payload, &err).ok_or_else(|| e(err))?,
         },
         "MASTER_DATAPOINT_EVENT" => KafkaEvent::MasterDatapoint(serde_json::from_str(payload).map_err(e)?),
-        "MASTER_DATA_OBJECT_EVENT" => KafkaEvent::MasterDataObject,
+        "MASTER_DATA_OBJECT_EVENT" => KafkaEvent::MasterDataObject(serde_json::from_str(payload).ok()),
         "MASTER_RTU_EVENTS" => KafkaEvent::MasterRtu(serde_json::from_str(payload).map_err(e)?),
         "RTU_COMMAND_CONFIG_REQUEST" => KafkaEvent::CommandConfig(serde_json::from_str(payload).map_err(e)?),
         "CAPTURE_DATA_CHANGE" => KafkaEvent::CaptureDataChange(serde_json::from_str(payload).map_err(e)?),
@@ -41,7 +43,7 @@ pub(crate) fn parse(topic: &str, payload: &str) -> Result<Option<KafkaEvent>, St
     }))
 }
 
-/// RTU_EVENTS yang gagal di-parse: kalau jelas COMMAND IEC61850 dan `key` terbaca, jadikan InvalidCommand
+/// RTU_EVENTS yang gagal di-parse: kalau jelas COMMAND IEC61850, jadikan InvalidCommand
 /// (protocol lain TIDAK dijawab: pesan itu milik FEP lain).
 fn invalid_command(payload: &str, err: &serde_json::Error) -> Option<KafkaEvent> {
     let json: Option<serde_json::Value> = serde_json::from_str(payload).ok();
@@ -54,8 +56,13 @@ fn invalid_command(payload: &str, err: &serde_json::Error) -> Option<KafkaEvent>
     }
     Some(KafkaEvent::InvalidCommand {
         action: get("action").unwrap_or_default(),
-        key: get("key")?,
+        key: get("key"),
         ip_address: get("ip_address").unwrap_or_default(),
+        id_rtu: json
+            .as_ref()
+            .and_then(|v| v.get("id_rtu").or_else(|| v.get("data").and_then(|d| d.get("id_rtu"))))
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|i| i32::try_from(i).ok()),
         error: format!("payload tidak valid: {err}"),
     })
 }
@@ -140,7 +147,8 @@ mod tests {
             parse("RTU_EVENTS", r#"{"event":"GI","protocol":"IEC61850","ip_address":"1.2.3.4"}"#),
             Ok(Some(KafkaEvent::RtuEvent(_)))
         ));
-        assert!(matches!(parse("MASTER_DATA_OBJECT_EVENT", "{}"), Ok(Some(KafkaEvent::MasterDataObject))));
+        assert!(matches!(parse("MASTER_DATA_OBJECT_EVENT", "{}"), Ok(Some(KafkaEvent::MasterDataObject(Some(_))))));
+        assert!(matches!(parse("MASTER_DATA_OBJECT_EVENT", "bukan json"), Ok(Some(KafkaEvent::MasterDataObject(None)))));
         assert!(matches!(parse("TOPIK_LAIN", "{}"), Ok(None)));
         assert!(parse("RTU_EVENTS", "bukan json").is_err());
     }
@@ -154,15 +162,21 @@ mod tests {
         // id_rtu salah tipe
         let (action, key, error) =
             invalid(r#"{"event":"COMMAND","protocol":"IEC61850","id_rtu":"9001","data":{"action":"OPERATE_RTU","key":"k1"}}"#).unwrap();
-        assert_eq!((action.as_str(), key.as_str()), ("OPERATE_RTU", "k1"));
+        assert_eq!((action.as_str(), key.as_deref()), ("OPERATE_RTU", Some("k1")));
         assert!(error.starts_with("payload tidak valid"));
         // JSON rusak, key masih terbaca
         let (_, key, _) = invalid(r#"{"event":"COMMAND","protocol":"IEC61850","key":"k2","data":{"action":"#).unwrap();
-        assert_eq!(key, "k2");
-        // tanpa key / protocol lain / bukan COMMAND -> parse error biasa
-        assert!(invalid(r#"{"event":"COMMAND","protocol":"IEC61850","id_rtu":"x"}"#).is_none());
+        assert_eq!(key.as_deref(), Some("k2"));
+        // tanpa key: tetap InvalidCommand (log + RTU_LOGGING WARN, tanpa RTU_COMMAND)
+        let (_, key, _) = invalid(r#"{"event":"COMMAND","protocol":"IEC61850","id_rtu":"x"}"#).unwrap();
+        assert_eq!(key, None);
+        // protocol lain / bukan COMMAND -> parse error biasa
         assert!(invalid(r#"{"event":"COMMAND","protocol":"IEC104","id_rtu":"x","key":"k"}"#).is_none());
         assert!(invalid(r#"{"event":"GI","protocol":"IEC61850","id_rtu":"x","key":"k"}"#).is_none());
-        assert!(parse("RTU_EVENTS", r#"{"event":"COMMAND","protocol":"IEC61850","id_rtu":"x"}"#).is_err());
+        assert!(parse("RTU_EVENTS", r#"{"event":"COMMAND","protocol":"IEC104","id_rtu":"x"}"#).is_err());
+        match parse("RTU_EVENTS", r#"{"event":"COMMAND","protocol":"IEC61850","data":{"id_rtu":9001,"port":"x"},"port":"x"}"#) {
+            Ok(Some(KafkaEvent::InvalidCommand { id_rtu, key, .. })) => assert_eq!((id_rtu, key), (Some(9001), None)),
+            _ => panic!("harus InvalidCommand"),
+        }
     }
 }

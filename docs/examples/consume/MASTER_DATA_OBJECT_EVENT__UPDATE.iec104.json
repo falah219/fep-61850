@@ -1,0 +1,13 @@
+{
+  "event": "UPDATE",
+  "protocol": "IEC104",
+  "data": {
+    "id": "5f6a7b8c-9d0e-4f1a-b2c3-d4e5f6a7b8c9",
+    "protocol": "IEC104",
+    "code": 13,
+    "initial": "M_ME_NC_1",
+    "information": "Measured value, float",
+    "id_group": "a2b4c6d8-1e3f-4a5b-8c7d-9e0f1a2b3c4d",
+    "is_deleted": false
+  }
+}

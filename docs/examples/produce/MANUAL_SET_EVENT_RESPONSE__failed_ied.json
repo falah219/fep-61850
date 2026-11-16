@@ -1,0 +1,7 @@
+{
+  "status": "FAILED",
+  "protocol": "IEC61850",
+  "tag": "BAY1_ANIN1_2001",
+  "error": "IED tidak berjalan",
+  "timestamp": 1794711845123
+}
