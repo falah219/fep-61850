@@ -378,6 +378,8 @@ pub(crate) fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End> {
     let mut last_gi: Option<Instant> = None;
     let mut next_poll = Instant::now();
     let mut last_integrity: Option<Instant> = None;
+    // event GI: siklus polling berikutnya dikirim sebagai GENERAL_INTERROGATION
+    let mut gi_poll = false;
     let mut sent: Vec<Option<PointState>> = vec![None; ctx.points.len()];
     let mut controls: HashMap<i32, Control> = HashMap::new();
 
@@ -408,7 +410,8 @@ pub(crate) fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End> {
             if is_integrity {
                 last_integrity = Some(Instant::now());
             }
-            poll_timed_out = poll_cycle(&ied, ctx, &groups, &mut sent, is_integrity);
+            let full = full_poll_action(std::mem::take(&mut gi_poll), is_integrity);
+            poll_timed_out = poll_cycle(&ied, ctx, &groups, &mut sent, full);
             let (next, skipped) = next_deadline(next_poll, Instant::now(), interval);
             if skipped > 0 {
                 warn!(id_rtu = r.id_rtu, "polling terlambat, {skipped} siklus dilewati");
@@ -447,6 +450,7 @@ pub(crate) fn session(ctx: &Arc<RtuCtx>, rx: &Receiver<Ctl>) -> Result<End> {
                 info!(id_rtu = r.id_rtu, "GI diminta");
                 last_gi = None;
                 last_integrity = None;
+                gi_poll = true;
                 next_poll = Instant::now();
             }
             Ok(Ctl::Command(job)) => {
@@ -655,7 +659,20 @@ pub fn read_until_stuck<T>(
 }
 
 /// Satu siklus polling. true = ada request TIMEOUT: session() harus langsung cek liveness.
-fn poll_cycle(ied: &Ied, ctx: &RtuCtx, groups: &[PollGroup], sent: &mut [Option<PointState>], is_integrity: bool) -> bool {
+/// Action siklus polling yang mengirim SEMUA titik: event GI -> GENERAL_INTERROGATION (sama dengan mode
+/// REPORT), periode integrity -> INTEGRITY. None = hanya titik yang berubah (POLLING).
+fn full_poll_action(gi_requested: bool, is_integrity: bool) -> Option<&'static str> {
+    if gi_requested {
+        Some("GENERAL_INTERROGATION")
+    } else if is_integrity {
+        Some("INTEGRITY")
+    } else {
+        None
+    }
+}
+
+/// `full` = action kalau semua titik dikirim (lihat `full_poll_action`).
+fn poll_cycle(ied: &Ied, ctx: &RtuCtx, groups: &[PollGroup], sent: &mut [Option<PointState>], full: Option<&'static str>) -> bool {
     let id_rtu = ctx.rtu.id_rtu;
     // Satu request MMS per (LN, FC). Dibaca dulu TANPA lock supaya callback report (mode HYBRID)
     // tidak tertahan selama request berjalan.
@@ -689,11 +706,11 @@ fn poll_cycle(ied: &Ied, ctx: &RtuCtx, groups: &[PollGroup], sent: &mut [Option<
     for i in touched {
         let cur = &state[i];
         let deadband = ctx.points[i].deadband.unwrap_or(0.0);
-        let action = match &sent[i] {
-            _ if is_integrity => "INTEGRITY",
-            None => "POLLING",
-            Some(prev) if state_changed(prev, cur, deadband) => "POLLING",
-            Some(_) => continue,
+        let action = match (full, &sent[i]) {
+            (Some(a), _) => a,
+            (None, None) => "POLLING",
+            (None, Some(prev)) if state_changed(prev, cur, deadband) => "POLLING",
+            (None, Some(_)) => continue,
         };
         ctx.publish(i, cur, action, None);
         sent[i] = Some(cur.clone());
@@ -705,6 +722,15 @@ fn poll_cycle(ied: &Ied, ctx: &RtuCtx, groups: &[PollGroup], sent: &mut [Option<
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+
+    #[test]
+    fn action_polling_penuh() {
+        // event GI di mode POLLING/HYBRID = GENERAL_INTERROGATION, walau bersamaan dengan periode integrity
+        assert_eq!(full_poll_action(true, true), Some("GENERAL_INTERROGATION"));
+        assert_eq!(full_poll_action(true, false), Some("GENERAL_INTERROGATION"));
+        assert_eq!(full_poll_action(false, true), Some("INTEGRITY"));
+        assert_eq!(full_poll_action(false, false), None);
+    }
 
     #[test]
     fn path_relatif() {

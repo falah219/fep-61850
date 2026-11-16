@@ -219,7 +219,8 @@ Tanpa `state_rtu`: log `WARN [RTU_EVENTS] STATE RTU 9001: STATE tanpa state_rtu`
 #### GI
 
 Mode `REPORT`/`HYBRID`: GI ke semua RCB yang aktif → data `GENERAL_INTERROGATION` di `RTU_DATAS`.
-Mode `POLLING`: siklus polling **integrity** sekarang juga → data dengan action `INTEGRITY` (bukan `GENERAL_INTERROGATION`).
+Mode `POLLING`: siklus polling penuh sekarang juga → semua titik dengan action `GENERAL_INTERROGATION` (sama dengan mode REPORT).
+Mode `HYBRID`: GI ke RCB + polling penuh titik `MX`, keduanya `GENERAL_INTERROGATION`.
 IED tidak berjalan: log `WARN [RTU_EVENTS] GI RTU 9001: IED tidak berjalan`. Kalau `LOG_DATA_TRAFFIC=true`, baris
 `GI TX` / `GI RX` muncul di `RTU_LOGGING`.
 
@@ -847,8 +848,8 @@ Struct: `DataMessage` ([models.rs](../src/kafka/models.rs)), dibuat di
 
 | `action` | Kapan |
 |---|---|
-| `GENERAL_INTERROGATION` | Report dengan reason `gi` (GI awal, GI berkala `general_interrogation_interval`, event GI, RCB pulih) |
-| `INTEGRITY` | Report reason `integrity`; polling siklus integrity (`INTEGRITY_PERIOD_MS`, siklus pertama, event GI) |
+| `GENERAL_INTERROGATION` | Report dengan reason `gi` (GI awal, GI berkala `general_interrogation_interval`, event GI, RCB pulih); polling penuh karena event GI |
+| `INTEGRITY` | Report reason `integrity`; polling siklus integrity (`INTEGRITY_PERIOD_MS`, siklus pertama setelah konek) |
 | `DATA_CHANGE` | Report reason `dchg` |
 | `QUALITY_CHANGE` | Report reason `qchg` |
 | `DATA_UPDATE` | Report reason `dupd`, atau report tanpa reason |
@@ -1740,7 +1741,7 @@ Ditemukan saat menulis dokumen ini. **Kode tidak diubah**; perlu keputusan tim.
 10. **CREATE/ADD/UPDATE dengan `ip_address` saja** hanya berhasil untuk IED yang sudah berjalan; RTU baru wajib `id_rtu`.
 11. **`MASTER_DATAPOINT_EVENT.ioa` harus integer** (string → parse error), padahal `RTU_EVENTS.ioa` menerima string.
     `REMOVE` tidak dikenal di topic ini (hanya `DELETE`).
-12. **Event GI pada mode POLLING** menghasilkan action `INTEGRITY`, bukan `GENERAL_INTERROGATION`.
+12. ~~Event GI pada mode POLLING menghasilkan `INTEGRITY`~~ — **diperbaiki**: `GENERAL_INTERROGATION`.
 13. **`CONTROL TX` ditulis walau tidak ada yang dikirim ke IED**: `value` tidak cocok CDC (baris tanpa `ctlVal`, lalu command
     gagal), dan `SELECT_RTU` pada ctlModel direct (ditulis `CONTROL TX` + `CONTROL RX ... positive` tanpa request MMS).
 14. **Baris ringkas `[INFO] <n> log data dilewati ...` tanpa timestamp**, sementara baris lalu lintas lain diawali timestamp.

@@ -313,7 +313,7 @@ docker compose -f docker-compose.dev.yml exec -w /work dev scripts/uji_konek_ser
 | `RTU_EVENTS` `DELETE`/`REMOVE` | hentikan thread |
 | `RTU_EVENTS` `STATE` | `false`: hentikan + status 0; `true`: baca ulang + konek |
 | `RTU_EVENTS` `RESET` | status 0, restart |
-| `RTU_EVENTS` `GI` | GI ke semua RCB; mode polling: siklus integrity sekarang |
+| `RTU_EVENTS` `GI` | GI ke semua RCB; mode polling: siklus polling penuh sekarang, action `GENERAL_INTERROGATION` |
 | `RTU_EVENTS` `CHANNEL` | dicatat (sama dengan IEC 104) |
 | `RTU_EVENTS` `COMMAND` | select / operate / cancel (fase 9) |
 | `RTU_EVENTS` `BROWSE` | browse model IED di thread IED → `IEC61850_BROWSE_RESPONSE` (lihat di bawah) |
