@@ -1,8 +1,9 @@
 //! RTU_EVENTS: UPDATE / CREATE / DELETE / STATE / RESET / GI / CHANNEL (+ COMMAND di `command.rs`,
-//! BROWSE di `browse.rs`).
+//! BROWSE di `browse.rs`, SCL_IMPORT di `scl_import.rs`).
 
 pub mod browse;
 pub mod command;
+pub mod scl_import;
 
 use std::sync::Arc;
 

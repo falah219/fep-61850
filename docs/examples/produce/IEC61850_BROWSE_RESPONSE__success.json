@@ -2,6 +2,7 @@
   "key": "browse-9001-01",
   "id_rtu": 9001,
   "status": "SUCCESS",
+  "source": "BROWSE",
   "message": "4 objek, 0 RCB",
   "objects": [
     {

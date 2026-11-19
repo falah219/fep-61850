@@ -48,6 +48,40 @@ pub async fn ids_by_ip(c: &Client, ip: &str, port: Option<i32>) -> DbResult<Vec<
     Ok(rows.iter().filter_map(|r| r.try_get(0).ok()).collect())
 }
 
+/// Baris `iec61850_scl_files` (event SCL_IMPORT, file disimpan backend). Tabel tanpa trigger CDC.
+#[derive(Debug, Default)]
+pub struct SclFileRow {
+    pub file_name: Option<String>,
+    pub ied_name: Option<String>,
+    pub is_deleted: bool,
+    /// `octet_length(content)`
+    pub size: Option<i64>,
+    /// Hanya diambil kalau `size <= max_bytes` (file terlalu besar tidak ditarik dari DB)
+    pub content: Option<String>,
+}
+
+/// `content` diasumsikan TEXT (XML apa adanya).
+pub async fn load_scl_file(c: &Client, id: &str, id_rtu: i32, max_bytes: i64) -> DbResult<Option<SclFileRow>> {
+    let row = c
+        .query_opt(
+            "SELECT file_name, ied_name, COALESCE(is_deleted, FALSE), octet_length(content)::BIGINT,
+                    CASE WHEN octet_length(content) <= $3::BIGINT THEN content END
+             FROM iec61850_scl_files WHERE id = $1::TEXT::UUID AND id_rtu = $2::INT",
+            &[&id, &id_rtu, &max_bytes],
+        )
+        .await
+        .map_err(db_err("query iec61850_scl_files"))?;
+    let Some(r) = row else { return Ok(None) };
+    let col = db_err("kolom iec61850_scl_files");
+    Ok(Some(SclFileRow {
+        file_name: r.try_get(0).map_err(&col)?,
+        ied_name: r.try_get(1).map_err(&col)?,
+        is_deleted: r.try_get(2).map_err(&col)?,
+        size: r.try_get(3).map_err(&col)?,
+        content: r.try_get(4).map_err(&col)?,
+    }))
+}
+
 /// `id = None` -> semua RTU; `Some(id)` -> satu RTU (untuk reload dari event Kafka).
 pub async fn load_rtus(c: &Client, id: Option<i32>) -> DbResult<Vec<RtuConfig>> {
     let integrity_period_ms = env_u64("INTEGRITY_PERIOD_MS", 60_000);

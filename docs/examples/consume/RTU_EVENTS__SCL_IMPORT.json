@@ -1,0 +1,8 @@
+{
+  "event": "SCL_IMPORT",
+  "protocol": "IEC61850",
+  "id_rtu": 9399,
+  "key": "scl-9399-0f8e2c1a-5b6d-4e7f-9a0b-1c2d3e4f5a6b",
+  "id_scl_file": "0f8e2c1a-5b6d-4e7f-9a0b-1c2d3e4f5a6b",
+  "ied_name": null
+}

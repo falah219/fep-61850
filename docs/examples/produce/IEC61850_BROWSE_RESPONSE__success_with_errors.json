@@ -2,6 +2,7 @@
   "key": "browse-9302-01",
   "id_rtu": 9302,
   "status": "SUCCESS",
+  "source": "BROWSE",
   "message": "3 objek, 1 RCB, 1 error",
   "objects": [
     {

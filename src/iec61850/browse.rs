@@ -22,9 +22,9 @@ use crate::error::{Iec61850Error, Result};
 use crate::ffi;
 
 /// FC yang bisa dimapping (CHECK `functional_constraint` di `master_datapoint_iec61850s`).
-const FCS: [&str; 4] = ["ST", "MX", "CO", "SP"];
+pub(crate) const FCS: [&str; 4] = ["ST", "MX", "CO", "SP"];
 /// Kedalaman sub-DO yang dicari kalau CDC DO tidak dikenali (mis. WYE.phsA -> CMV).
-const MAX_DEPTH: usize = 3;
+pub(crate) const MAX_DEPTH: usize = 3;
 /// Default BROWSE_TIMEOUT_MS (batas total satu browse).
 pub const DEFAULT_BROWSE_TIMEOUT_MS: u64 = 300_000;
 
@@ -66,10 +66,20 @@ pub struct RcbInfo {
     /// Format ACSI `LD/LLN0.DataSet`
     pub dataset: Option<String>,
     pub rpt_id: Option<String>,
-    pub rpt_ena: bool,
+    /// `RptEna` saat dibaca. null = tidak diketahui (SCL_IMPORT)
+    pub rpt_ena: Option<bool>,
     /// `dchg,qchg,dupd,integrity,gi` (format kolom trg_ops)
     pub trg_ops: String,
     pub intg_pd_ms: u32,
+    /// `confRev` (hanya SCL_IMPORT; tidak dikirim kalau null -> respons BROWSE tidak berubah)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conf_rev: Option<u32>,
+    /// `bufTime` ms (hanya SCL_IMPORT)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buf_tm_ms: Option<u32>,
+    /// `OptFields` yang true, nama atribut SCL dipisah koma (hanya SCL_IMPORT)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opt_flds: Option<String>,
     pub members: Vec<DatasetMember>,
 }
 
@@ -269,11 +279,12 @@ impl BrowseJob {
                     reference,
                     buffered: cur.buffered,
                     rpt_id: rcb.rpt_id(),
-                    rpt_ena: rcb.rpt_ena(),
+                    rpt_ena: Some(rcb.rpt_ena()),
                     dataset: cur.dataset,
                     trg_ops: trg_ops_text(cur.trg_ops),
                     intg_pd_ms: cur.intg_pd_ms,
                     members,
+                    ..Default::default()
                 });
             }
         }

@@ -1,5 +1,6 @@
 //! Event BROWSE (RTU_EVENTS): browse model IED di thread IED -> IEC61850_BROWSE_RESPONSE.
 //! IED besar bisa ribuan objek -> dikirim per bagian (`part` 1..=`total_parts`) maks ~900 KB.
+//! `responses` juga dipakai SCL_IMPORT (`scl_import.rs`, `source: "SCL"` + field SCL; BROWSE: `source: "BROWSE"`).
 //! Skema stabil untuk GRITA: semua field selalu ada, urutan JSON tetap (struct diserialisasi langsung,
 //! bukan lewat `serde_json::Value` yang mengurutkan key). `rcbs` / `errors` lengkap di bagian 1, `[]` di bagian lain.
 
@@ -18,18 +19,39 @@ use crate::iec61850::browse::{browse_timeout, BrowseError, BrowseObject, BrowseR
 use crate::kafka::event_handler::data_id_rtu;
 use crate::kafka::models::RtuEventMessage;
 use crate::kafka::TOPIC_BROWSE_RESPONSE;
+use crate::scl::{ConfigRev, IedInfo, IedRef};
 
 /// Di atas BROWSE_TIMEOUT_MS: thread IED membalas hasil sebagian sendiri saat batas waktunya tercapai.
 const REPLY_MARGIN: Duration = Duration::from_secs(30);
 /// Di bawah batas default Kafka 1 MB (message.max.bytes), sisa untuk field lain.
-const MAX_PART_BYTES: usize = 900 * 1024;
+pub(super) const MAX_PART_BYTES: usize = 900 * 1024;
+
+/// Field tambahan respons SCL_IMPORT. Semua tidak dikirim kalau None -> respons BROWSE tidak berubah.
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+pub(super) struct SclMeta<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id_scl_file: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ied: Option<&'a IedInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_revs: Option<&'a [ConfigRev]>,
+    /// FAILED "Pilih IED" / IED tidak ada: pilihan IED di file
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ied_names: Option<&'a [IedRef]>,
+}
 
 /// Satu pesan IEC61850_BROWSE_RESPONSE. Urutan field = urutan JSON.
 #[derive(Debug, Serialize)]
-struct BrowseResponse<'a> {
+pub(super) struct BrowseResponse<'a> {
     key: &'a str,
     id_rtu: Option<i32>,
     status: &'static str,
+    /// `BROWSE` (dari IED) / `SCL` (SCL_IMPORT)
+    source: &'static str,
+    #[serde(flatten)]
+    scl: SclMeta<'a>,
     message: String,
     objects: &'a [BrowseObject],
     /// RCB + anggota dataset (bagian 1; bagian lain `[]`)
@@ -67,7 +89,7 @@ pub fn submit(mgr: &Arc<Manager>, m: RtuEventMessage) -> impl Future<Output = ()
             Err(e) => Err(e),
         };
         let topic_key = if key.is_empty() { "unknown" } else { key.as_str() };
-        for msg in responses(&key, id, &result, MAX_PART_BYTES) {
+        for msg in responses(&key, id, &result, None, MAX_PART_BYTES) {
             mgr.publisher.producer.send_raw(TOPIC_BROWSE_RESPONSE, topic_key, &msg);
         }
     }
@@ -82,17 +104,27 @@ fn success_message(r: &BrowseResult) -> String {
     m
 }
 
-/// Pesan respons (satu atau lebih bagian, tiap bagian <= `limit` byte objek).
-fn responses<'a>(key: &'a str, id_rtu: Option<i32>, result: &'a Result<BrowseResult, String>, limit: usize) -> Vec<BrowseResponse<'a>> {
+/// Pesan respons (satu atau lebih bagian, tiap bagian <= `limit` byte objek). `scl` = Some untuk SCL_IMPORT.
+pub(super) fn responses<'a>(
+    key: &'a str,
+    id_rtu: Option<i32>,
+    result: &'a Result<BrowseResult, String>,
+    scl: Option<SclMeta<'a>>,
+    limit: usize,
+) -> Vec<BrowseResponse<'a>> {
+    let source = if scl.is_some() { "SCL" } else { "BROWSE" };
+    let scl = scl.unwrap_or_default();
     let r = match result {
         Ok(r) => r,
         Err(e) => {
-            warn!("[BROWSE] id_rtu={id_rtu:?} gagal: {e}");
-            let errors = vec![BrowseError { reference: "browse".into(), error: e.clone() }];
+            warn!("[{source}] id_rtu={id_rtu:?} gagal: {e}");
+            let errors = vec![BrowseError { reference: source.to_lowercase(), error: e.clone() }];
             return vec![BrowseResponse {
                 key,
                 id_rtu,
                 status: "FAILED",
+                source,
+                scl,
                 message: e.clone(),
                 objects: &[],
                 rcbs: &[],
@@ -102,7 +134,7 @@ fn responses<'a>(key: &'a str, id_rtu: Option<i32>, result: &'a Result<BrowseRes
             }];
         }
     };
-    let message = success_message(r);
+    let message = if source == "SCL" { format!("Import SCL selesai: {}", success_message(r)) } else { success_message(r) };
     let parts = split_parts(&r.objects, limit);
     let total_parts = parts.len();
     parts
@@ -114,6 +146,8 @@ fn responses<'a>(key: &'a str, id_rtu: Option<i32>, result: &'a Result<BrowseRes
                 key,
                 id_rtu,
                 status: "SUCCESS",
+                source,
+                scl,
                 message: message.clone(),
                 objects,
                 rcbs: if first { r.rcbs.as_slice() } else { &[] },
@@ -174,16 +208,18 @@ mod tests {
     #[test]
     fn skema_stabil_gagal_dan_sukses() {
         let failed = Err("IED tidak terkoneksi".to_string());
-        let r = json(responses("k1", Some(9001), &failed, MAX_PART_BYTES));
+        let r = json(responses("k1", Some(9001), &failed, None, MAX_PART_BYTES));
         assert_eq!(r.len(), 1);
         assert_eq!(r[0]["status"], "FAILED");
+        assert_eq!(r[0]["source"], "BROWSE");
+        assert!(r[0].get("ied").is_none() && r[0].get("id_scl_file").is_none(), "field SCL tidak ikut di BROWSE");
         assert_eq!(r[0]["message"], "IED tidak terkoneksi");
         assert_eq!((&r[0]["objects"], &r[0]["rcbs"]), (&serde_json::json!([]), &serde_json::json!([])));
         assert_eq!(r[0]["errors"], serde_json::json!([{"ref": "browse", "error": "IED tidak terkoneksi"}]));
         assert_eq!((r[0]["part"].as_u64(), r[0]["total_parts"].as_u64()), (Some(1), Some(1)));
 
         let res = ok(vec![obj(1)]);
-        let r = json(responses("k2", Some(9001), &res, MAX_PART_BYTES));
+        let r = json(responses("k2", Some(9001), &res, None, MAX_PART_BYTES));
         assert_eq!((r[0]["status"].as_str(), r[0]["message"].as_str()), (Some("SUCCESS"), Some("1 objek, 0 RCB")));
         assert_eq!((&r[0]["rcbs"], &r[0]["errors"]), (&serde_json::json!([]), &serde_json::json!([])));
         // control hanya untuk FC CO
@@ -201,12 +237,12 @@ mod tests {
             }],
             errors: vec![BrowseError { reference: "LD/X".into(), error: "e".into() }],
         });
-        let s = serde_json::to_string(&responses("k", Some(1), &res, MAX_PART_BYTES)[0]).unwrap();
+        let s = serde_json::to_string(&responses("k", Some(1), &res, None, MAX_PART_BYTES)[0]).unwrap();
         let order = |keys: &[&str], from: &str| {
             let pos: Vec<usize> = keys.iter().map(|k| from.find(&format!("\"{k}\":")).unwrap_or_else(|| panic!("{k}: {from}"))).collect();
             assert!(pos.windows(2).all(|w| w[0] < w[1]), "urutan {keys:?}: {from}");
         };
-        order(&["key", "id_rtu", "status", "message", "objects", "rcbs", "errors", "part", "total_parts"], &s);
+        order(&["key", "id_rtu", "status", "source", "message", "objects", "rcbs", "errors", "part", "total_parts"], &s);
         let rcb = &s[s.find("\"rcbs\":").unwrap()..];
         order(&["reference", "buffered", "dataset", "rpt_id", "rpt_ena", "trg_ops", "intg_pd_ms", "members"], rcb);
     }
@@ -218,7 +254,7 @@ mod tests {
             errors: vec![BrowseError { reference: "LD/LLN0.BR.brcbMX01".into(), error: "timeout".into() }],
             rcbs: vec![RcbInfo { reference: "LD/LLN0.BR.brcbST01".into(), ..Default::default() }],
         });
-        let r = json(responses("k3", Some(9302), &res, 160));
+        let r = json(responses("k3", Some(9302), &res, None, 160));
         assert!(r.len() > 1);
         assert_eq!(r[0]["errors"][0]["ref"], "LD/LLN0.BR.brcbMX01");
         assert_eq!(r[0]["rcbs"][0]["reference"], "LD/LLN0.BR.brcbST01");
@@ -238,8 +274,11 @@ mod tests {
         use crate::kafka::payload_examples::{examples_of, int_of, str_of};
         let ex: std::collections::BTreeMap<String, Value> = examples_of("produce", TOPIC_BROWSE_RESPONSE).into_iter().collect();
         let get = |n: &str| ex.get(&format!("{TOPIC_BROWSE_RESPONSE}__{n}")).cloned().unwrap_or_else(|| panic!("contoh {n}"));
-        for n in ["success", "success_with_errors", "failed", "multipart_1", "multipart_2"] {
+        for n in ["success", "success_with_errors", "failed", "multipart_1", "multipart_2", "scl_success", "scl_failed"] {
             get(n);
+        }
+        fn opt<T: serde::de::DeserializeOwned>(v: &Value, k: &str) -> Option<T> {
+            v.get(k).map(|x| serde_json::from_value(x.clone()).unwrap())
         }
         let result = |v: &Value| -> Result<BrowseResult, String> {
             if str_of(v, "status") == "FAILED" {
@@ -250,14 +289,23 @@ mod tests {
         for (name, v) in ex.iter().filter(|(_, v)| v["total_parts"] == 1) {
             let id = Some(int_of(v, "id_rtu") as i32);
             let res = result(v);
-            assert_eq!(json(responses(str_of(v, "key"), id, &res, MAX_PART_BYTES)), vec![v.clone()], "{name}");
+            let (ied, revs, names): (Option<IedInfo>, Option<Vec<ConfigRev>>, Option<Vec<IedRef>>) =
+                (opt(v, "ied"), opt(v, "config_revs"), opt(v, "ied_names"));
+            let scl = (v["source"] == "SCL").then(|| SclMeta {
+                file_name: v["file_name"].as_str(),
+                id_scl_file: v["id_scl_file"].as_str(),
+                ied: ied.as_ref(),
+                config_revs: revs.as_deref(),
+                ied_names: names.as_deref(),
+            });
+            assert_eq!(json(responses(str_of(v, "key"), id, &res, scl, MAX_PART_BYTES)), vec![v.clone()], "{name}");
         }
         // multi-part dengan batas kecil supaya contoh pendek (FEP memakai MAX_PART_BYTES)
         let (p1, p2) = (get("multipart_1"), get("multipart_2"));
         let mut all = result(&p1).unwrap();
         all.objects.extend(field::<BrowseObject>(&p2, "objects"));
         let all = Ok(all);
-        assert_eq!(json(responses("browse-9001-02", Some(9001), &all, 160)), vec![p1, p2]);
+        assert_eq!(json(responses("browse-9001-02", Some(9001), &all, None, 160)), vec![p1, p2]);
     }
 
     #[tokio::test]

@@ -14,7 +14,7 @@ use super::handlers::master_data_object::master_data_object;
 use super::handlers::manual_set::manual_set;
 use super::handlers::master_datapoint::master_datapoint;
 use super::handlers::master_rtu_event::master_rtu;
-use super::handlers::rtu_event::{browse, command, rtu_event};
+use super::handlers::rtu_event::{browse, command, rtu_event, scl_import};
 use super::models::PROTOCOL;
 use crate::connection::Manager;
 
@@ -41,6 +41,12 @@ pub async fn handle(mgr: &Arc<Manager>, event: KafkaEvent) {
         // BROWSE: sama dengan COMMAND, masuk antrean IED sekarang, tunggu hasil di task sendiri.
         KafkaEvent::RtuEvent(m) if is_ours(&m.protocol) && m.event == "BROWSE" => {
             tokio::spawn(browse::submit(mgr, *m));
+        }
+        // SCL_IMPORT: file SCL dari DB -> katalog, di task sendiri. Tidak menyentuh thread IED / status RTU.
+        KafkaEvent::RtuEvent(m) if is_ours(&m.protocol) && m.event == "SCL_IMPORT" => {
+            if let Some(job) = scl_import::submit(mgr, *m) {
+                tokio::spawn(job);
+            }
         }
         KafkaEvent::RtuEvent(m) if is_ours(&m.protocol) => rtu_event(mgr, *m).await,
         KafkaEvent::MasterDatapoint(m) if is_ours(&m.protocol) => master_datapoint(mgr, m).await,

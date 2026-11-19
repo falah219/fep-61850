@@ -1,0 +1,29 @@
+{
+  "key": "scl-9399-9e1f2a3b-0c4d-4e5f-8a6b-7c8d9e0f1a2b",
+  "id_rtu": 9399,
+  "status": "FAILED",
+  "source": "SCL",
+  "file_name": "station_2ied.scd",
+  "id_scl_file": "3a4b5c6d-7e8f-4a0b-9c1d-2e3f4a5b6c7d",
+  "ied_names": [
+    {
+      "name": "IED1",
+      "ip": "10.0.0.1"
+    },
+    {
+      "name": "IED2",
+      "ip": "10.0.0.2"
+    }
+  ],
+  "message": "Pilih IED",
+  "objects": [],
+  "rcbs": [],
+  "errors": [
+    {
+      "ref": "scl",
+      "error": "Pilih IED"
+    }
+  ],
+  "part": 1,
+  "total_parts": 1
+}

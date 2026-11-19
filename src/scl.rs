@@ -1,11 +1,16 @@
-//! Import SCL (ICD/CID/SCD) -> usulan mapping titik + IOA virtual (fase 10).
+//! Parser SCL (ICD/CID/SCD), murni di memori (roxmltree: tanpa DTD / external entity).
 //!
-//! Hasilnya untuk DI-REVIEW manusia (SQL/CSV), bukan langsung dipakai FEP.
+//! - `parse`: usulan mapping titik + IOA virtual (fase 10, bin `scl-import`), untuk DI-REVIEW manusia (SQL/CSV).
+//! - `catalog`: katalog model IED untuk event SCL_IMPORT, format SAMA dengan hasil BROWSE
+//!   (`BrowseObject` / `RcbInfo` / `DatasetMember`: `LD/LN.DO`, `LD/LLN0.BR.<rcb>`, `LD/LLN0.<dataset>`).
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use roxmltree::{Document, Node};
+use serde::{Deserialize, Serialize};
+
+use crate::iec61850::browse::{ctl_model_name, BrowseError, BrowseObject, BrowseResult, ControlInfo, DatasetMember, RcbInfo, FCS, MAX_DEPTH};
 
 /// Basis IOA per jenis titik (sama dengan seed simulator).
 pub const IOA_STATUS: i32 = 1001;
@@ -54,6 +59,120 @@ fn val_text<'a>(n: Node<'a, '_>) -> Option<&'a str> {
     children(n, "Val").next().and_then(|v| v.text()).map(str::trim)
 }
 
+fn is(n: Node, tag: &str) -> bool {
+    n.is_element() && n.tag_name().name() == tag
+}
+
+/// Anak `tag` dengan atribut `name` = `name`.
+fn named<'a, 'i>(n: Node<'a, 'i>, tag: &'static str, name: &str) -> Option<Node<'a, 'i>> {
+    children(n, tag).find(|c| c.attribute("name") == Some(name))
+}
+
+/// Nilai `DOI/DAI[name]/Val`.
+fn dai<'a>(doi: Node<'a, '_>, name: &str) -> Option<&'a str> {
+    named(doi, "DAI", name).and_then(val_text)
+}
+
+/// File rusak, IED tidak ada / harus dipilih.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SclError {
+    pub message: String,
+    /// Pilihan IED (SCD lebih dari satu IED tanpa `ied_name`, atau `ied_name` salah)
+    pub ied_names: Option<Vec<IedRef>>,
+}
+
+impl SclError {
+    fn new(message: impl Into<String>) -> Self {
+        Self { message: message.into(), ied_names: None }
+    }
+}
+
+impl std::fmt::Display for SclError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)?;
+        if let Some(ieds) = &self.ied_names {
+            let names: Vec<&str> = ieds.iter().map(|i| i.name.as_str()).collect();
+            write!(f, " ({})", names.join(", "))?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IedRef {
+    pub name: String,
+    pub ip: Option<String>,
+}
+
+/// XML valid dengan root `<SCL>`. roxmltree menolak DTD (tidak ada entity eksternal).
+fn open(xml: &str) -> Result<Document<'_>, SclError> {
+    let invalid = |d: String| SclError::new(format!("File bukan SCL yang valid: {d}"));
+    let doc = Document::parse(xml).map_err(|e| invalid(e.to_string()))?;
+    let root = doc.root_element().tag_name().name();
+    if root != "SCL" {
+        return Err(invalid(format!("root <{root}>, bukan <SCL>")));
+    }
+    Ok(doc)
+}
+
+/// `Communication/SubNetwork/ConnectedAP[iedName]/Address/P[type="IP"]`.
+fn ied_ip(root: Node, ied: &str) -> Option<String> {
+    root.descendants()
+        .filter(|n| is(*n, "ConnectedAP") && n.attribute("iedName") == Some(ied))
+        .flat_map(|ap| children(ap, "Address").flat_map(|a| children(a, "P")))
+        .find(|p| p.attribute("type") == Some("IP"))
+        .and_then(|p| p.text())
+        .map(|t| t.trim().to_string())
+}
+
+fn select_ied<'a, 'i>(root: Node<'a, 'i>, name: Option<&str>) -> Result<Node<'a, 'i>, SclError> {
+    let ieds: Vec<_> = children(root, "IED").collect();
+    let choices = || {
+        let refs = ieds.iter().filter_map(|i| i.attribute("name")).map(|n| IedRef { name: n.into(), ip: ied_ip(root, n) });
+        Some(refs.collect::<Vec<_>>())
+    };
+    match name {
+        Some(n) => ieds
+            .iter()
+            .copied()
+            .find(|i| i.attribute("name") == Some(n))
+            .ok_or_else(|| SclError { message: format!("IED {n} tidak ada di file"), ied_names: choices() }),
+        None if ieds.len() == 1 => Ok(ieds[0]),
+        None if ieds.is_empty() => Err(SclError::new("File SCL tidak berisi IED")),
+        None => Err(SclError { message: "Pilih IED".into(), ied_names: choices() }),
+    }
+}
+
+fn ldevices<'a, 'i>(ied: Node<'a, 'i>) -> impl Iterator<Item = Node<'a, 'i>> {
+    ied.descendants().filter(|n| is(*n, "LDevice"))
+}
+
+fn lns<'a, 'i>(ld: Node<'a, 'i>) -> impl Iterator<Item = Node<'a, 'i>> {
+    ld.children().filter(|c| is(*c, "LN0") || is(*c, "LN"))
+}
+
+/// Atribut `ldName` kalau ada, kalau tidak `<IED name><LDevice inst>`.
+fn ld_name(ied: &str, ld: Node) -> String {
+    ld.attribute("ldName").map_or_else(|| format!("{ied}{}", ld.attribute("inst").unwrap_or_default()), String::from)
+}
+
+/// prefix + lnClass + inst
+fn ln_name(ln: Node) -> String {
+    let a = |k: &'static str| ln.attribute(k).unwrap_or_default();
+    format!("{}{}{}", a("prefix"), a("lnClass"), a("inst"))
+}
+
+/// (`BR`/`RP`, nama instance). indexed (default true): libIEC61850 menamai instance name01..name<max>
+/// (`RptEnabled max`, default 1); `indexed="false"`: name apa adanya.
+fn rcb_instances(rc: Node, name: &str) -> (&'static str, Vec<String>) {
+    let tag = if rc.attribute("buffered") == Some("true") { "BR" } else { "RP" };
+    if rc.attribute("indexed") == Some("false") {
+        return (tag, vec![name.to_string()]);
+    }
+    let max = children(rc, "RptEnabled").next().and_then(|r| num::<u32>(r, "max")).unwrap_or(1).max(1);
+    (tag, (1..=max).map(|i| format!("{name}{i:02}")).collect())
+}
+
 /// Jenis titik dari CDC. None = tidak didukung (cek SDO di dalamnya).
 fn classify(cdc: &str) -> Option<(Kind, &'static str)> {
     Some(match cdc {
@@ -71,19 +190,9 @@ fn is_controllable(cdc: &str) -> bool {
 
 /// Parse SCL. `ied_name` wajib kalau file berisi lebih dari satu IED (SCD).
 pub fn parse(xml: &str, ied_name: Option<&str>) -> Result<SclIed, String> {
-    let doc = Document::parse(xml).map_err(|e| format!("XML tidak valid: {e}"))?;
+    let doc = open(xml).map_err(|e| e.to_string())?;
     let root = doc.root_element();
-
-    let ieds: Vec<_> = children(root, "IED").collect();
-    let ied = match ied_name {
-        Some(name) => ieds.iter().find(|i| i.attribute("name") == Some(name)).copied(),
-        None if ieds.len() == 1 => ieds.first().copied(),
-        None => {
-            let names: Vec<_> = ieds.iter().filter_map(|i| i.attribute("name")).collect();
-            return Err(format!("file berisi {} IED {names:?}, sebutkan nama IED", ieds.len()));
-        }
-    }
-    .ok_or("IED tidak ditemukan di file SCL")?;
+    let ied = select_ied(root, ied_name).map_err(|e| e.to_string())?;
     let ied_name = ied.attribute("name").unwrap_or_default().to_string();
 
     // DataTypeTemplates
@@ -112,27 +221,15 @@ pub fn parse(xml: &str, ied_name: Option<&str>) -> Result<SclIed, String> {
     let mut found: Vec<(Kind, &'static str, String, String)> = Vec::new(); // (kind, fc, ref, cdc)
     let mut rcbs = Vec::new();
 
-    for ld in ied.descendants().filter(|n| n.is_element() && n.tag_name().name() == "LDevice") {
-        let ld_name = match ld.attribute("ldName") {
-            Some(n) => n.to_string(),
-            None => format!("{ied_name}{}", ld.attribute("inst").unwrap_or_default()),
-        };
-        for ln in ld.children().filter(|c| c.is_element() && matches!(c.tag_name().name(), "LN0" | "LN")) {
-            let ln_name = format!(
-                "{}{}{}",
-                ln.attribute("prefix").unwrap_or_default(),
-                ln.attribute("lnClass").unwrap_or_default(),
-                ln.attribute("inst").unwrap_or_default()
-            );
-            let ln_ref = format!("{ld_name}/{ln_name}");
+    for ld in ldevices(ied) {
+        let ld_name = ld_name(&ied_name, ld);
+        for ln in lns(ld) {
+            let ln_ref = format!("{ld_name}/{}", ln_name(ln));
 
             for rc in children(ln, "ReportControl") {
                 let Some(name) = rc.attribute("name") else { continue };
-                let buffered = rc.attribute("buffered") == Some("true");
-                // indexed default true: libIEC61850 menamai instance name01, name02, ...
-                let indexed = rc.attribute("indexed") != Some("false");
-                let inst = if indexed { format!("{name}01") } else { name.to_string() };
-                rcbs.push(format!("{ln_ref}.{}.{inst}", if buffered { "BR" } else { "RP" }));
+                let (tag, instances) = rcb_instances(rc, name);
+                rcbs.push(format!("{ln_ref}.{tag}.{}", instances[0]));
             }
 
             let Some(dos) = ln.attribute("lnType").and_then(|t| ln_types.get(t)) else { continue };
@@ -198,6 +295,210 @@ fn assign_ioa(ied: &str, found: Vec<(Kind, &'static str, String, String)>) -> Re
     }
     points.sort_by_key(|p| p.ioa);
     Ok(points)
+}
+
+// ---------------------------------------------------------------- katalog (SCL_IMPORT)
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IedInfo {
+    pub name: String,
+    pub manufacturer: Option<String>,
+    #[serde(rename = "type")]
+    pub ied_type: Option<String>,
+    pub config_version: Option<String>,
+    pub ip: Option<String>,
+}
+
+/// `LLN0.NamPlt.configRev` satu LD.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigRev {
+    pub ld: String,
+    pub reference: String,
+    pub value: String,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct SclCatalog {
+    pub ied: IedInfo,
+    pub config_revs: Vec<ConfigRev>,
+    /// objects / rcbs / errors, format sama dengan BROWSE
+    pub result: BrowseResult,
+}
+
+struct Types<'a, 'i> {
+    ln: HashMap<&'a str, Node<'a, 'i>>,
+    dos: HashMap<&'a str, Node<'a, 'i>>,
+}
+
+fn type_index<'a, 'i>(tpl: Option<Node<'a, 'i>>, tag: &'static str) -> HashMap<&'a str, Node<'a, 'i>> {
+    tpl.into_iter().flat_map(move |t| children(t, tag)).filter_map(|n| Some((n.attribute("id")?, n))).collect()
+}
+
+fn type_error(reference: &str, kind: &str, id: &str) -> BrowseError {
+    BrowseError { reference: reference.into(), error: format!("{kind} {id:?} tidak ada di DataTypeTemplates") }
+}
+
+/// Katalog model IED dari SCL (event SCL_IMPORT). Tipe yang tidak ada -> objek dilewati + `errors`.
+pub fn catalog(xml: &str, ied_name: Option<&str>) -> Result<SclCatalog, SclError> {
+    let doc = open(xml)?;
+    let root = doc.root_element();
+    let ied = select_ied(root, ied_name)?;
+    let name = ied.attribute("name").unwrap_or_default();
+    let attr = |k: &'static str| ied.attribute(k).map(String::from);
+    let info = IedInfo {
+        name: name.into(),
+        manufacturer: attr("manufacturer"),
+        ied_type: attr("type"),
+        config_version: attr("configVersion"),
+        ip: ied_ip(root, name),
+    };
+    let tpl = children(root, "DataTypeTemplates").next();
+    let types = Types { ln: type_index(tpl, "LNodeType"), dos: type_index(tpl, "DOType") };
+    let lds: HashMap<&str, String> = ldevices(ied).map(|ld| (ld.attribute("inst").unwrap_or_default(), ld_name(name, ld))).collect();
+
+    let mut out = BrowseResult::default();
+    let mut config_revs = Vec::new();
+    for ld in ldevices(ied) {
+        let ld_ref = ld_name(name, ld);
+        for ln in lns(ld) {
+            let ln_ref = format!("{ld_ref}/{}", ln_name(ln));
+            ln_objects(&types, ln, &ln_ref, &mut out);
+            reports(ln, &ln_ref, name, &lds, &mut out);
+            if is(ln, "LN0") {
+                if let Some(v) = named(ln, "DOI", "NamPlt").and_then(|d| dai(d, "configRev")) {
+                    config_revs.push(ConfigRev { ld: ld_ref.clone(), reference: format!("{ln_ref}.NamPlt.configRev"), value: v.into() });
+                }
+            }
+        }
+    }
+    Ok(SclCatalog { ied: info, config_revs, result: out })
+}
+
+/// DO satu LN, urut nama (sama dengan browse).
+fn ln_objects(types: &Types, ln: Node, ln_ref: &str, out: &mut BrowseResult) {
+    let ln_type = ln.attribute("lnType").unwrap_or_default();
+    let Some(t) = types.ln.get(ln_type) else {
+        return out.errors.push(type_error(ln_ref, "LNodeType", ln_type));
+    };
+    let mut dos: Vec<_> = children(*t, "DO").filter_map(|d| Some((d.attribute("name")?, d.attribute("type")?))).collect();
+    dos.sort_by_key(|(n, _)| *n);
+    for (do_name, do_type) in dos {
+        walk_do(types, &format!("{ln_ref}.{do_name}"), do_type, named(ln, "DOI", do_name), 0, out);
+    }
+}
+
+/// DO yang punya DA di FC mapping -> satu objek per FC (urutan FCS), CDC dari DOType. Tidak punya -> turun
+/// ke SDO (mis. WYE.phsA bertipe CMV), maks MAX_DEPTH, sama dengan browse. `inst` = DOI/SDI instance.
+fn walk_do(types: &Types, r: &str, type_id: &str, inst: Option<Node>, depth: usize, out: &mut BrowseResult) {
+    let Some(t) = types.dos.get(type_id) else {
+        return out.errors.push(type_error(r, "DOType", type_id));
+    };
+    let das: Vec<Node> = children(*t, "DA").collect();
+    let fcs: Vec<&str> = FCS.iter().copied().filter(|fc| das.iter().any(|d| d.attribute("fc") == Some(*fc))).collect();
+    if !fcs.is_empty() {
+        let cdc = t.attribute("cdc").filter(|c| !c.is_empty()).map(String::from);
+        for fc in fcs {
+            let control = (fc == "CO").then(|| control_info(&das, inst));
+            out.objects.push(BrowseObject { object_reference: r.into(), fc: fc.into(), cdc: cdc.clone(), control });
+        }
+        return;
+    }
+    if depth >= MAX_DEPTH {
+        return;
+    }
+    let mut sdos: Vec<_> = children(*t, "SDO").filter_map(|d| Some((d.attribute("name")?, d.attribute("type")?))).collect();
+    sdos.sort_by_key(|(n, _)| *n);
+    for (sdo, sdo_type) in sdos {
+        walk_do(types, &format!("{r}.{sdo}"), sdo_type, inst.and_then(|i| named(i, "SDI", sdo)), depth + 1, out);
+    }
+}
+
+/// Nilai DA: instance (DOI/DAI) menimpa `Val` default di DOType.
+fn da_value<'a>(das: &[Node<'a, '_>], inst: Option<Node<'a, '_>>, name: &str) -> Option<&'a str> {
+    inst.and_then(|i| dai(i, name)).or_else(|| das.iter().find(|d| d.attribute("name") == Some(name)).and_then(|d| val_text(*d)))
+}
+
+fn control_info(das: &[Node], inst: Option<Node>) -> ControlInfo {
+    let has = |n: &str| das.iter().any(|d| d.attribute("name") == Some(n) && d.attribute("fc") == Some("CO"));
+    ControlInfo {
+        // teks enum SCL = teks kolom ctl_model; angka (jarang) diubah dengan tabel yang sama dengan browse
+        ctl_model: da_value(das, inst, "ctlModel").map(|v| v.parse().map_or_else(|_| v.to_string(), ctl_model_name)),
+        sbo_timeout_ms: da_value(das, inst, "sboTimeout").and_then(|v| v.parse().ok()),
+        sbow: has("SBOw"),
+        oper: has("Oper"),
+        cancel: has("Cancel"),
+    }
+}
+
+/// `true`/`1` -> true, tidak ada -> `default`.
+fn flag(n: Node, k: &str, default: bool) -> bool {
+    n.attribute(k).map_or(default, |v| v == "true" || v == "1")
+}
+
+fn num<T: std::str::FromStr>(n: Node, k: &str) -> Option<T> {
+    n.attribute(k).and_then(|v| v.trim().parse().ok())
+}
+
+/// FCDA -> `{object_reference, fc}` (`LD/LN.DO[.DA]`, sama dengan anggota dataset browse).
+fn fcda(f: Node, ied: &str, lds: &HashMap<&str, String>) -> DatasetMember {
+    let a = |k: &'static str| f.attribute(k).unwrap_or_default();
+    let ld = lds.get(a("ldInst")).cloned().unwrap_or_else(|| format!("{ied}{}", a("ldInst")));
+    let mut r = format!("{ld}/{}{}{}.{}", a("prefix"), a("lnClass"), a("lnInst"), a("doName"));
+    if !a("daName").is_empty() {
+        r.push('.');
+        r.push_str(a("daName"));
+    }
+    DatasetMember { object_reference: r, fc: a("fc").into() }
+}
+
+/// DataSet + ReportControl satu LN -> `rcbs` (satu per instance).
+fn reports(ln: Node, ln_ref: &str, ied: &str, lds: &HashMap<&str, String>, out: &mut BrowseResult) {
+    let datasets: HashMap<&str, Vec<DatasetMember>> = children(ln, "DataSet")
+        .filter_map(|ds| Some((ds.attribute("name")?, children(ds, "FCDA").map(|f| fcda(f, ied, lds)).collect::<Vec<_>>())))
+        .collect();
+    for rc in children(ln, "ReportControl") {
+        let Some(name) = rc.attribute("name") else { continue };
+        let (tag, instances) = rcb_instances(rc, name);
+        let dat_set = rc.attribute("datSet").filter(|d| !d.is_empty());
+        let members = match dat_set.map(|d| (d, datasets.get(d))) {
+            Some((_, Some(m))) => m.clone(),
+            Some((d, None)) => {
+                out.errors.push(BrowseError { reference: format!("{ln_ref}.{tag}.{name}"), error: format!("DataSet {d:?} tidak ada") });
+                Vec::new()
+            }
+            None => Vec::new(),
+        };
+        let trg = children(rc, "TrgOps").next();
+        // period = integrity; gi default true (skema SCL) kalau TrgOps ada
+        let trg_ops = [("dchg", "dchg", false), ("qchg", "qchg", false), ("dupd", "dupd", false), ("period", "integrity", false), ("gi", "gi", true)]
+            .into_iter()
+            .filter(|(k, _, d)| trg.is_some_and(|t| flag(t, k, *d)))
+            .map(|(_, n, _)| n)
+            .collect::<Vec<_>>()
+            .join(",");
+        let opt_flds = children(rc, "OptFields").next().map(|o| {
+            ["seqNum", "timeStamp", "dataSet", "reasonCode", "dataRef", "entryID", "configRef", "bufOvfl"]
+                .into_iter()
+                .filter(|k| flag(o, k, false))
+                .collect::<Vec<_>>()
+                .join(",")
+        });
+        for inst in instances {
+            out.rcbs.push(RcbInfo {
+                reference: format!("{ln_ref}.{tag}.{inst}"),
+                buffered: tag == "BR",
+                dataset: dat_set.map(|d| format!("{ln_ref}.{d}")),
+                rpt_id: rc.attribute("rptID").filter(|r| !r.is_empty()).map(String::from),
+                rpt_ena: None, // tidak diketahui dari SCL
+                trg_ops: trg_ops.clone(),
+                intg_pd_ms: num(rc, "intgPd").unwrap_or(0),
+                conf_rev: num(rc, "confRev"),
+                buf_tm_ms: num(rc, "bufTime"),
+                opt_flds: opt_flds.clone(),
+                members: members.clone(),
+            });
+        }
+    }
 }
 
 fn sql_str(s: &str) -> String {
@@ -325,6 +626,141 @@ mod tests {
         assert!(parse(&two, None).unwrap_err().contains("BAY2"));
         assert_eq!(parse(&two, Some("BAY1")).unwrap().name, "BAY1");
         assert!(parse(&two, Some("X")).is_err());
+    }
+
+    // ------------------------------------------------------------ katalog (SCL_IMPORT)
+
+    const CID: &str = include_str!("../tests/fixtures/scl/baseline_1ied.cid");
+    const SCD: &str = include_str!("../tests/fixtures/scl/station_2ied.scd");
+
+    fn ctl(model: &str, sbo: Option<i64>, sbow: bool, cancel: bool) -> Option<ControlInfo> {
+        Some(ControlInfo { ctl_model: Some(model.into()), sbo_timeout_ms: sbo, sbow, oper: true, cancel })
+    }
+
+    fn bo(r: &str, fc: &str, cdc: &str, control: Option<ControlInfo>) -> BrowseObject {
+        BrowseObject { object_reference: r.into(), fc: fc.into(), cdc: Some(cdc.into()), control }
+    }
+
+    fn member(r: &str, fc: &str) -> DatasetMember {
+        DatasetMember { object_reference: r.into(), fc: fc.into() }
+    }
+
+    /// (a) CID 1 IED: objek (urut DO, FC, SDO), ctlModel instance menimpa default, dataset, RCB, config_revs, ip.
+    #[test]
+    fn katalog_cid_satu_ied() {
+        let c = catalog(CID, None).unwrap();
+        assert_eq!(
+            c.ied,
+            IedInfo {
+                name: "Baseline".into(),
+                manufacturer: Some("Schneider Electric".into()),
+                ied_type: Some("Baseline".into()),
+                config_version: Some("1.0".into()),
+                ip: Some("10.10.1.21".into()),
+            }
+        );
+        let ld = "BaselineLD0";
+        assert_eq!(
+            c.result.objects,
+            vec![
+                bo(&format!("{ld}/LLN0.Mod"), "ST", "ENC", None),
+                // DOI status-only menimpa default direct-with-normal-security
+                bo(&format!("{ld}/LLN0.Mod"), "CO", "ENC", ctl("status-only", None, false, false)),
+                bo(&format!("{ld}/XSWI1.OpCnt"), "ST", "INS", None),
+                bo(&format!("{ld}/XSWI1.Pos"), "ST", "DPC", None),
+                bo(&format!("{ld}/XSWI1.Pos"), "CO", "DPC", ctl("sbo-with-enhanced-security", Some(30000), true, true)),
+                bo(&format!("{ld}/MainCSWI1.Pos"), "ST", "DPC", None),
+                // tanpa DOI: default DOType
+                bo(&format!("{ld}/MainCSWI1.Pos"), "CO", "DPC", ctl("direct-with-normal-security", None, true, true)),
+                bo(&format!("{ld}/MMXU1.PhV.phsA"), "MX", "CMV", None),
+                bo(&format!("{ld}/MMXU1.PhV.phsB"), "MX", "CMV", None),
+            ]
+        );
+        let refs: Vec<&str> = c.result.rcbs.iter().map(|r| r.reference.as_str()).collect();
+        assert_eq!(refs, vec![format!("{ld}/LLN0.BR.brcbST01"), format!("{ld}/LLN0.BR.brcbST02"), format!("{ld}/LLN0.RP.urcbMX01")]);
+        let st = &c.result.rcbs[0];
+        assert_eq!(
+            (st.buffered, st.dataset.as_deref(), st.rpt_id.as_deref(), st.rpt_ena, st.trg_ops.as_str(), st.intg_pd_ms),
+            (true, Some("BaselineLD0/LLN0.dsStatus"), None, None, "dchg,qchg,gi", 0)
+        );
+        assert_eq!((st.conf_rev, st.buf_tm_ms), (Some(1), Some(100)));
+        assert_eq!(st.opt_flds.as_deref(), Some("seqNum,timeStamp,dataSet,reasonCode,entryID,configRef"));
+        assert_eq!(st.members, vec![member(&format!("{ld}/XSWI1.Pos.stVal"), "ST"), member(&format!("{ld}/XSWI1.Pos.q"), "ST")]);
+        assert_eq!(c.result.rcbs[1].members, st.members);
+        let mx = &c.result.rcbs[2];
+        assert_eq!(
+            (mx.buffered, mx.rpt_id.as_deref(), mx.trg_ops.as_str(), mx.intg_pd_ms, mx.conf_rev, mx.buf_tm_ms, mx.opt_flds.as_deref()),
+            (false, Some("MXReport"), "dchg,integrity", 5000, Some(3), None, Some("timeStamp"))
+        );
+        assert_eq!(mx.members, vec![member(&format!("{ld}/MMXU1.PhV.phsA"), "MX")]);
+        assert_eq!(
+            c.config_revs,
+            vec![ConfigRev { ld: ld.into(), reference: format!("{ld}/LLN0.NamPlt.configRev"), value: "Rev 2026-11".into() }]
+        );
+        assert!(c.result.errors.is_empty(), "{:?}", c.result.errors);
+    }
+
+    /// (b) SCD 2 IED: tanpa ied_name -> Pilih IED + ied_names; dengan ied_name -> IED itu (ldName dipakai).
+    /// (c) ied_name salah -> gagal + ied_names.
+    #[test]
+    fn katalog_scd_pilih_ied() {
+        let names = Some(vec![IedRef { name: "IED1".into(), ip: Some("10.0.0.1".into()) }, IedRef { name: "IED2".into(), ip: Some("10.0.0.2".into()) }]);
+        assert_eq!(catalog(SCD, None).unwrap_err(), SclError { message: "Pilih IED".into(), ied_names: names.clone() });
+        let c = catalog(SCD, Some("IED2")).unwrap();
+        assert_eq!((c.ied.name.as_str(), c.ied.ip.as_deref(), c.ied.config_version.as_deref()), ("IED2", Some("10.0.0.2"), Some("2")));
+        assert_eq!(c.result.objects, vec![bo("BAY2_CTRL/GGIO2.Ind1", "ST", "SPS", None)]);
+        assert!(c.config_revs.is_empty());
+        assert_eq!(catalog(SCD, Some("IED1")).unwrap().result.objects[0].object_reference, "IED1LD0/GGIO1.Ind1");
+        assert_eq!(catalog(SCD, Some("IEDX")).unwrap_err(), SclError { message: "IED IEDX tidak ada di file".into(), ied_names: names });
+    }
+
+    /// (d) XML rusak / bukan SCL / DTD (entity eksternal) -> gagal.
+    #[test]
+    fn katalog_bukan_scl() {
+        for xml in [
+            "<SCL><IED name=\"x\">",
+            "<foo/>",
+            "",
+            r#"<?xml version="1.0"?><!DOCTYPE SCL [<!ENTITY x SYSTEM "file:///etc/passwd">]><SCL>&x;</SCL>"#,
+        ] {
+            let e = catalog(xml, None).unwrap_err();
+            assert!(e.message.starts_with("File bukan SCL yang valid"), "{xml}: {e}");
+            assert!(e.ied_names.is_none());
+        }
+        assert_eq!(catalog("<SCL/>", None).unwrap_err().message, "File SCL tidak berisi IED");
+    }
+
+    /// (e) tipe DO hilang -> objek dilewati + errors, tetap sukses.
+    #[test]
+    fn katalog_tipe_hilang_masuk_errors() {
+        let xml = CID.replace(r#"<DO name="OpCnt" type="INS_T"/>"#, r#"<DO name="OpCnt" type="TIDAK_ADA"/>"#);
+        assert_ne!(xml, CID);
+        let c = catalog(&xml, None).unwrap();
+        assert_eq!(
+            c.result.errors,
+            vec![BrowseError { reference: "BaselineLD0/XSWI1.OpCnt".into(), error: "DOType \"TIDAK_ADA\" tidak ada di DataTypeTemplates".into() }]
+        );
+        assert_eq!(c.result.objects.len(), 8);
+        assert!(!c.result.objects.iter().any(|o| o.object_reference.ends_with("OpCnt")));
+    }
+
+    /// (f) format sama dengan keluaran BROWSE (contoh IEC61850_BROWSE_RESPONSE 9302 Schneider Baseline di docs/examples).
+    #[test]
+    fn katalog_sama_dengan_contoh_browse() {
+        let browse = crate::kafka::payload_examples::example("produce", "IEC61850_BROWSE_RESPONSE__success_with_errors");
+        let objects: Vec<BrowseObject> = serde_json::from_value(browse["objects"].clone()).unwrap();
+        let rcbs: Vec<RcbInfo> = serde_json::from_value(browse["rcbs"].clone()).unwrap();
+        let c = catalog(CID, None).unwrap();
+        // objek XSWI1 (termasuk Pos CO + control) identik
+        let xswi: Vec<_> = c.result.objects.iter().filter(|o| o.object_reference.starts_with("BaselineLD0/XSWI1.")).cloned().collect();
+        assert_eq!(xswi, objects);
+        // RCB brcbST01: reference, dataset, trg_ops, members identik (rpt_id / rpt_ena hanya diketahui dari IED)
+        let got = &c.result.rcbs[0];
+        let want = &rcbs[0];
+        assert_eq!(
+            (&got.reference, got.buffered, &got.dataset, &got.trg_ops, got.intg_pd_ms, &got.members),
+            (&want.reference, want.buffered, &want.dataset, &want.trg_ops, want.intg_pd_ms, &want.members)
+        );
     }
 
     #[test]

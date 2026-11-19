@@ -95,6 +95,18 @@ CREATE TABLE IF NOT EXISTS manual_sets (
     updated_at           TIMESTAMPTZ   NOT NULL DEFAULT now()
 );
 
+-- File SCL yang diunggah lewat backend (event SCL_IMPORT). Tanpa trigger CDC.
+CREATE TABLE IF NOT EXISTS iec61850_scl_files (
+    id           UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+    id_rtu       INTEGER       NOT NULL,
+    file_name    TEXT          NOT NULL,
+    content      TEXT          NOT NULL,
+    ied_name     TEXT,
+    is_deleted   BOOLEAN       NOT NULL DEFAULT FALSE,
+    created_at   TIMESTAMPTZ   NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ   NOT NULL DEFAULT now()
+);
+
 -- Trigger CDC di 0001. Asli: iconics_configuration_cdc_listener (pg_notify 'table_change').
 CREATE OR REPLACE FUNCTION notify_table_change() RETURNS trigger AS $$
 BEGIN

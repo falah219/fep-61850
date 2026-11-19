@@ -231,6 +231,9 @@ mod tests {
         assert_eq!(plan(&m, db_row), Plan::Ignore("tabel tidak relevan"));
         let iec104 = msg(json!({"table":"iec104s","schema":"public","operation":"UPDATE","record":{"id_rtu":ID}}));
         assert!(matches!(plan(&iec104, db_row), Plan::Ignore(_)));
+        // file SCL (SCL_IMPORT) tidak punya trigger CDC; kalau pun ada pesannya, diabaikan
+        let scl = msg(json!({"table":"iec61850_scl_files","schema":"public","operation":"INSERT","record":{"id_rtu":ID}}));
+        assert_eq!(plan(&scl, db_row), Plan::Ignore("tabel tidak relevan"));
     }
 
     /// "Gema" RTU_STATUS FEP sendiri: backend hanya mengubah kolom status -> tidak ada aksi apa pun.

@@ -1,0 +1,74 @@
+{
+  "key": "scl-9399-0f8e2c1a-5b6d-4e7f-9a0b-1c2d3e4f5a6b",
+  "id_rtu": 9399,
+  "status": "SUCCESS",
+  "source": "SCL",
+  "file_name": "baseline_1ied.cid",
+  "id_scl_file": "0f8e2c1a-5b6d-4e7f-9a0b-1c2d3e4f5a6b",
+  "ied": {
+    "name": "Baseline",
+    "manufacturer": "Schneider Electric",
+    "type": "Baseline",
+    "config_version": "1.0",
+    "ip": "10.10.1.21"
+  },
+  "config_revs": [
+    {
+      "ld": "BaselineLD0",
+      "reference": "BaselineLD0/LLN0.NamPlt.configRev",
+      "value": "Rev 2026-11"
+    }
+  ],
+  "message": "Import SCL selesai: 3 objek, 1 RCB",
+  "objects": [
+    {
+      "object_reference": "BaselineLD0/XSWI1.OpCnt",
+      "fc": "ST",
+      "cdc": "INS"
+    },
+    {
+      "object_reference": "BaselineLD0/XSWI1.Pos",
+      "fc": "ST",
+      "cdc": "DPC"
+    },
+    {
+      "object_reference": "BaselineLD0/XSWI1.Pos",
+      "fc": "CO",
+      "cdc": "DPC",
+      "control": {
+        "ctl_model": "sbo-with-enhanced-security",
+        "sbo_timeout_ms": 30000,
+        "sbow": true,
+        "oper": true,
+        "cancel": true
+      }
+    }
+  ],
+  "rcbs": [
+    {
+      "reference": "BaselineLD0/LLN0.BR.brcbST01",
+      "buffered": true,
+      "dataset": "BaselineLD0/LLN0.dsStatus",
+      "rpt_id": null,
+      "rpt_ena": null,
+      "trg_ops": "dchg,qchg,gi",
+      "intg_pd_ms": 0,
+      "conf_rev": 1,
+      "buf_tm_ms": 100,
+      "opt_flds": "seqNum,timeStamp,dataSet,reasonCode,entryID,configRef",
+      "members": [
+        {
+          "object_reference": "BaselineLD0/XSWI1.Pos.stVal",
+          "fc": "ST"
+        },
+        {
+          "object_reference": "BaselineLD0/XSWI1.Pos.q",
+          "fc": "ST"
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "part": 1,
+  "total_parts": 1
+}

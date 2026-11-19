@@ -128,6 +128,10 @@ pub struct RtuEventMessage {
     pub qualifier: Option<u8>,
     /// Pemberi perintah (orIdent) untuk COMMAND
     pub user: Option<String>,
+    /// SCL_IMPORT: `iec61850_scl_files.id`
+    pub id_scl_file: Option<String>,
+    /// SCL_IMPORT: IED yang dipilih (null = kolom `ied_name` / satu-satunya IED di file)
+    pub ied_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -2,6 +2,7 @@
   "key": "browse-9002-01",
   "id_rtu": 9002,
   "status": "FAILED",
+  "source": "BROWSE",
   "message": "IED tidak terkoneksi",
   "objects": [],
   "rcbs": [],

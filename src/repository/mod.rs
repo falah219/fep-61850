@@ -6,7 +6,10 @@ mod rtu_repository;
 
 pub use pool::create_pool;
 pub use resolver_repository::{load_formulas, load_general_actions, load_groups, load_manual_sets, load_tags, rtu_of_datapoint};
-pub use rtu_repository::{ids_by_ip, load_points, load_rcbs, load_rtus, load_unmapped_ioas, DEFAULT_BRCB_RESV_TMS_SECS, DEFAULT_RCB_RETRY_SECS};
+pub use rtu_repository::{
+    ids_by_ip, load_points, load_rcbs, load_rtus, load_scl_file, load_unmapped_ioas, SclFileRow, DEFAULT_BRCB_RESV_TMS_SECS,
+    DEFAULT_RCB_RETRY_SECS,
+};
 
 pub type DbResult<T> = Result<T, String>;
 

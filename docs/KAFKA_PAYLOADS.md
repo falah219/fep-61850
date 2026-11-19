@@ -29,7 +29,7 @@ Daftar isi:
 
 | Topic | Arah | Key pesan | Kapan | Handler / pembuat (path) |
 |---|---|---|---|---|
-| `RTU_EVENTS` | consume | (tidak dibaca) | Event RTU dari backend/GRITA: CREATE/ADD/UPDATE, DELETE/REMOVE, STATE, RESET, GI, CHANNEL, COMMAND, BROWSE | [event_handler.rs](../src/kafka/event_handler.rs) → [rtu_event/mod.rs](../src/kafka/handlers/rtu_event/mod.rs), [rtu_event/command.rs](../src/kafka/handlers/rtu_event/command.rs), [rtu_event/browse.rs](../src/kafka/handlers/rtu_event/browse.rs) |
+| `RTU_EVENTS` | consume | (tidak dibaca) | Event RTU dari backend/GRITA: CREATE/ADD/UPDATE, DELETE/REMOVE, STATE, RESET, GI, CHANNEL, COMMAND, BROWSE, SCL_IMPORT | [event_handler.rs](../src/kafka/event_handler.rs) → [rtu_event/mod.rs](../src/kafka/handlers/rtu_event/mod.rs), [rtu_event/command.rs](../src/kafka/handlers/rtu_event/command.rs), [rtu_event/browse.rs](../src/kafka/handlers/rtu_event/browse.rs), [rtu_event/scl_import.rs](../src/kafka/handlers/rtu_event/scl_import.rs) |
 | `MASTER_DATAPOINT_EVENT` | consume | (tidak dibaca) | Datapoint ditambah/diubah/dihapus | [master_datapoint.rs](../src/kafka/handlers/master_datapoint.rs) |
 | `MASTER_DATA_OBJECT_EVENT` | consume | (tidak dibaca) | Master data object berubah | [capture_data_change.rs](../src/kafka/handlers/capture_data_change.rs) (`reload_groups`) |
 | `CAPTURE_DATA_CHANGE` | consume | (tidak dibaca) | CDC tabel konfigurasi (`iconics_configuration_cdc_listener`) | [capture_data_change.rs](../src/kafka/handlers/capture_data_change.rs) |
@@ -42,7 +42,7 @@ Daftar isi:
 | `RTU_LOGGING` | produce | `id_rtu` | Kejadian koneksi/RCB/command, lalu lintas data (`LOG_DATA_TRAFFIC`), CONTROL TX/RX | [producer.rs](../src/kafka/producer.rs), [traffic.rs](../src/iec61850/traffic.rs), [acquisition.rs](../src/iec61850/acquisition.rs) |
 | `RTU_COMMAND` | produce | `key` payload (`"unknown"` kalau kosong) | Hasil SELECT/OPERATE/CANCEL | [rtu_event/command.rs](../src/kafka/handlers/rtu_event/command.rs) |
 | `MANUAL_SET_EVENT_RESPONSE` | produce | `"IEC61850"` | Jawaban `MANUAL_SET_EVENT` | [manual_set.rs](../src/kafka/handlers/manual_set.rs) |
-| `IEC61850_BROWSE_RESPONSE` | produce | `key` payload (`"unknown"` kalau kosong) | Hasil event `BROWSE` (bisa beberapa bagian) | [rtu_event/browse.rs](../src/kafka/handlers/rtu_event/browse.rs) |
+| `IEC61850_BROWSE_RESPONSE` | produce | `key` payload (`"unknown"` kalau kosong) | Hasil event `BROWSE` / `SCL_IMPORT` (bisa beberapa bagian) | [rtu_event/browse.rs](../src/kafka/handlers/rtu_event/browse.rs), [rtu_event/scl_import.rs](../src/kafka/handlers/rtu_event/scl_import.rs) |
 
 ### 1.2 Aturan umum
 
@@ -573,6 +573,82 @@ Gagal: tanpa `id_rtu` dan `ip_address` → `FAILED` `id_rtu atau ip_address waji
 browse lain untuk IED yang sama masih berjalan → `FAILED` `browse lain masih berjalan untuk IED ini`; daftar LD tidak terbaca /
 koneksi putus di tengah → `FAILED` dengan teks error; tidak ada jawaban thread IED dalam `BROWSE_TIMEOUT_MS` + 30 detik →
 `FAILED` `timeout menunggu hasil browse`.
+
+#### SCL_IMPORT
+
+Handler: [rtu_event/scl_import.rs](../src/kafka/handlers/rtu_event/scl_import.rs), parser: [scl.rs](../src/scl.rs) (`catalog`).
+Backend menyimpan file SCL (ICD/CID/SCD) di tabel `iec61850_scl_files`; FEP membacanya dan mengirim **katalog model IED
+dengan format yang sama dengan BROWSE** ke `IEC61850_BROWSE_RESPONSE` (`source: "SCL"`, bagian [3.7](#37-iec61850_browse_response)).
+FEP **tidak** konek / menulis ke IED, tidak menyentuh koneksi, polling, RCB aktif, atau `RTU_STATUS`, jadi event ini
+diproses walau RTU OFF / tidak berjalan / tidak terkoneksi. FEP tidak menulis tabel konfigurasi (mapping dihitung backend).
+
+| Field | Tipe JSON | Wajib | Default | Posisi | Arti |
+|---|---|---|---|---|---|
+| `id_rtu` | integer | ya | - | atas → `data` | Filter `iec61850_scl_files.id_rtu` (tanpa pencarian dari IP) |
+| `key` | string | tidak | `""` | atas → `data` | Disalin ke respons + key Kafka respons. Key sama dalam 10 menit terakhir → event **diabaikan** (hanya log) |
+| `id_scl_file` | string (UUID) | ya | - | atas | `iec61850_scl_files.id` |
+| `ied_name` | string / null | tidak | kolom `ied_name` | atas | IED yang dipilih di file. null + kolom kosong + file 1 IED → IED itu |
+
+`docs/examples/consume/RTU_EVENTS__SCL_IMPORT.json`
+
+```json
+{
+  "event": "SCL_IMPORT",
+  "protocol": "IEC61850",
+  "id_rtu": 9399,
+  "key": "scl-9399-0f8e2c1a-5b6d-4e7f-9a0b-1c2d3e4f5a6b",
+  "id_scl_file": "0f8e2c1a-5b6d-4e7f-9a0b-1c2d3e4f5a6b",
+  "ied_name": null
+}
+```
+
+`docs/examples/consume/RTU_EVENTS__SCL_IMPORT.ied_name.json`
+
+```json
+{
+  "event": "SCL_IMPORT",
+  "protocol": "IEC61850",
+  "id_rtu": 9399,
+  "key": "scl-9399-7d3e9b20-4c1a-4f8e-b6d2-5a9c0e1f2b3d",
+  "id_scl_file": "3a4b5c6d-7e8f-4a0b-9c1d-2e3f4a5b6c7d",
+  "ied_name": "IED2"
+}
+```
+
+Query: `SELECT file_name, content, ied_name, is_deleted FROM iec61850_scl_files WHERE id = $1 AND id_rtu = $2`
+(`content` TEXT, hanya ditarik kalau ≤ `SCL_MAX_BYTES`). Tabel ini tidak punya trigger CDC (kalau ada, handler CDC
+mengabaikannya). Dikerjakan di task sendiri (parsing di `spawn_blocking`), batas total `SCL_IMPORT_TIMEOUT_MS`.
+`RTU_LOGGING`: `Import SCL mulai: file <id>`, `Import SCL selesai: <n> objek, <m> RCB, <k> error (<ms> ms)` /
+`Import SCL gagal: <pesan> (<ms> ms)`.
+
+Isi katalog (per `AccessPoint/Server/LDevice`, LN0 + LN):
+
+- Nama LD: `ldName` kalau ada, kalau tidak `<IED name><LDevice inst>`. LN = prefix + lnClass + inst.
+- `objects`: DO dari `LNodeType` → `DOType`, satu objek per FC (`ST`, `MX`, `CO`, `SP`) yang punya DA, urut nama DO; DO
+  tanpa DA di FC itu (mis. `WYE`) → SDO (`LD/LN.DO.SDO`), sama dengan BROWSE. `cdc` = atribut `cdc` DOType (**asli**, jadi
+  ENS/ENC tetap ENS/ENC, tidak seperti BROWSE). `control` (FC `CO`): `sbow`/`oper`/`cancel` dari DA, `ctl_model` &
+  `sbo_timeout_ms` dari `DOI/DAI` (instance) yang menimpa `Val` default di DOType.
+- `rcbs`: `ReportControl` per instance (indexed, default: `<nama>01`..`<nama><RptEnabled max>`; `indexed="false"`: nama apa
+  adanya). `dataset` `LD/LN.<datSet>`, `members` dari FCDA (`LD/LN.DO[.DA]` + `fc`), `trg_ops` dari `TrgOps`
+  (`period` → `integrity`, `gi` default true), `intg_pd_ms` `intgPd`, `rpt_id` `rptID` (kosong → null), `rpt_ena` null,
+  plus `conf_rev` (`confRev`), `buf_tm_ms` (`bufTime`), `opt_flds` (atribut `OptFields` yang true, dipisah koma).
+- `config_revs`: per LD, `LLN0` `DOI NamPlt / DAI configRev` → `{ld, reference: "<LD>/LLN0.NamPlt.configRev", value}`.
+- Tipe (`LNodeType`/`DOType`) tidak ada → objek dilewati + `errors` `{ref: <objek>, error: "DOType \"X\" tidak ada di DataTypeTemplates"}`
+  (tetap SUCCESS). DataSet RCB tidak ada → `members: []` + error `{ref: "LD/LN.BR.<nama>"}`.
+
+Gagal (`FAILED`, `errors: [{ref: "scl", error: <pesan>}]`):
+
+| `message` | Kapan |
+|---|---|
+| `id_rtu wajib diisi` / `id_scl_file wajib diisi` | Field kosong |
+| `File SCL tidak ditemukan` | Tidak ada baris (`id` + `id_rtu`), `is_deleted = true`, atau `id_scl_file` bukan UUID |
+| `File SCL terlalu besar` | `octet_length(content)` > `SCL_MAX_BYTES` |
+| `File bukan SCL yang valid: <detail>` | XML rusak, ada DTD, atau root bukan `<SCL>` |
+| `File SCL tidak berisi IED` | Tidak ada `<IED>` |
+| `Pilih IED` | `ied_name` kosong dan file berisi lebih dari satu IED; `ied_names: [{name, ip}]` |
+| `IED <x> tidak ada di file` | `ied_name` tidak ada di file; `ied_names: [{name, ip}]` |
+| `Import SCL timeout` | Lebih dari `SCL_IMPORT_TIMEOUT_MS` |
+| `DB tidak tersedia: ...` / `query iec61850_scl_files: ...` | DB error |
 
 ### 2.2 `MASTER_DATAPOINT_EVENT`
 
@@ -1780,15 +1856,26 @@ Struct: `ManualSetEventResponse`. Key = `"IEC61850"`.
 
 Dibuat di [rtu_event/browse.rs](../src/kafka/handlers/rtu_event/browse.rs). Key = `key` payload (`"unknown"` kalau kosong).
 
+Dipakai dua event: `BROWSE` (model dibaca dari IED, `source: "BROWSE"`) dan `SCL_IMPORT` (model dari file SCL di DB,
+`source: "SCL"`, lihat [SCL_IMPORT](#scl_import)). `objects` / `rcbs` / `members` berformat sama.
+
 **Skema stabil** (untuk consumer GRITA): semua field di bawah **selalu ada** dengan tipe yang sama, urutan field JSON tetap
-`key, id_rtu, status, message, objects, rcbs, errors, part, total_parts` (dijaga test `urutan_field_json_tetap`).
+`key, id_rtu, status, source, message, objects, rcbs, errors, part, total_parts` (dijaga test `urutan_field_json_tetap`).
+`SCL_IMPORT` menambah field di antara `source` dan `message`: `file_name`, `id_scl_file`, `ied`, `config_revs` (SUCCESS),
+`ied_names` (FAILED pilih IED); field yang tidak ada nilainya tidak dikirim. BROWSE tidak pernah mengirim field ini.
 
 | Field | Tipe | Arti |
 |---|---|---|
 | `key` | string | `key` payload (`""` kalau tidak ada) |
 | `id_rtu` | integer / null | `id_rtu` payload / hasil pencarian dari IP (`null` kalau tidak ketemu) |
 | `status` | string | `SUCCESS` / `FAILED` |
-| `message` | string | SUCCESS: `<n> objek, <m> RCB` (total semua bagian), ditambah `, <k> error` kalau `errors` tidak kosong. FAILED: penyebab |
+| `source` | string | `BROWSE` / `SCL` |
+| `file_name` | string | Hanya SCL: `iec61850_scl_files.file_name` (kalau sudah terbaca) |
+| `id_scl_file` | string | Hanya SCL: `id_scl_file` event |
+| `ied` | object | Hanya SCL SUCCESS: `{name, manufacturer, type, config_version, ip}` (atribut `<IED>`, IP dari `ConnectedAP`); null kalau tidak ada |
+| `config_revs` | array | Hanya SCL SUCCESS: `[{ld, reference, value}]` (`LLN0.NamPlt.configRev` per LD), `[]` kalau tidak ada |
+| `ied_names` | array | Hanya SCL FAILED `Pilih IED` / `IED <x> tidak ada di file`: `[{name, ip}]` |
+| `message` | string | SUCCESS: `<n> objek, <m> RCB` (total semua bagian), ditambah `, <k> error` kalau `errors` tidak kosong; SCL diawali `Import SCL selesai: `. FAILED: penyebab |
 | `objects` | array | Objek di bagian ini (`[]` kalau FAILED) |
 | `objects[].object_reference` | string | `LD/LN.DO` atau `LD/LN.DO.SDO` (untuk `master_datapoint_iec61850s.object_reference`) |
 | `objects[].fc` | string | `ST`, `MX`, `CO`, `SP` |
@@ -1799,9 +1886,10 @@ Dibuat di [rtu_event/browse.rs](../src/kafka/handlers/rtu_event/browse.rs). Key 
 | `rcbs[].buffered` | boolean | BRCB = `true` |
 | `rcbs[].dataset` | string / null | `DatSet`, format ACSI `LD/LN.DataSet` (untuk `dataset_reference`) |
 | `rcbs[].rpt_id` | string / null | `RptID` |
-| `rcbs[].rpt_ena` | boolean | `RptEna` saat dibaca (`true` = sedang dipakai client lain / FEP) |
+| `rcbs[].rpt_ena` | boolean / null | `RptEna` saat dibaca (`true` = sedang dipakai client lain / FEP). SCL: `null` (tidak diketahui) |
 | `rcbs[].trg_ops` | string | `TrgOps`, format kolom `trg_ops` (`dchg,qchg,dupd,integrity,gi`) |
 | `rcbs[].intg_pd_ms` | integer | `IntgPd` (ms) |
+| `rcbs[].conf_rev`, `rcbs[].buf_tm_ms`, `rcbs[].opt_flds` | integer / integer / string | Hanya SCL (tidak dikirim kalau tidak ada di file): `confRev`, `bufTime` (ms), atribut `OptFields` yang true (`seqNum,timeStamp,...`) |
 | `rcbs[].members` | array | Anggota dataset `[{object_reference, fc}]`, bentuk sama dengan `objects[]` (`fc` = `""` kalau IED tidak menyertakannya) |
 | `errors` | array | Error **nyata** `[{ref, error}]`, **lengkap di bagian 1**, `[]` di bagian lain. FAILED: `[{ref: "browse", error: <penyebab>}]` |
 | `part` | integer | Nomor bagian, mulai 1 |
@@ -1836,6 +1924,7 @@ SUCCESS tanpa RCB / error:
   "key": "browse-9001-01",
   "id_rtu": 9001,
   "status": "SUCCESS",
+  "source": "BROWSE",
   "message": "4 objek, 0 RCB",
   "objects": [
     {
@@ -1876,6 +1965,7 @@ Baseline):
   "key": "browse-9302-01",
   "id_rtu": 9302,
   "status": "SUCCESS",
+  "source": "BROWSE",
   "message": "3 objek, 1 RCB, 1 error",
   "objects": [
     {
@@ -1942,6 +2032,7 @@ Multi-part (di sini dibagi dengan batas kecil supaya contoh pendek; FEP memakai 
   "key": "browse-9001-02",
   "id_rtu": 9001,
   "status": "SUCCESS",
+  "source": "BROWSE",
   "message": "4 objek, 0 RCB",
   "objects": [
     {
@@ -1969,6 +2060,7 @@ Multi-part (di sini dibagi dengan batas kecil supaya contoh pendek; FEP memakai 
   "key": "browse-9001-02",
   "id_rtu": 9001,
   "status": "SUCCESS",
+  "source": "BROWSE",
   "message": "4 objek, 0 RCB",
   "objects": [
     {
@@ -1998,6 +2090,7 @@ FAILED:
   "key": "browse-9002-01",
   "id_rtu": 9002,
   "status": "FAILED",
+  "source": "BROWSE",
   "message": "IED tidak terkoneksi",
   "objects": [],
   "rcbs": [],
@@ -2005,6 +2098,123 @@ FAILED:
     {
       "ref": "browse",
       "error": "IED tidak terkoneksi"
+    }
+  ],
+  "part": 1,
+  "total_parts": 1
+}
+```
+
+SCL_IMPORT SUCCESS (dipotong: 3 dari 9 objek, 1 dari 3 RCB fixture `tests/fixtures/scl/baseline_1ied.cid`):
+
+`docs/examples/produce/IEC61850_BROWSE_RESPONSE__scl_success.json`
+
+```json
+{
+  "key": "scl-9399-0f8e2c1a-5b6d-4e7f-9a0b-1c2d3e4f5a6b",
+  "id_rtu": 9399,
+  "status": "SUCCESS",
+  "source": "SCL",
+  "file_name": "baseline_1ied.cid",
+  "id_scl_file": "0f8e2c1a-5b6d-4e7f-9a0b-1c2d3e4f5a6b",
+  "ied": {
+    "name": "Baseline",
+    "manufacturer": "Schneider Electric",
+    "type": "Baseline",
+    "config_version": "1.0",
+    "ip": "10.10.1.21"
+  },
+  "config_revs": [
+    {
+      "ld": "BaselineLD0",
+      "reference": "BaselineLD0/LLN0.NamPlt.configRev",
+      "value": "Rev 2026-11"
+    }
+  ],
+  "message": "Import SCL selesai: 3 objek, 1 RCB",
+  "objects": [
+    {
+      "object_reference": "BaselineLD0/XSWI1.OpCnt",
+      "fc": "ST",
+      "cdc": "INS"
+    },
+    {
+      "object_reference": "BaselineLD0/XSWI1.Pos",
+      "fc": "ST",
+      "cdc": "DPC"
+    },
+    {
+      "object_reference": "BaselineLD0/XSWI1.Pos",
+      "fc": "CO",
+      "cdc": "DPC",
+      "control": {
+        "ctl_model": "sbo-with-enhanced-security",
+        "sbo_timeout_ms": 30000,
+        "sbow": true,
+        "oper": true,
+        "cancel": true
+      }
+    }
+  ],
+  "rcbs": [
+    {
+      "reference": "BaselineLD0/LLN0.BR.brcbST01",
+      "buffered": true,
+      "dataset": "BaselineLD0/LLN0.dsStatus",
+      "rpt_id": null,
+      "rpt_ena": null,
+      "trg_ops": "dchg,qchg,gi",
+      "intg_pd_ms": 0,
+      "conf_rev": 1,
+      "buf_tm_ms": 100,
+      "opt_flds": "seqNum,timeStamp,dataSet,reasonCode,entryID,configRef",
+      "members": [
+        {
+          "object_reference": "BaselineLD0/XSWI1.Pos.stVal",
+          "fc": "ST"
+        },
+        {
+          "object_reference": "BaselineLD0/XSWI1.Pos.q",
+          "fc": "ST"
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "part": 1,
+  "total_parts": 1
+}
+```
+
+SCL_IMPORT FAILED (SCD dua IED tanpa `ied_name`):
+
+`docs/examples/produce/IEC61850_BROWSE_RESPONSE__scl_failed.json`
+
+```json
+{
+  "key": "scl-9399-9e1f2a3b-0c4d-4e5f-8a6b-7c8d9e0f1a2b",
+  "id_rtu": 9399,
+  "status": "FAILED",
+  "source": "SCL",
+  "file_name": "station_2ied.scd",
+  "id_scl_file": "3a4b5c6d-7e8f-4a0b-9c1d-2e3f4a5b6c7d",
+  "ied_names": [
+    {
+      "name": "IED1",
+      "ip": "10.0.0.1"
+    },
+    {
+      "name": "IED2",
+      "ip": "10.0.0.2"
+    }
+  ],
+  "message": "Pilih IED",
+  "objects": [],
+  "rcbs": [],
+  "errors": [
+    {
+      "ref": "scl",
+      "error": "Pilih IED"
     }
   ],
   "part": 1,

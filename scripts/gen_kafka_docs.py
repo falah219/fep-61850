@@ -24,6 +24,9 @@ G_DPS = "6f1c2a9e-3b7d-4c11-9a52-0d8e4b7f2a10"
 G_MV = "a2b4c6d8-1e3f-4a5b-8c7d-9e0f1a2b3c4d"
 G_SPS = "0c9b8a7f-6e5d-4c3b-2a19-08f7e6d5c4b3"
 
+SCL_FILE = "0f8e2c1a-5b6d-4e7f-9a0b-1c2d3e4f5a6b"
+SCL_SCD = "3a4b5c6d-7e8f-4a0b-9c1d-2e3f4a5b6c7d"
+
 BRCB_ST = "BAY1LD0/LLN0.BR.brcbST01"
 URCB_MX = "BAY1LD0/LLN0.RP.urcbMX01"
 
@@ -57,7 +60,7 @@ BROWSE_ALL = [
 
 def browse(key, id_rtu, message, objects, rcbs=(), errors=(), part=1, total=1):
     """IEC61850_BROWSE_RESPONSE, urutan field sama dengan FEP."""
-    return {"key": key, "id_rtu": id_rtu, "status": "SUCCESS", "message": message, "objects": list(objects),
+    return {"key": key, "id_rtu": id_rtu, "status": "SUCCESS", "source": "BROWSE", "message": message, "objects": list(objects),
             "rcbs": list(rcbs), "errors": list(errors), "part": part, "total_parts": total}
 
 consume = {
@@ -99,6 +102,11 @@ consume = {
     "RTU_EVENTS__BROWSE": {"event": "BROWSE", "protocol": "IEC61850", "id_rtu": 9001, "key": "browse-9001-01"},
     "RTU_EVENTS__BROWSE.data": {"event": "BROWSE", "protocol": "IEC61850",
                                 "data": {"id_rtu": 9001, "key": "browse-9001-02"}},
+    "RTU_EVENTS__SCL_IMPORT": {"event": "SCL_IMPORT", "protocol": "IEC61850", "id_rtu": 9399, "key": "scl-9399-" + SCL_FILE,
+                               "id_scl_file": SCL_FILE, "ied_name": None},
+    "RTU_EVENTS__SCL_IMPORT.ied_name": {"event": "SCL_IMPORT", "protocol": "IEC61850", "id_rtu": 9399,
+                                        "key": "scl-9399-7d3e9b20-4c1a-4f8e-b6d2-5a9c0e1f2b3d", "id_scl_file": SCL_SCD,
+                                        "ied_name": "IED2"},
     "MASTER_DATAPOINT_EVENT__UPDATE": {"id_rtu": 9001, "protocol": "IEC61850", "ioa": 2001, "event": "UPDATE",
                                        "data": {"tag": "BAY1_ANIN1_2001", "description": "Arus fasa R"}},
     "MASTER_DATAPOINT_EVENT__UPDATE.ioa_string": {"id_rtu": 9001, "protocol": "IEC61850", "ioa": "2001", "event": "UPDATE",
@@ -227,10 +235,37 @@ produce = {
                "members": [{"object_reference": "BaselineLD0/XSWI1.Pos.stVal", "fc": "ST"},
                            {"object_reference": "BaselineLD0/XSWI1.Pos.q", "fc": "ST"}]}],
         errors=[{"ref": "BaselineLD0/LLN0.BR.brcbMX01", "error": "timeout"}]),
-    "IEC61850_BROWSE_RESPONSE__failed": {"key": "browse-9002-01", "id_rtu": 9002, "status": "FAILED",
+    "IEC61850_BROWSE_RESPONSE__failed": {"key": "browse-9002-01", "id_rtu": 9002, "status": "FAILED", "source": "BROWSE",
                                          "message": "IED tidak terkoneksi", "objects": [], "rcbs": [],
                                          "errors": [{"ref": "browse", "error": "IED tidak terkoneksi"}],
                                          "part": 1, "total_parts": 1},
+    # SCL_IMPORT: format objects/rcbs sama dengan BROWSE (nama dari fixture tests/fixtures/scl/baseline_1ied.cid, dipotong)
+    "IEC61850_BROWSE_RESPONSE__scl_success": {
+        "key": "scl-9399-" + SCL_FILE, "id_rtu": 9399, "status": "SUCCESS", "source": "SCL",
+        "file_name": "baseline_1ied.cid", "id_scl_file": SCL_FILE,
+        "ied": {"name": "Baseline", "manufacturer": "Schneider Electric", "type": "Baseline", "config_version": "1.0",
+                "ip": "10.10.1.21"},
+        "config_revs": [{"ld": "BaselineLD0", "reference": "BaselineLD0/LLN0.NamPlt.configRev", "value": "Rev 2026-11"}],
+        "message": "Import SCL selesai: 3 objek, 1 RCB",
+        "objects": [
+            bo("BaselineLD0/XSWI1.OpCnt", "ST", "INS"),
+            bo("BaselineLD0/XSWI1.Pos", "ST", "DPC"),
+            dict(bo("BaselineLD0/XSWI1.Pos", "CO", "DPC"),
+                 control={"ctl_model": "sbo-with-enhanced-security", "sbo_timeout_ms": 30000,
+                          "sbow": True, "oper": True, "cancel": True}),
+        ],
+        "rcbs": [{"reference": "BaselineLD0/LLN0.BR.brcbST01", "buffered": True, "dataset": "BaselineLD0/LLN0.dsStatus",
+                  "rpt_id": None, "rpt_ena": None, "trg_ops": "dchg,qchg,gi", "intg_pd_ms": 0, "conf_rev": 1,
+                  "buf_tm_ms": 100, "opt_flds": "seqNum,timeStamp,dataSet,reasonCode,entryID,configRef",
+                  "members": [{"object_reference": "BaselineLD0/XSWI1.Pos.stVal", "fc": "ST"},
+                              {"object_reference": "BaselineLD0/XSWI1.Pos.q", "fc": "ST"}]}],
+        "errors": [], "part": 1, "total_parts": 1},
+    "IEC61850_BROWSE_RESPONSE__scl_failed": {
+        "key": "scl-9399-9e1f2a3b-0c4d-4e5f-8a6b-7c8d9e0f1a2b", "id_rtu": 9399, "status": "FAILED", "source": "SCL",
+        "file_name": "station_2ied.scd", "id_scl_file": SCL_SCD,
+        "ied_names": [{"name": "IED1", "ip": "10.0.0.1"}, {"name": "IED2", "ip": "10.0.0.2"}],
+        "message": "Pilih IED", "objects": [], "rcbs": [], "errors": [{"ref": "scl", "error": "Pilih IED"}],
+        "part": 1, "total_parts": 1},
 }
 
 # Simulasi split_parts (browse.rs) untuk batas test 160 byte

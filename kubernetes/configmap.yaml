@@ -43,6 +43,9 @@ data:
   # BROWSE: batas total (ms) + baca nilai (tipe stVal fallback, ctlModel, sboTimeout)
   BROWSE_TIMEOUT_MS: "300000"
   BROWSE_READ_VALUES: "true"
+  # SCL_IMPORT: batas total (ms) + ukuran maks file SCL dari DB (byte, 20 MB)
+  SCL_IMPORT_TIMEOUT_MS: "60000"
+  SCL_MAX_BYTES: "20971520"
   # Tunggu thread IED berhenti saat shutdown (detik); harus < terminationGracePeriodSeconds
   SHUTDOWN_WAIT_SECS: "5"
   # none | local | remote. BELUM dikonfirmasi tim (docs/CATATAN_TERBUKA.md)

@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fixture test SCL_IMPORT: CID satu IED, nama objek sama dengan contoh BROWSE 9302 (Schneider Baseline). -->
+<SCL xmlns="http://www.iec.ch/61850/2003/SCL" version="2007" revision="B">
+  <Header id="baseline-uji"/>
+  <Communication>
+    <SubNetwork name="StationBus" type="8-MMS">
+      <ConnectedAP iedName="Baseline" apName="AP1">
+        <Address>
+          <P type="OSI-AP-Title">1,3,9999,33</P>
+          <P type="IP">10.10.1.21</P>
+          <P type="IP-SUBNET">255.255.255.0</P>
+        </Address>
+      </ConnectedAP>
+    </SubNetwork>
+  </Communication>
+  <IED name="Baseline" manufacturer="Schneider Electric" type="Baseline" configVersion="1.0">
+    <AccessPoint name="AP1">
+      <Server>
+        <Authentication/>
+        <LDevice inst="LD0">
+          <LN0 lnClass="LLN0" inst="" lnType="LLN0_T">
+            <DataSet name="dsStatus">
+              <FCDA ldInst="LD0" prefix="" lnClass="XSWI" lnInst="1" doName="Pos" daName="stVal" fc="ST"/>
+              <FCDA ldInst="LD0" prefix="" lnClass="XSWI" lnInst="1" doName="Pos" daName="q" fc="ST"/>
+            </DataSet>
+            <DataSet name="dsMeas">
+              <FCDA ldInst="LD0" prefix="" lnClass="MMXU" lnInst="1" doName="PhV.phsA" fc="MX"/>
+            </DataSet>
+            <ReportControl name="brcbST" datSet="dsStatus" rptID="" confRev="1" buffered="true" bufTime="100" intgPd="0">
+              <TrgOps dchg="true" qchg="true"/>
+              <OptFields seqNum="true" timeStamp="true" dataSet="true" reasonCode="true" entryID="true" configRef="true"/>
+              <RptEnabled max="2"/>
+            </ReportControl>
+            <ReportControl name="urcbMX" datSet="dsMeas" rptID="MXReport" confRev="3" buffered="false" intgPd="5000">
+              <TrgOps dchg="true" period="true" gi="false"/>
+              <OptFields timeStamp="true"/>
+            </ReportControl>
+            <DOI name="Mod"><DAI name="ctlModel"><Val>status-only</Val></DAI></DOI>
+            <DOI name="NamPlt"><DAI name="configRev"><Val>Rev 2026-11</Val></DAI></DOI>
+          </LN0>
+          <LN lnClass="XSWI" inst="1" prefix="" lnType="XSWI_T">
+            <DOI name="Pos">
+              <DAI name="ctlModel"><Val>sbo-with-enhanced-security</Val></DAI>
+              <DAI name="sboTimeout"><Val>30000</Val></DAI>
+            </DOI>
+          </LN>
+          <LN lnClass="CSWI" inst="1" prefix="Main" lnType="CSWI_T"/>
+          <LN lnClass="MMXU" inst="1" prefix="" lnType="MMXU_T"/>
+        </LDevice>
+      </Server>
+    </AccessPoint>
+  </IED>
+  <DataTypeTemplates>
+    <LNodeType id="LLN0_T" lnClass="LLN0">
+      <DO name="NamPlt" type="LPL_T"/>
+      <DO name="Mod" type="ENC_T"/>
+    </LNodeType>
+    <LNodeType id="XSWI_T" lnClass="XSWI">
+      <DO name="Pos" type="DPC_T"/>
+      <DO name="OpCnt" type="INS_T"/>
+    </LNodeType>
+    <LNodeType id="CSWI_T" lnClass="CSWI">
+      <DO name="Pos" type="DPC_T"/>
+    </LNodeType>
+    <LNodeType id="MMXU_T" lnClass="MMXU">
+      <DO name="PhV" type="WYE_T"/>
+    </LNodeType>
+    <DOType id="ENC_T" cdc="ENC">
+      <DA name="stVal" fc="ST" bType="Enum" type="Beh"/>
+      <DA name="q" fc="ST" bType="Quality"/>
+      <DA name="Oper" fc="CO" bType="Struct" type="EncOper_T"/>
+      <DA name="ctlModel" fc="CF" bType="Enum" type="ctlModel"><Val>direct-with-normal-security</Val></DA>
+    </DOType>
+    <DOType id="LPL_T" cdc="LPL">
+      <DA name="vendor" fc="DC" bType="VisString255"/>
+      <DA name="configRev" fc="DC" bType="VisString255"/>
+    </DOType>
+    <DOType id="DPC_T" cdc="DPC">
+      <DA name="SBOw" fc="CO" bType="Struct" type="DpcOper_T"/>
+      <DA name="Oper" fc="CO" bType="Struct" type="DpcOper_T"/>
+      <DA name="Cancel" fc="CO" bType="Struct" type="DpcOper_T"/>
+      <DA name="stVal" fc="ST" bType="Dbpos"/>
+      <DA name="q" fc="ST" bType="Quality"/>
+      <DA name="t" fc="ST" bType="Timestamp"/>
+      <DA name="ctlModel" fc="CF" bType="Enum" type="ctlModel"><Val>direct-with-normal-security</Val></DA>
+      <DA name="sboTimeout" fc="CF" bType="INT32U"/>
+    </DOType>
+    <DOType id="INS_T" cdc="INS">
+      <DA name="stVal" fc="ST" bType="INT32"/>
+      <DA name="q" fc="ST" bType="Quality"/>
+    </DOType>
+    <DOType id="WYE_T" cdc="WYE">
+      <SDO name="phsB" type="CMV_T"/>
+      <SDO name="phsA" type="CMV_T"/>
+    </DOType>
+    <DOType id="CMV_T" cdc="CMV">
+      <DA name="cVal" fc="MX" bType="Struct" type="Vector_T"/>
+      <DA name="q" fc="MX" bType="Quality"/>
+    </DOType>
+    <DAType id="Vector_T">
+      <BDA name="mag" bType="Struct" type="AnalogueValue_T"/>
+    </DAType>
+    <DAType id="AnalogueValue_T">
+      <BDA name="f" bType="FLOAT32"/>
+    </DAType>
+    <DAType id="DpcOper_T">
+      <BDA name="ctlVal" bType="BOOLEAN"/>
+    </DAType>
+    <DAType id="EncOper_T">
+      <BDA name="ctlVal" bType="Enum" type="Beh"/>
+    </DAType>
+    <EnumType id="Beh">
+      <EnumVal ord="1">on</EnumVal>
+    </EnumType>
+    <EnumType id="ctlModel">
+      <EnumVal ord="0">status-only</EnumVal>
+      <EnumVal ord="1">direct-with-normal-security</EnumVal>
+      <EnumVal ord="4">sbo-with-enhanced-security</EnumVal>
+    </EnumType>
+  </DataTypeTemplates>
+</SCL>
