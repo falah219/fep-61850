@@ -10,8 +10,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 pub const PROTOCOL: &str = "IEC61850";
 
-/// Salinan `DataMessage` FEP IEC 104. Urutan & nama field JANGAN diubah. Tambahan IEC 61850 (`source`, `rcb`)
-/// sesudah `general_action`; field IEC 104 lain tetap di posisinya.
+/// Salinan `DataMessage` FEP IEC 104. Urutan & nama field JANGAN diubah. Tambahan IEC 61850 (`source`, `rcb`,
+/// `object_reference`, `fc`) sesudah `general_action`; field IEC 104 lain tetap di posisinya.
 #[derive(Serialize)]
 pub struct DataMessage<'a> {
     pub ip_address: &'a str,
@@ -20,7 +20,8 @@ pub struct DataMessage<'a> {
     pub action: &'a str,
     pub tag: &'a str,
     pub value: &'a serde_json::Value,
-    pub address: i32,
+    /// IOA virtual. null = anggota dataset yang belum dimapping (RTU_DATAS_UNMAPPED, hanya RTU_DATAS)
+    pub address: Option<i32>,
     pub ca: i32,
     pub asdu: i32,
     #[serde(rename = "type")]
@@ -33,6 +34,12 @@ pub struct DataMessage<'a> {
     pub source: &'static str,
     /// rcb_reference RCB yang mengirim report (format `iec61850_report_controls.rcb_reference`); null untuk polling
     pub rcb: Option<&'a str>,
+    /// DO (`LD/LN.DO`, format katalog BROWSE). Hanya RTU_DATAS; None -> tidak dikirim (DATAPOINTS tidak berubah)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_reference: Option<&'a str>,
+    /// FC titik / anggota dataset (`ST`, `MX`). Hanya RTU_DATAS, sama dengan `object_reference`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fc: Option<&'a str>,
     pub time: i64,
     pub time_desc: &'static str,
 }
@@ -219,7 +226,7 @@ mod tests {
             action: "DATA_CHANGE",
             tag: "TAG",
             value: &value,
-            address: 1001,
+            address: Some(1001),
             ca: 0,
             asdu: 0,
             typ: "DPS",
@@ -229,16 +236,26 @@ mod tests {
             general_action: Some(3),
             source: "REPORT",
             rcb: Some("LD/LLN0.BR.brcbST01"),
+            object_reference: None,
+            fc: None,
             time: 1,
             time_desc: "RTU",
         };
-        // field IEC 104 tetap di urutannya; source & rcb sesudah general_action
+        // field IEC 104 tetap di urutannya; source & rcb sesudah general_action. DATAPOINTS: tanpa object_reference / fc
         assert_eq!(
             serde_json::to_string(&m).unwrap(),
             r#"{"ip_address":"10.0.0.1","protocol":"IEC61850","id_rtu":7,"action":"DATA_CHANGE","tag":"TAG","value":2,"address":1001,"ca":0,"asdu":0,"type":"DPS","quality":"GOOD","flag":"GOOD","group":"","general_action":3,"source":"REPORT","rcb":"LD/LLN0.BR.brcbST01","time":1,"time_desc":"RTU"}"#
         );
         let polling = DataMessage { source: "POLLING", rcb: None, ..m };
         assert!(serde_json::to_string(&polling).unwrap().contains(r#""general_action":3,"source":"POLLING","rcb":null,"time":1"#));
+        // RTU_DATAS anggota tanpa titik: address null, object_reference & fc sesudah rcb
+        let unmapped = DataMessage { tag: "", address: None, object_reference: Some("LD/LLN0.Health"), fc: Some("ST"), ..m };
+        assert!(serde_json::to_string(&unmapped).unwrap().contains(
+            r#""address":null,"ca":0"#
+        ));
+        assert!(serde_json::to_string(&unmapped)
+            .unwrap()
+            .contains(r#""rcb":"LD/LLN0.BR.brcbST01","object_reference":"LD/LLN0.Health","fc":"ST","time":1"#));
     }
 
     #[test]

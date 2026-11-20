@@ -11,11 +11,11 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::client::{
     control_model_from_str, fc_from_str, fc_name, is_connection_error, osi_params, ConnectParams, Control, Ied, OsiParams,
-    OwnedValue, Rcb, RcbSettings, Spec,
+    OwnedValue, Rcb, RcbSettings, Spec, SpecNode,
 };
 use super::callbacks::report::{on_report, ReportCtx};
 use super::mapper::{mms_quality, mms_time, mms_to_json};
@@ -23,6 +23,7 @@ use super::mapping::split_fc;
 use crate::connection::ConnectGate;
 use super::browse::{ctl_model_name, BrowseJob, BrowseOptions, BrowseResult};
 use super::traffic::{self, TrafficLog};
+use super::unmapped;
 use crate::domain::{ctl_value, CommandAction, CommandJob, CommandReq, CtlVal, Point, PointState, RtuConfig};
 use crate::error::Result;
 use crate::ffi;
@@ -47,6 +48,8 @@ struct Pick {
 pub(crate) struct MemberPlan {
     spec: Option<Spec>,
     picks: Vec<Pick>,
+    /// Bagian titik virtual (`ReportCtx::unmapped`) kalau anggota ini belum punya titik (RTU_DATAS_UNMAPPED)
+    unmapped: Vec<Pick>,
 }
 
 /// Posisi `target` relatif terhadap `member`:
@@ -114,7 +117,8 @@ pub fn retry_pending<T: Copy, R>(pending: &mut Vec<T>, mut f: impl FnMut(T) -> O
     ok
 }
 
-fn build_plan(ied: &Ied, points: &[Point], member_ref: &str, fc: &str) -> Result<MemberPlan> {
+/// Bagian value / q / t titik-titik `points` yang ada di anggota `member_ref` [fc].
+fn picks_for(points: &[Point], member_ref: &str, fc: &str) -> Result<Vec<Pick>> {
     let mut picks = Vec::new();
     for (i, p) in points.iter().enumerate().filter(|(_, p)| p.fc == fc) {
         for (part, attr) in [(Part::Value, p.value_attribute.as_str()), (Part::Quality, "q"), (Part::Time, "t")] {
@@ -125,13 +129,55 @@ fn build_plan(ied: &Ied, points: &[Point], member_ref: &str, fc: &str) -> Result
             }
         }
     }
+    Ok(picks)
+}
+
+fn build_plan(ied: &Ied, points: &[Point], member_ref: &str, fc: &str) -> Result<MemberPlan> {
+    let picks = picks_for(points, member_ref, fc)?;
     // Spec hanya perlu kalau ada bagian yang harus diambil dari dalam struktur.
     let spec = if picks.iter().any(|p| p.path.is_some()) {
         Some(ied.variable_spec(member_ref, fc_from_str(fc)?)?)
     } else {
         None
     };
-    Ok(MemberPlan { spec, picks })
+    Ok(MemberPlan { spec, picks, unmapped: Vec::new() })
+}
+
+/// Anggota yang diteruskan tanpa IOA: belum punya titik. RTU_DATAS_UNMAPPED=false -> tidak ada (perilaku lama).
+fn unmapped_candidates(enabled: bool, members: &[MemberPlan]) -> Vec<usize> {
+    if !enabled {
+        return Vec::new();
+    }
+    members.iter().enumerate().filter(|(_, m)| m.picks.is_empty()).map(|(i, _)| i).collect()
+}
+
+/// Titik virtual untuk anggota `todo` (lihat `unmapped`): struktur dari getVariableSpecification (spec disimpan
+/// untuk decode). Anggota yang gagal dibaca / strukturnya tidak dikenal dilewati (DEBUG), report tetap jalan.
+// ponytail: satu getVariableSpecification per anggota tanpa titik saat setup RCB; cache per (reference, FC) kalau
+// dataset besar membuat setup RCB lambat
+fn plan_unmapped(ied: &Ied, id_rtu: i32, refs: &[(String, String)], members: &mut [MemberPlan], todo: Vec<usize>) -> Result<Vec<Point>> {
+    let mut found: Vec<(usize, SpecNode)> = Vec::new();
+    for i in todo {
+        let (r, fc) = &refs[i];
+        let Ok(c_fc) = fc_from_str(fc) else { continue };
+        match ied.variable_spec(r, c_fc) {
+            Ok(spec) => {
+                found.push((i, spec.tree()));
+                members[i].spec = Some(spec);
+            }
+            Err(e) if e.is_connection_lost() => return Err(e),
+            Err(e) => debug!(id_rtu, "anggota {r}[{fc}] tanpa titik dilewati: {e}"),
+        }
+    }
+    let points = unmapped::virtual_points(id_rtu, found.iter().map(|(i, t)| (refs[*i].0.as_str(), refs[*i].1.as_str(), t)));
+    for (i, _) in &found {
+        let (r, fc) = &refs[*i];
+        members[*i].unmapped = picks_for(&points, r, fc)?;
+        if members[*i].unmapped.is_empty() {
+            debug!(id_rtu, "anggota {r}[{fc}] tanpa titik: struktur tidak dikenal, dilewati");
+        }
+    }
+    Ok(points)
 }
 
 /// Tulis bagian-bagian titik dari `value` ke `state`. Kembalikan indeks titik yang tersentuh.
@@ -139,8 +185,37 @@ fn build_plan(ied: &Ied, points: &[Point], member_ref: &str, fc: &str) -> Result
 /// # Safety
 /// `value` harus MmsValue valid sesuai tipe anggota ini.
 pub(crate) unsafe fn decode(plan: &MemberPlan, value: *mut ffi::MmsValue, points: &[Point], state: &mut [PointState], touched: &mut Vec<usize>) {
-    for pick in &plan.picks {
-        let v = match (&pick.path, &plan.spec) {
+    // SAFETY: syarat pemanggil
+    unsafe { decode_picks(&plan.picks, plan.spec.as_ref(), value, points, state, touched) }
+}
+
+/// Sama dengan `decode`, untuk titik virtual anggota tanpa titik (`points` = `ReportCtx::unmapped`).
+///
+/// # Safety
+/// `value` harus MmsValue valid sesuai tipe anggota ini.
+pub(crate) unsafe fn decode_unmapped(
+    plan: &MemberPlan,
+    value: *mut ffi::MmsValue,
+    points: &[Point],
+    state: &mut [PointState],
+    touched: &mut Vec<usize>,
+) {
+    // SAFETY: syarat pemanggil
+    unsafe { decode_picks(&plan.unmapped, plan.spec.as_ref(), value, points, state, touched) }
+}
+
+/// # Safety
+/// `value` harus MmsValue valid sesuai `spec` (tipe anggota).
+unsafe fn decode_picks(
+    picks: &[Pick],
+    spec: Option<&Spec>,
+    value: *mut ffi::MmsValue,
+    points: &[Point],
+    state: &mut [PointState],
+    touched: &mut Vec<usize>,
+) {
+    for pick in picks {
+        let v = match (&pick.path, spec) {
             (None, _) => value,
             // SAFETY: value sesuai spec (syarat pemanggil)
             (Some(path), Some(spec)) => unsafe { spec.child(value, path) },
@@ -185,6 +260,8 @@ pub struct RtuCtx {
     pub unmapped_ioas: Vec<i32>,
     /// Log lalu lintas data ke RTU_LOGGING (diisi Manager dari LOG_DATA_TRAFFIC / LOG_DATA_MAX_PER_SEC)
     pub traffic: TrafficLog,
+    /// RTU_DATAS untuk anggota dataset RCB tanpa titik (env RTU_DATAS_UNMAPPED, diisi Manager; default true)
+    pub rtu_datas_unmapped: bool,
 }
 
 impl RtuCtx {
@@ -214,6 +291,7 @@ impl RtuCtx {
             entry_ids: Mutex::default(),
             unmapped_ioas: Vec::new(),
             traffic: TrafficLog::new(false, 0),
+            rtu_datas_unmapped: true,
         }
     }
 
@@ -233,6 +311,11 @@ impl RtuCtx {
 
     pub(crate) fn publish(&self, i: usize, s: &PointState, action: &str, entry_time: Option<i64>, origin: Origin) {
         self.publisher.publish(&self.rtu.ip_address, &self.points[i], s, action, entry_time, origin);
+    }
+
+    /// Titik virtual anggota tanpa titik: RTU_DATAS saja (`address` null).
+    pub(crate) fn publish_unmapped(&self, p: &Point, s: &PointState, action: &str, entry_time: Option<i64>, origin: Origin) {
+        self.publisher.publish_unmapped(&self.rtu.ip_address, p, s, action, entry_time, origin);
     }
 
     fn entry_id(&self, rcb_ref: &str) -> Option<Vec<u8>> {
@@ -723,18 +806,29 @@ fn setup_rcb(ied: &Ied, ctx: &Arc<RtuCtx>, rcb_ref: &str, settings: &RcbSettings
     let rcb = Rcb::read(ied, rcb_ref)?;
     let ds = settings.dataset.clone().or_else(|| rcb.dataset()).ok_or("RCB tidak punya dataset")?;
     let mut members = Vec::new();
+    let mut refs = Vec::new();
     for m in ied.dataset_directory(&ds)? {
         let (reference, fc) = split_fc(&m).ok_or_else(|| format!("anggota tanpa FC: {m}"))?;
         members.push(build_plan(ied, &ctx.points, reference, fc)?);
+        refs.push((reference.to_string(), fc.to_string()));
     }
     let mapped = members.iter().filter(|m| !m.picks.is_empty()).count();
-    info!(id_rtu = ctx.rtu.id_rtu, "RCB {rcb_ref}: dataset {ds}, {} anggota, {mapped} termapping", members.len());
+    let todo = unmapped_candidates(ctx.rtu_datas_unmapped, &members);
+    let unmapped = plan_unmapped(ied, ctx.rtu.id_rtu, &refs, &mut members, todo)?;
+    let forwarded = members.iter().filter(|m| !m.unmapped.is_empty()).count();
+    info!(
+        id_rtu = ctx.rtu.id_rtu,
+        "RCB {rcb_ref}: dataset {ds}, {} anggota, {mapped} termapping, {forwarded} diteruskan tanpa IOA",
+        members.len()
+    );
 
     let rc = Box::new(ReportCtx {
         rtu: Arc::clone(ctx),
         rcb_ref: rcb_ref.to_string(),
         dataset: ds,
         members,
+        unmapped_state: Mutex::new(vec![PointState::default(); unmapped.len()]),
+        unmapped,
         alive: ied.liveness(),
     });
     let param = &*rc as *const ReportCtx as *mut c_void;
@@ -1044,6 +1138,116 @@ mod tests {
         assert_eq!(ctx.entry_id("LD/LLN0.BR.brcb02"), None);
         ctx.forget_entry_id(brcb); // ditolak IED
         assert_eq!(ctx.entry_id(brcb), None);
+    }
+
+    /// Report berisi anggota termapping (XCBR1.Pos) + tanpa titik (GGIO1.Ind1): RTU_DATAS untuk keduanya (address angka
+    /// vs null), DATAPOINTS hanya termapping. RTU_DATAS_UNMAPPED=false: anggota tanpa titik tidak dikirim (perilaku lama).
+    #[tokio::test]
+    async fn report_anggota_tanpa_titik() {
+        use crate::iec61850::callbacks::report::{collect, ReportCtx};
+        use crate::iec61850::client::SpecType;
+        use crate::kafka::{TOPIC_DATAPOINTS, TOPIC_RTU_DATAS};
+
+        let mgr = crate::connection::testing::manager();
+        mgr.publisher.tags.add_tag(9302, 1001, "BAY1_CB_1001".into());
+        let point = Point {
+            id_rtu: 9302,
+            ioa: 1001,
+            tag: None,
+            object_reference: "LD/XCBR1.Pos".into(),
+            fc: "ST".into(),
+            cdc: "DPS".into(),
+            value_attribute: "stVal".into(),
+            ctl_model: None,
+            interlock_check: false,
+            synchro_check: false,
+            deadband: None,
+            or_cat: None,
+        };
+        let rtu = Arc::new(RtuCtx::new(
+            crate::connection::testing::rtu(9302),
+            vec![],
+            vec![point],
+            Arc::clone(&mgr.publisher),
+            Arc::new(ConnectGate::new(1)),
+        ));
+        let refs = [("LD/XCBR1.Pos.stVal", "ST"), ("LD/XCBR1.Pos.q", "ST"), ("LD/GGIO1.Ind1.stVal", "ST"), ("LD/GGIO1.Ind1.q", "ST")];
+        let plans = || -> Vec<MemberPlan> {
+            refs.iter().map(|(r, fc)| MemberPlan { spec: None, picks: picks_for(&rtu.points, r, fc).unwrap(), unmapped: vec![] }).collect()
+        };
+        let mut members = plans();
+        assert!(unmapped_candidates(false, &members).is_empty());
+        let todo = unmapped_candidates(true, &members);
+        assert_eq!(todo, vec![2, 3]);
+        let leaf = |name: &str, ty| SpecNode { name: name.into(), ty, children: vec![] };
+        let trees = [leaf("stVal", SpecType::Bool), leaf("q", SpecType::BitString)];
+        let virt = unmapped::virtual_points(9302, todo.iter().zip(&trees).map(|(&i, t)| (refs[i].0, refs[i].1, t)));
+        for &i in &todo {
+            members[i].unmapped = picks_for(&virt, refs[i].0, refs[i].1).unwrap();
+        }
+        let report_ctx = |members: Vec<MemberPlan>, unmapped: Vec<Point>| ReportCtx {
+            rtu: Arc::clone(&rtu),
+            rcb_ref: "LD/LLN0.BR.brcbST01".into(),
+            dataset: "LD/LLN0.dsStatus".into(),
+            members,
+            unmapped_state: Mutex::new(vec![PointState::default(); unmapped.len()]),
+            unmapped,
+            alive: Arc::default(),
+        };
+        let ctx = report_ctx(members, virt);
+
+        // Pos = on (Dbpos 2), Ind1 = true, q good
+        let pos = OwnedValue::tcmd(2);
+        let ind = OwnedValue::boolean(true);
+        // SAFETY: nilai baru milik test, dihapus di akhir
+        let q = unsafe { ffi::MmsValue_newBitString(13) };
+        let raw = [pos.as_ptr(), q, ind.as_ptr(), q];
+        let element = |i: usize| (ffi::IEC61850_REASON_DATA_CHANGE, raw[i]);
+
+        let mut state = vec![PointState::default(); 1];
+        let mut ustate = vec![PointState::default(); ctx.unmapped.len()];
+        // SAFETY: raw[i] = MmsValue valid sesuai anggota ke-i
+        let c = unsafe { collect(&ctx, &mut state, &mut ustate, element) };
+        assert_eq!(c.mapped, vec![(0, "DATA_CHANGE")]);
+        assert_eq!(c.unmapped, vec![(0, "DATA_CHANGE")]);
+        assert_eq!(c.entries, 4);
+
+        let origin = ctx.origin();
+        let msgs = |p: &Point, s: &PointState, mapped: bool| -> Vec<(&'static str, Value)> {
+            rtu.publisher
+                .messages(&rtu.rtu.ip_address, p, mapped, s, "DATA_CHANGE", None, origin)
+                .into_iter()
+                .map(|(t, j)| (t, serde_json::from_str(&j).unwrap()))
+                .collect()
+        };
+        let m = msgs(&rtu.points[0], &state[0], true);
+        assert_eq!(m.iter().map(|(t, _)| *t).collect::<Vec<_>>(), vec![TOPIC_RTU_DATAS, TOPIC_DATAPOINTS]);
+        let (rd, dp) = (&m[0].1, &m[1].1);
+        assert_eq!((&rd["address"], &rd["value"], &rd["type"], &rd["tag"]), (&json!(1001), &json!(2), &json!("DPS"), &json!("")));
+        assert_eq!((&rd["object_reference"], &rd["fc"], &rd["rcb"]), (&json!("LD/XCBR1.Pos"), &json!("ST"), &json!("LD/LLN0.BR.brcbST01")));
+        // DATAPOINTS tidak berubah: tanpa object_reference / fc
+        assert_eq!((&dp["tag"], &dp["address"]), (&json!("BAY1_CB_1001"), &json!(1001)));
+        assert!(dp.get("object_reference").is_none() && dp.get("fc").is_none());
+
+        let u = msgs(&ctx.unmapped[0], &ustate[0], false);
+        assert_eq!(u.len(), 1, "anggota tanpa titik: RTU_DATAS saja");
+        let (topic, v) = &u[0];
+        assert_eq!(*topic, TOPIC_RTU_DATAS);
+        assert_eq!(
+            (&v["address"], &v["value"], &v["type"], &v["group"], &v["quality"], &v["tag"]),
+            (&Value::Null, &json!(1), &json!("SPS"), &json!(""), &json!("GOOD"), &json!(""))
+        );
+        assert_eq!((&v["object_reference"], &v["fc"], &v["source"]), (&json!("LD/GGIO1.Ind1"), &json!("ST"), &json!("REPORT")));
+
+        // RTU_DATAS_UNMAPPED=false: tidak ada titik virtual -> hanya titik termapping
+        let old = report_ctx(plans(), vec![]);
+        let mut state = vec![PointState::default(); 1];
+        // SAFETY: idem
+        let c = unsafe { collect(&old, &mut state, &mut [], element) };
+        assert_eq!((c.mapped.len(), c.unmapped.len()), (1, 0));
+
+        // SAFETY: q milik test, tidak dipakai lagi
+        unsafe { ffi::MmsValue_delete(q) };
     }
 
     #[test]

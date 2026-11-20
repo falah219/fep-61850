@@ -155,6 +155,11 @@ fn contoh_rtu_datas_dan_datapoints() {
             let flag = str_of(&v, "flag");
             assert!(flag.split('|').all(|f| known.contains(&f)), "{name}: flag {flag}");
             assert_eq!(str_of(&v, "tag").is_empty(), topic == TOPIC_RTU_DATAS, "{name}: tag");
+            // RTU_DATAS: object_reference & fc selalu ada; address null hanya untuk anggota tanpa titik (group "").
+            // DATAPOINTS tidak berubah: tanpa object_reference / fc, address selalu angka.
+            let rtu_datas = topic == TOPIC_RTU_DATAS;
+            assert_eq!((v["object_reference"].is_string(), v["fc"].is_string()), (rtu_datas, rtu_datas), "{name}: object_reference / fc");
+            assert!(v["address"].is_i64() || (rtu_datas && v["address"].is_null() && str_of(&v, "group").is_empty()), "{name}: address");
             let m = DataMessage {
                 ip_address: str_of(&v, "ip_address"),
                 protocol: "IEC61850",
@@ -162,7 +167,7 @@ fn contoh_rtu_datas_dan_datapoints() {
                 action,
                 tag: str_of(&v, "tag"),
                 value: &v["value"],
-                address: int_of(&v, "address") as i32,
+                address: v["address"].as_i64().map(|a| a as i32),
                 ca: 0,
                 asdu: 0,
                 typ: str_of(&v, "type"),
@@ -172,6 +177,8 @@ fn contoh_rtu_datas_dan_datapoints() {
                 general_action: v["general_action"].as_i64().map(|c| c as i32),
                 source,
                 rcb: v["rcb"].as_str(),
+                object_reference: v.get("object_reference").and_then(Value::as_str),
+                fc: v.get("fc").and_then(Value::as_str),
                 time: int_of(&v, "time"),
                 time_desc,
             };
@@ -181,7 +188,7 @@ fn contoh_rtu_datas_dan_datapoints() {
 }
 
 /// Sampel asli RTU_DATAS FEP IEC 104: nama & tipe field sama dengan RTU_DATAS FEP IEC 61850, kecuali tambahan
-/// IEC 61850 `source` & `rcb`; urutan field IEC 104 juga sama.
+/// IEC 61850 `source`, `rcb`, `object_reference`, `fc` (sesudah `general_action`); urutan field IEC 104 juga sama.
 #[test]
 fn rtu_datas_sama_bentuk_dengan_sampel_iec104() {
     let kind = |v: &Value| match v {
@@ -192,7 +199,7 @@ fn rtu_datas_sama_bentuk_dengan_sampel_iec104() {
         Value::Array(_) => "array",
         Value::Object(_) => "object",
     };
-    let extra = ["source", "rcb"];
+    let extra = ["source", "rcb", "object_reference", "fc"];
     let shape = |v: &Value| -> Vec<(String, &str)> {
         v.as_object().unwrap().iter().filter(|(k, _)| !extra.contains(&k.as_str())).map(|(k, x)| (k.clone(), kind(x))).collect()
     };
@@ -201,17 +208,17 @@ fn rtu_datas_sama_bentuk_dengan_sampel_iec104() {
     let ours = example("produce", "RTU_DATAS__DATA_CHANGE");
     assert_eq!(shape(&iec104), shape(&ours));
     assert!(extra.iter().all(|k| ours.get(*k).is_some()));
-    // urutan JSON: field IEC 104 sama, source & rcb tepat sesudah general_action
+    // urutan JSON: field IEC 104 sama, source, rcb, object_reference, fc tepat sesudah general_action
     let m = DataMessage {
-        ip_address: "x", protocol: "IEC61850", id_rtu: 1, action: "DATA_CHANGE", tag: "", value: &Value::Null, address: 1, ca: 0,
-        asdu: 0, typ: "SPS", quality: "GOOD", flag: "GOOD", group: "", general_action: None, source: "POLLING", rcb: None,
-        time: 0, time_desc: "SERVER",
+        ip_address: "x", protocol: "IEC61850", id_rtu: 1, action: "DATA_CHANGE", tag: "", value: &Value::Null, address: Some(1),
+        ca: 0, asdu: 0, typ: "SPS", quality: "GOOD", flag: "GOOD", group: "", general_action: None, source: "POLLING", rcb: None,
+        object_reference: Some("LD/GGIO1.Ind1"), fc: Some("ST"), time: 0, time_desc: "SERVER",
     };
     let text = serde_json::to_string(&m).unwrap();
     let pos = |k: &str| text.find(&format!("\"{k}\":")).unwrap();
     let order: Vec<&str> = iec104.as_object().unwrap().keys().map(String::as_str).collect();
     let mut expected: Vec<&str> = ["ip_address", "protocol", "id_rtu", "action", "tag", "value", "address", "ca", "asdu", "type",
-        "quality", "flag", "group", "general_action", "source", "rcb", "time", "time_desc"].to_vec();
+        "quality", "flag", "group", "general_action", "source", "rcb", "object_reference", "fc", "time", "time_desc"].to_vec();
     assert!(expected.windows(2).all(|w| pos(w[0]) < pos(w[1])), "{text}");
     expected.retain(|k| !extra.contains(k));
     let mut sorted = expected.clone();

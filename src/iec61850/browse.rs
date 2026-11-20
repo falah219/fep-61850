@@ -457,8 +457,8 @@ fn read_cf_int(ied: &Ied, obj_ref: &str, attr: &str, required: bool, errors: &mu
 }
 
 /// Satu DO (atau sub-DO) dilihat dari tiap FC: (fc, struktur di FC itu).
-type Parts<'a> = Vec<(&'a str, &'a SpecNode)>;
-type PartsRef<'a> = [(&'a str, &'a SpecNode)];
+pub(crate) type Parts<'a> = Vec<(&'a str, &'a SpecNode)>;
+pub(crate) type PartsRef<'a> = [(&'a str, &'a SpecNode)];
 
 /// `specs` = struktur LN per FC (child = DO).
 pub fn ln_objects(ln_ref: &str, specs: &[(&str, SpecNode)]) -> Vec<BrowseObject> {
@@ -508,8 +508,8 @@ fn attr<'a>(parts: &PartsRef<'a>, fc: &str, name: &str) -> Option<&'a SpecNode> 
     parts.iter().filter(|(f, _)| *f == fc).find_map(|(_, n)| n.children.iter().find(|c| c.name == name))
 }
 
-/// Tebak CDC dari atribut wajib IEC 61850-7-3.
-fn classify(parts: &PartsRef) -> Option<&'static str> {
+/// Tebak CDC dari atribut wajib IEC 61850-7-3 (juga dipakai titik virtual RTU_DATAS_UNMAPPED).
+pub(crate) fn classify(parts: &PartsRef) -> Option<&'static str> {
     let oper = attr(parts, "CO", "Oper").is_some();
     if let Some(st) = attr(parts, "ST", "stVal") {
         return match (st.ty, oper) {

@@ -15,6 +15,8 @@
   "general_action": 0,
   "source": "REPORT",
   "rcb": "BAY1LD0/LLN0.BR.brcbST01",
+  "object_reference": "BAY1LD0/XCBR1.Pos",
+  "fc": "ST",
   "time": 1794711845123,
   "time_desc": "RTU"
 }

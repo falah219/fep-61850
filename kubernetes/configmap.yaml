@@ -71,4 +71,6 @@ data:
   # Lalu lintas data ke RTU_LOGGING (CONTROL selalu dikirim); batas baris/detik per IED, 0 = tanpa batas
   LOG_DATA_TRAFFIC: "false"
   LOG_DATA_MAX_PER_SEC: "50"
+  # RTU_DATAS untuk anggota dataset RCB tanpa titik/IOA (address null, tanpa DATAPOINTS)
+  RTU_DATAS_UNMAPPED: "true"
   RUST_BACKTRACE: "0"

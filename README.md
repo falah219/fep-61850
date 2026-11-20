@@ -244,13 +244,14 @@ Aturan yang dipakai (hasil konfirmasi):
 | Field | Isi |
 |---|---|
 | `protocol` / `ca` / `asdu` | `"IEC61850"` / `0` / `0` |
-| `address` | IOA virtual |
+| `address` | IOA virtual; `null` di `RTU_DATAS` untuk anggota dataset RCB yang belum punya titik (`RTU_DATAS_UNMAPPED`, default `true`; tidak dikirim ke `DATAPOINTS`) |
 | `type` | CDC (`DPS`, `MV`, ...) |
 | `value` | angka; boolean → 0/1; DPS → 0..3 apa adanya (1=OFF, 2=ON) |
 | `action` | `GENERAL_INTERROGATION` > `INTEGRITY` > `DATA_CHANGE` > `QUALITY_CHANGE` > `DATA_UPDATE`; polling: `POLLING` / `INTEGRITY` |
 | `quality` | urutan IEC 104: `INVALID` > `SUBSTITUTED` > `QUESTIONABLE` > `GOOD` |
 | `flag` | detailQual + `SUBSTITUTED`/`TEST`/`OPERATOR_BLOCKED` + `CLOCK_NOT_SYNC`, dipisah `\|`, kosong = `GOOD` |
 | `source` / `rcb` | Tambahan IEC 61850, selalu ada sesudah `general_action`: `REPORT` + `rcb_reference` RCB pengirim report, atau `POLLING` + `null` (termasuk polling penuh karena GI / integrity) |
+| `object_reference` / `fc` | Tambahan IEC 61850, hanya `RTU_DATAS`, sesudah `rcb`: DO (`LD/LN.DO`) dan FC titik / anggota dataset. `DATAPOINTS` tidak berubah |
 | `group` | `master_data_objects.id_group` (UUID) dari baris `initial` = CDC dan `protocol = 'IEC61850'`; `""` kalau tidak ada. Sama dengan FEP IEC 104 (`group` = UUID) |
 | `general_action` | `master_general_actions.code` **apa adanya** dari DB untuk `name_action` = `action` dan `protocol='IEC61850'`; `null` kalau tidak ada. Kode internal GRITA, **bukan** nomor COT (IEC 104 mengirim `0` untuk `SPONTANEOUS`); nilainya bergantung isi tabel, lihat query di [docs/KAFKA_PAYLOADS.md](docs/KAFKA_PAYLOADS.md#31-rtu_datas-dan-datapoints) |
 | `time` / `time_desc` | atribut `t` (sudah UTC, **tidak** dikoreksi `TIMEZONE`) / `RTU`; tanpa `t` → waktu server / `SERVER` |

@@ -36,7 +36,7 @@ Daftar isi:
 | `MASTER_RTU_EVENTS` | consume | (tidak dibaca) | `id_rtu` sebuah RTU diganti | [master_rtu_event.rs](../src/kafka/handlers/master_rtu_event.rs) |
 | `MANUAL_SET_EVENT` | consume | (tidak dibaca) | Manual set tag dinyalakan/dimatikan | [manual_set.rs](../src/kafka/handlers/manual_set.rs) |
 | `RTU_COMMAND_CONFIG_REQUEST` | consume | (tidak dibaca) | Permintaan konfigurasi command | [event_handler.rs](../src/kafka/event_handler.rs) (hanya dicatat di log) |
-| `RTU_DATAS` | produce | `id_rtu` | Setiap nilai titik dikirim (report, GI, integrity, polling) | [publisher/message_builder.rs](../src/kafka/publisher/message_builder.rs) |
+| `RTU_DATAS` | produce | `id_rtu` | Setiap nilai titik dikirim (report, GI, integrity, polling), plus anggota dataset RCB yang belum dimapping (`RTU_DATAS_UNMAPPED`) | [publisher/message_builder.rs](../src/kafka/publisher/message_builder.rs) |
 | `DATAPOINTS` | produce | `id_rtu` | Sama dengan `RTU_DATAS`, hanya titik yang punya tag dan tidak manual set | [publisher/message_builder.rs](../src/kafka/publisher/message_builder.rs) |
 | `RTU_STATUS` | produce | `id_rtu` (`"0"` untuk sistem) | Konek/putus MMS, heartbeat, ping channel, start/stop FEP | [producer.rs](../src/kafka/producer.rs), [health_check.rs](../src/connection/health_check.rs), [network_ping.rs](../src/connection/network_ping.rs), [reconnection.rs](../src/connection/reconnection.rs) |
 | `RTU_LOGGING` | produce | `id_rtu` | Kejadian koneksi/RCB/command, lalu lintas data (`LOG_DATA_TRAFFIC`), CONTROL TX/RX | [producer.rs](../src/kafka/producer.rs), [traffic.rs](../src/iec61850/traffic.rs), [acquisition.rs](../src/iec61850/acquisition.rs) |
@@ -554,12 +554,16 @@ Tidak ada balasan (sama dengan FEP IEC 104).
 
 Struct: `DataMessage` ([models.rs](../src/kafka/models.rs)), dibuat di
 [message_builder.rs](../src/kafka/publisher/message_builder.rs). Key = `id_rtu`. Urutan field sama dengan FEP IEC 104;
-tambahan IEC 61850 `source` dan `rcb` **selalu ada** dan diletakkan tepat sesudah `general_action` (field IEC 104 lain tidak
-bergeser, dicek test `rtu_datas_sama_bentuk_dengan_sampel_iec104`).
+tambahan IEC 61850 `source` dan `rcb` **selalu ada** dan diletakkan tepat sesudah `general_action`, lalu (hanya `RTU_DATAS`)
+`object_reference` dan `fc` sesudah `rcb` (field IEC 104 lain tidak bergeser, dicek test
+`rtu_datas_sama_bentuk_dengan_sampel_iec104`).
 
-- `RTU_DATAS`: **setiap** nilai titik yang dikirim. `tag` selalu `""`, `value` mentah.
+- `RTU_DATAS`: **setiap** nilai titik yang dikirim. `tag` selalu `""`, `value` mentah. Ditambah anggota dataset RCB aktif
+  yang **belum** punya titik/IOA (lihat [Anggota dataset tanpa titik](#anggota-dataset-tanpa-titik-rtu_datas_unmapped)).
 - `DATAPOINTS`: pesan yang sama, hanya kalau titik punya tag (TagResolver), tag tidak manual set, dan tag tidak kosong
-  setelah disaring (hanya `A-Z a-z 0-9 _ -`). `tag` terisi, `value` sudah melalui formula (`formulas`).
+  setelah disaring (hanya `A-Z a-z 0-9 _ -`). `tag` terisi, `value` sudah melalui formula (`formulas`). **Bentuknya tidak
+  berubah** (tanpa `object_reference` / `fc`, `address` selalu angka) karena dipakai alarm; anggota tanpa titik tidak pernah
+  dikirim ke `DATAPOINTS`.
 
 | Field | Tipe | Arti / nilai |
 |---|---|---|
@@ -569,16 +573,18 @@ bergeser, dicek test `rtu_datas_sama_bentuk_dengan_sampel_iec104`).
 | `action` | string | Penyebab pengiriman (tabel di bawah) |
 | `tag` | string | `""` di `RTU_DATAS`; tag di `DATAPOINTS` |
 | `value` | number / null | Nilai (tabel per CDC). `null` kalau tipe MMS tidak didukung / float NaN |
-| `address` | integer | IOA virtual (`master_datapoints.ioa`) |
+| `address` | integer / null | IOA virtual (`master_datapoints.ioa`). `null` hanya di `RTU_DATAS` untuk anggota dataset tanpa titik |
 | `ca` | integer | selalu `0` |
 | `asdu` | integer | selalu `0` |
-| `type` | string | CDC titik (`SPS`, `DPS`, `MV`, ...) dari mapping |
+| `type` | string | CDC titik (`SPS`, `DPS`, `MV`, ...) dari mapping. Anggota tanpa titik: CDC tebakan dari struktur, `""` kalau tidak yakin |
 | `quality` | string | `GOOD`, `INVALID`, `SUBSTITUTED`, `QUESTIONABLE` |
 | `flag` | string | Detail quality dipisah `\|`, `GOOD` kalau kosong |
-| `group` | string | `master_data_objects.id_group` (UUID) untuk `initial` = CDC dan `protocol = 'IEC61850'`; `""` kalau tidak ada. Sama dengan FEP IEC 104 (lihat sampel di bagian 4) |
+| `group` | string | `master_data_objects.id_group` (UUID) untuk `initial` = CDC dan `protocol = 'IEC61850'`; `""` kalau tidak ada atau anggota tanpa titik. Sama dengan FEP IEC 104 (lihat sampel di bagian 4) |
 | `general_action` | integer / null | `master_general_actions.code` **apa adanya** untuk `name_action` = `action` (`protocol = 'IEC61850'`); `null` kalau tidak ada |
 | `source` | string | **Tambahan IEC 61850.** `REPORT` = dari report RCB; `POLLING` = dari polling, termasuk polling penuh karena event GI dan siklus integrity polling |
-| `rcb` | string / null | **Tambahan IEC 61850.** `rcb_reference` lengkap RCB yang **mengirim** report ini : nilai kolom `iec61850_report_controls.rcb_reference` **apa adanya** (`LD/LLN0.BR.<nama>` / `LD/LLN0.RP.<nama>`, bukan format MMS `LLN0$BR$...`), jadi bisa langsung di-join ke tabel itu; `null` untuk `POLLING` |
+| `rcb` | string / null | **Tambahan IEC 61850.** `rcb_reference` lengkap RCB yang **mengirim** report ini : nilai kolom `iec61850_report_controls.rcb_reference` **apa adanya** (`LD/<LN>.BR.<nama>` / `LD/<LN>.RP.<nama>`, LN apa saja, bukan format MMS `<LN>$BR$...`), jadi bisa langsung di-join ke tabel itu; `null` untuk `POLLING` |
+| `object_reference` | string | **Tambahan IEC 61850, hanya `RTU_DATAS`.** DO titik / anggota, format katalog BROWSE `LD/LN.DO` (mis. `iec61850SC01_LD0/MainXSWI1.Pos`) |
+| `fc` | string | **Tambahan IEC 61850, hanya `RTU_DATAS`.** FC titik / anggota dataset (`ST`, `MX`) |
 | `time` | integer | ms epoch UTC |
 | `time_desc` | string | `RTU` atau `SERVER` |
 
@@ -681,6 +687,25 @@ Nilai command `DPC` memakai pemetaan lain (`DPC_CLOSE_VALUE`, bagian [2.1 COMMAN
 Polling penuh karena event GI (mode POLLING):
 
 @@produce/RTU_DATAS__GENERAL_INTERROGATION.polling@@
+
+#### Anggota dataset tanpa titik (`RTU_DATAS_UNMAPPED`)
+
+Supaya frontend bisa menampilkan value / quality / time anggota dataset RCB aktif yang **belum** punya IOA (form Add Item),
+FEP mengirim `RTU_DATAS` untuk anggota itu kalau env `RTU_DATAS_UNMAPPED=true` (default). `false` = perilaku lama (anggota
+tanpa titik dibuang). Logika: [unmapped.rs](../src/iec61850/unmapped.rs).
+
+- Saat setup RCB, struktur anggota tanpa titik dibaca (`getVariableSpecification`, sekali per anggota) lalu anggota
+  dikelompokkan per DO + FC (`Pos.stVal` + `Pos.q` = satu pesan `LD/LN.Pos`, sama dengan titik termapping).
+- `type` = CDC tebakan dari struktur (aturan sama dengan BROWSE): `stVal` BOOLEAN → `SPS`, Dbpos → `DPS` (nilai 0..3 sama
+  dengan DPS termapping), INTEGER → `INS` (ENS terbaca INS), `general` → `ACT` / `ACD` (ada `dirGeneral`), `actVal` → `BCR`,
+  `mag.f` / `mag.i` → `MV`, `cVal.mag.f` → `CMV`; `stVal` tipe lain → `""`. Struktur lain tidak dikirim (log DEBUG).
+- `quality`, `flag`, `time`, `time_desc` dengan aturan yang sama dengan titik termapping; `action`, `general_action`,
+  `source`, `rcb` juga sama.
+- `address` `null`, `tag` `""`, `group` `""`. **Tidak** dikirim ke `DATAPOINTS`.
+- Satu pesan per DO per report (sama dengan titik termapping). Log ringkasan RCB:
+  `RCB <ref>: dataset <ds>, N anggota, M termapping, K diteruskan tanpa IOA`.
+
+@@produce/RTU_DATAS__UNMAPPED@@
 
 `DATAPOINTS` (tag terisi; nilai MV setelah formula):
 

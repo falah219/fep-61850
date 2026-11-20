@@ -21,6 +21,8 @@ pub struct RuntimeConfig {
     pub log_data_traffic: bool,
     /// LOG_DATA_MAX_PER_SEC: batas baris data per IED per detik (default 50, 0 = tanpa batas).
     pub log_data_max_per_sec: u32,
+    /// RTU_DATAS_UNMAPPED: RTU_DATAS untuk anggota dataset RCB yang belum punya titik (default true)
+    pub rtu_datas_unmapped: bool,
     pub subscribe_topics: Vec<String>,
 }
 
@@ -49,6 +51,7 @@ impl RuntimeConfig {
             shutdown_wait_secs: env_or("SHUTDOWN_WAIT_SECS", 5),
             log_data_traffic: crate::logger::env_flag(env::var("LOG_DATA_TRAFFIC").ok().as_deref(), false),
             log_data_max_per_sec: env_or("LOG_DATA_MAX_PER_SEC", 50),
+            rtu_datas_unmapped: crate::logger::env_flag(env::var("RTU_DATAS_UNMAPPED").ok().as_deref(), true),
             subscribe_topics: env::var("SUBSCRIBE_TOPICS")
                 .unwrap_or_else(|_| DEFAULT_TOPICS.into())
                 .split(',')

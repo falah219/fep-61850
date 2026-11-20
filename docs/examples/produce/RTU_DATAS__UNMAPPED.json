@@ -1,0 +1,22 @@
+{
+  "ip_address": "192.168.212.14",
+  "protocol": "IEC61850",
+  "id_rtu": 9302,
+  "action": "DATA_CHANGE",
+  "tag": "",
+  "value": 1,
+  "address": null,
+  "ca": 0,
+  "asdu": 0,
+  "type": "INS",
+  "quality": "GOOD",
+  "flag": "GOOD",
+  "group": "",
+  "general_action": 0,
+  "source": "REPORT",
+  "rcb": "iec61850SC01_LD0/LLN0.BR.brcbST01",
+  "object_reference": "iec61850SC01_LD0/LLN0.Health",
+  "fc": "ST",
+  "time": 1794711845123,
+  "time_desc": "RTU"
+}

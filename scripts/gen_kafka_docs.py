@@ -32,11 +32,19 @@ URCB_MX = "BAY1LD0/LLN0.RP.urcbMX01"
 
 
 def data(**kw):
+    """RTU_DATAS: object_reference & fc sesudah rcb."""
     base = {"ip_address": IP, "protocol": "IEC61850", "id_rtu": 9001, "action": "DATA_CHANGE", "tag": "",
             "value": 2, "address": 1001, "ca": 0, "asdu": 0, "type": "DPS", "quality": "GOOD", "flag": "GOOD",
-            "group": G_DPS, "general_action": 0, "source": "REPORT", "rcb": BRCB_ST, "time": T, "time_desc": "RTU"}
+            "group": G_DPS, "general_action": 0, "source": "REPORT", "rcb": BRCB_ST,
+            "object_reference": "BAY1LD0/XCBR1.Pos", "fc": "ST", "time": T, "time_desc": "RTU"}
     base.update(kw)
     return base
+
+def dp(**kw):
+    """DATAPOINTS: sama dengan RTU_DATAS tanpa object_reference / fc (tidak berubah)."""
+    d = data(**kw)
+    del d["object_reference"], d["fc"]
+    return d
 
 def log(line, t=T):
     return {"ip_address": IP, "protocol": "IEC61850", "id_rtu": 9001, "logging": line, "time": t}
@@ -165,21 +173,27 @@ consume = {
 produce = {
     "RTU_DATAS__DATA_CHANGE": data(),
     "RTU_DATAS__QUALITY_CHANGE": data(action="QUALITY_CHANGE", value=0.0, address=2001, type="MV", quality="INVALID",
-                                      flag="INVALID|FAILURE", group=G_MV, general_action=0, rcb=URCB_MX),
+                                      flag="INVALID|FAILURE", group=G_MV, general_action=0, rcb=URCB_MX,
+                                      object_reference="BAY1LD0/MMXU1.TotW", fc="MX"),
     "RTU_DATAS__INTEGRITY": data(action="INTEGRITY", value=231.4, address=2001, type="MV", group=G_MV, general_action=2,
-                                 rcb=URCB_MX),
+                                 rcb=URCB_MX, object_reference="BAY1LD0/MMXU1.TotW", fc="MX"),
     "RTU_DATAS__GENERAL_INTERROGATION": data(action="GENERAL_INTERROGATION", value=1, address=1002, type="SPS",
-                                             group=G_SPS, general_action=1, flag="CLOCK_NOT_SYNC"),
+                                             group=G_SPS, general_action=1, flag="CLOCK_NOT_SYNC",
+                                             object_reference="BAY1LD0/GGIO1.Ind1"),
     "RTU_DATAS__POLLING": data(ip_address="10.10.1.22", id_rtu=9002, action="POLLING", value=49.98, address=2003,
-                               type="MV", group=G_MV, general_action=2, source="POLLING", rcb=None, time=T + 877,
-                               time_desc="SERVER"),
+                               type="MV", group=G_MV, general_action=2, source="POLLING", rcb=None,
+                               object_reference="BAY2LD0/MMXU1.Hz", fc="MX", time=T + 877, time_desc="SERVER"),
     # Polling penuh karena event GI (mode POLLING / HYBRID MX): source POLLING, rcb null
     "RTU_DATAS__GENERAL_INTERROGATION.polling": data(ip_address="10.10.1.22", id_rtu=9002, action="GENERAL_INTERROGATION",
                                                      value=50.01, address=2003, type="MV", group=G_MV, general_action=1,
-                                                     source="POLLING", rcb=None, time=T + 1877, time_desc="SERVER"),
-    "DATAPOINTS__DATA_CHANGE": data(tag="BAY1_CB_1001"),
-    "DATAPOINTS__INTEGRITY": data(action="INTEGRITY", tag="BAY1_ANIN1_2001", value=2.314, address=2001, type="MV",
-                                  group=G_MV, general_action=2, rcb=URCB_MX),
+                                                     source="POLLING", rcb=None, object_reference="BAY2LD0/MMXU1.Hz",
+                                                     fc="MX", time=T + 1877, time_desc="SERVER"),
+    # Anggota dataset RCB aktif yang belum punya titik (RTU_DATAS_UNMAPPED): address null, group "", type = CDC tebakan
+    "RTU_DATAS__UNMAPPED": data(ip_address="192.168.212.14", id_rtu=9302, value=1, address=None, type="INS", group="",
+                                rcb="iec61850SC01_LD0/LLN0.BR.brcbST01", object_reference="iec61850SC01_LD0/LLN0.Health"),
+    "DATAPOINTS__DATA_CHANGE": dp(tag="BAY1_CB_1001"),
+    "DATAPOINTS__INTEGRITY": dp(action="INTEGRITY", tag="BAY1_ANIN1_2001", value=2.314, address=2001, type="MV",
+                                group=G_MV, general_action=2, rcb=URCB_MX),
     "RTU_STATUS__connection": {"ip_address": IP, "id_rtu": 9001, "protocol": "IEC61850", "status": 1, "time": T},
     "RTU_STATUS__channel": {"ip_address": IP, "id_rtu": 9001, "protocol": "IEC61850", "channel": 1, "status": 0, "time": T},
     "RTU_STATUS__system": {"ip_address": "system", "id_rtu": 0, "protocol": "IEC61850", "status": 1, "time": T},

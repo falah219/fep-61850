@@ -310,6 +310,7 @@ impl Manager {
         let mut ctx = RtuCtx::new(rtu, rcbs, points, Arc::clone(&self.publisher), Arc::clone(&self.gate));
         ctx.unmapped_ioas = unmapped_ioas;
         ctx.traffic = TrafficLog::new(self.runtime.log_data_traffic, self.runtime.log_data_max_per_sec);
+        ctx.rtu_datas_unmapped = self.runtime.rtu_datas_unmapped;
         let ctx = Arc::new(ctx);
         let thread_ctx = Arc::clone(&ctx);
         // Satu thread OS per IED: API libIEC61850 blocking, tidak boleh jalan di task async.
