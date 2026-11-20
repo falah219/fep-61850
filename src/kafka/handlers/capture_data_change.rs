@@ -346,4 +346,11 @@ mod tests {
         let m = msg(example("consume", "CAPTURE_DATA_CHANGE__iec61850_command_formulas"));
         assert!(matches!(plan(&m, db_row), Plan::RtuOfDatapoint(_)));
     }
+
+    /// id iec61850_report_controls UUID (bukan angka): tetap ReloadRtu(id_rtu), id tidak dibaca.
+    #[test]
+    fn contoh_report_controls_id_uuid_di_docs() {
+        let m = msg(example("consume", "CAPTURE_DATA_CHANGE__iec61850_report_controls"));
+        assert_eq!(plan(&m, db_row), Plan::ReloadRtu(9001));
+    }
 }

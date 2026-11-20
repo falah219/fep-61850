@@ -156,6 +156,13 @@ consume = {
                    "synchro_check": False, "is_deleted": False,
                    "created_at": "2026-11-01T02:00:00.000+00:00", "updated_at": "2026-11-16T01:10:00.000+00:00"},
         "timestamp": "2026-11-16T01:10:00.020Z", "source": "cdc_listener"},
+    "CAPTURE_DATA_CHANGE__iec61850_report_controls": {
+        "table": "iec61850_report_controls", "schema": "public", "operation": "UPDATE",
+        "record": {"id": "6a7b8c9d-0e1f-4a2b-9c3d-4e5f6a7b8c9d", "id_rtu": 9001,
+                   "rcb_reference": "simpleIOGenericIO/LLN0.BR.EventsBRCB01", "dataset_reference": None,
+                   "trg_ops": "dchg,qchg,integrity,gi", "intg_pd_ms": 5000, "buf_tm_ms": None, "enabled": True,
+                   "created_at": "2026-11-01T02:00:00.000+00:00", "updated_at": "2026-11-16T01:11:00.000+00:00"},
+        "timestamp": "2026-11-16T01:11:00.020Z", "source": "cdc_listener"},
     "CAPTURE_DATA_CHANGE__master_datapoint_iec61850s.data": {
         "table": "master_datapoint_iec61850s", "schema": "public", "operation": "UPDATE",
         "data": {"id": "9e8d7c6b-5a49-4382-a1b0-c9d8e7f6a5b4", "id_master_datapoint": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",

@@ -168,7 +168,7 @@ pub async fn load_rcbs(c: &Client, id: Option<i32>) -> DbResult<Vec<(i32, String
         .query(
             "SELECT id_rtu, rcb_reference, dataset_reference, trg_ops, intg_pd_ms, buf_tm_ms
              FROM iec61850_report_controls
-             WHERE enabled = TRUE AND ($1::INT IS NULL OR id_rtu = $1) ORDER BY id",
+             WHERE enabled = TRUE AND ($1::INT IS NULL OR id_rtu = $1) ORDER BY created_at, rcb_reference",
             &[&id],
         )
         .await

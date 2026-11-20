@@ -913,6 +913,32 @@ Sampel asli dari cdc_listener (tabel lain, diabaikan FEP; `...` apa adanya dari 
 }
 ```
 
+`iec61850_report_controls` → reload IED `record.id_rtu` (`id` UUID, tidak dibaca FEP):
+
+`docs/examples/consume/CAPTURE_DATA_CHANGE__iec61850_report_controls.json`
+
+```json
+{
+  "table": "iec61850_report_controls",
+  "schema": "public",
+  "operation": "UPDATE",
+  "record": {
+    "id": "6a7b8c9d-0e1f-4a2b-9c3d-4e5f6a7b8c9d",
+    "id_rtu": 9001,
+    "rcb_reference": "simpleIOGenericIO/LLN0.BR.EventsBRCB01",
+    "dataset_reference": null,
+    "trg_ops": "dchg,qchg,integrity,gi",
+    "intg_pd_ms": 5000,
+    "buf_tm_ms": null,
+    "enabled": true,
+    "created_at": "2026-11-01T02:00:00.000+00:00",
+    "updated_at": "2026-11-16T01:11:00.000+00:00"
+  },
+  "timestamp": "2026-11-16T01:11:00.020Z",
+  "source": "cdc_listener"
+}
+```
+
 Bentuk lama (`data`), masih diterima:
 
 `docs/examples/consume/CAPTURE_DATA_CHANGE__master_datapoint_iec61850s.data.json`

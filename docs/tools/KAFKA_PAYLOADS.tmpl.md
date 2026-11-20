@@ -489,6 +489,10 @@ Sampel asli dari cdc_listener (tabel lain, diabaikan FEP; `...` apa adanya dari 
 
 @@consume/CAPTURE_DATA_CHANGE__iec61850_command_formulas@@
 
+`iec61850_report_controls` → reload IED `record.id_rtu` (`id` UUID, tidak dibaca FEP):
+
+@@consume/CAPTURE_DATA_CHANGE__iec61850_report_controls@@
+
 Bentuk lama (`data`), masih diterima:
 
 @@consume/CAPTURE_DATA_CHANGE__master_datapoint_iec61850s.data@@

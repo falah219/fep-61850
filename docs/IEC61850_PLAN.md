@@ -160,7 +160,7 @@ Catatan:
 ### 3.2 Tabel `iec61850_report_controls` (hanya untuk mode `REPORT`/`HYBRID`)
 | Kolom | Wajib | Keterangan |
 |---|---|---|
-| `id` | ya | PK |
+| `id` | ya | PK UUID (`gen_random_uuid()`, [migrations/0009](../migrations/0009_report_controls_uuid.sql) untuk DB lama BIGSERIAL); tidak dibaca FEP |
 | `id_rtu` | ya | FK ke `iec61850s` |
 | `rcb_reference` | ya | contoh `BAY1LD0/LLN0.BR.brcbST01` (BRCB atau URCB, terbaca dari `.BR.` / `.RP.`) |
 | `dataset_reference` | | Null = pakai dataset yang sudah dikonfigurasi di IED |
