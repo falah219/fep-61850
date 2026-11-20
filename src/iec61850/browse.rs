@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use super::client::{cstring, fc_from_str, Ied, Rcb, SpecNode, SpecType};
-use super::mapper::trg_ops_text;
+use super::mapper::{opt_flds_text, trg_ops_text};
 use crate::error::{Iec61850Error, Result};
 use crate::ffi;
 
@@ -71,13 +71,13 @@ pub struct RcbInfo {
     /// `dchg,qchg,dupd,integrity,gi` (format kolom trg_ops)
     pub trg_ops: String,
     pub intg_pd_ms: u32,
-    /// `confRev` (hanya SCL_IMPORT; tidak dikirim kalau null -> respons BROWSE tidak berubah)
+    /// `ConfRev`. BROWSE: selalu ada; SCL: tidak dikirim kalau tidak ada di file
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conf_rev: Option<u32>,
-    /// `bufTime` ms (hanya SCL_IMPORT)
+    /// `BufTm` (ms). BROWSE: selalu ada; SCL: atribut `bufTime`
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buf_tm_ms: Option<u32>,
-    /// `OptFields` yang true, nama atribut SCL dipisah koma (hanya SCL_IMPORT)
+    /// `OptFlds` yang aktif, nama atribut SCL `OptFields` dipisah koma (`mapper::opt_flds_text`, sama untuk BROWSE & SCL)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opt_flds: Option<String>,
     pub members: Vec<DatasetMember>,
@@ -283,8 +283,10 @@ impl BrowseJob {
                     dataset: cur.dataset,
                     trg_ops: trg_ops_text(cur.trg_ops),
                     intg_pd_ms: cur.intg_pd_ms,
+                    conf_rev: Some(rcb.conf_rev()),
+                    buf_tm_ms: Some(cur.buf_tm_ms),
+                    opt_flds: Some(opt_flds_text(cur.opt_flds)),
                     members,
-                    ..Default::default()
                 });
             }
         }

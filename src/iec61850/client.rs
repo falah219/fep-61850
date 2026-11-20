@@ -703,6 +703,12 @@ impl Rcb {
         unsafe { ffi::ClientReportControlBlock_getRptEna(self.rcb) }
     }
 
+    /// `ConfRev` (0 kalau IED tidak mengirimnya).
+    pub fn conf_rev(&self) -> u32 {
+        // SAFETY: rcb valid
+        unsafe { ffi::ClientReportControlBlock_getConfRev(self.rcb) }
+    }
+
     pub fn rpt_id(&self) -> Option<String> {
         // SAFETY: string milik rcb, langsung disalin
         let p = unsafe { ffi::ClientReportControlBlock_getRptId(self.rcb) };

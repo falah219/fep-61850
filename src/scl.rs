@@ -11,6 +11,7 @@ use roxmltree::{Document, Node};
 use serde::{Deserialize, Serialize};
 
 use crate::iec61850::browse::{ctl_model_name, BrowseError, BrowseObject, BrowseResult, ControlInfo, DatasetMember, RcbInfo, FCS, MAX_DEPTH};
+use crate::iec61850::mapper::OPT_FLDS;
 
 /// Basis IOA per jenis titik (sama dengan seed simulator).
 pub const IOA_STATUS: i32 = 1001;
@@ -383,13 +384,13 @@ fn ln_objects(types: &Types, ln: Node, ln_ref: &str, out: &mut BrowseResult) {
     let mut dos: Vec<_> = children(*t, "DO").filter_map(|d| Some((d.attribute("name")?, d.attribute("type")?))).collect();
     dos.sort_by_key(|(n, _)| *n);
     for (do_name, do_type) in dos {
-        walk_do(types, &format!("{ln_ref}.{do_name}"), do_type, named(ln, "DOI", do_name), 0, out);
+        catalog_do(types, &format!("{ln_ref}.{do_name}"), do_type, named(ln, "DOI", do_name), 0, out);
     }
 }
 
 /// DO yang punya DA di FC mapping -> satu objek per FC (urutan FCS), CDC dari DOType. Tidak punya -> turun
 /// ke SDO (mis. WYE.phsA bertipe CMV), maks MAX_DEPTH, sama dengan browse. `inst` = DOI/SDI instance.
-fn walk_do(types: &Types, r: &str, type_id: &str, inst: Option<Node>, depth: usize, out: &mut BrowseResult) {
+fn catalog_do(types: &Types, r: &str, type_id: &str, inst: Option<Node>, depth: usize, out: &mut BrowseResult) {
     let Some(t) = types.dos.get(type_id) else {
         return out.errors.push(type_error(r, "DOType", type_id));
     };
@@ -409,7 +410,7 @@ fn walk_do(types: &Types, r: &str, type_id: &str, inst: Option<Node>, depth: usi
     let mut sdos: Vec<_> = children(*t, "SDO").filter_map(|d| Some((d.attribute("name")?, d.attribute("type")?))).collect();
     sdos.sort_by_key(|(n, _)| *n);
     for (sdo, sdo_type) in sdos {
-        walk_do(types, &format!("{r}.{sdo}"), sdo_type, inst.and_then(|i| named(i, "SDI", sdo)), depth + 1, out);
+        catalog_do(types, &format!("{r}.{sdo}"), sdo_type, inst.and_then(|i| named(i, "SDI", sdo)), depth + 1, out);
     }
 }
 
@@ -477,11 +478,8 @@ fn reports(ln: Node, ln_ref: &str, ied: &str, lds: &HashMap<&str, String>, out: 
             .collect::<Vec<_>>()
             .join(",");
         let opt_flds = children(rc, "OptFields").next().map(|o| {
-            ["seqNum", "timeStamp", "dataSet", "reasonCode", "dataRef", "entryID", "configRef", "bufOvfl"]
-                .into_iter()
-                .filter(|k| flag(o, k, false))
-                .collect::<Vec<_>>()
-                .join(",")
+            // nama & urutan sama dengan BROWSE (mapper::opt_flds_text)
+            OPT_FLDS.iter().map(|(_, k)| *k).filter(|k| flag(o, k, false)).collect::<Vec<_>>().join(",")
         });
         for inst in instances {
             out.rcbs.push(RcbInfo {
@@ -761,6 +759,8 @@ mod tests {
             (&got.reference, got.buffered, &got.dataset, &got.trg_ops, got.intg_pd_ms, &got.members),
             (&want.reference, want.buffered, &want.dataset, &want.trg_ops, want.intg_pd_ms, &want.members)
         );
+        // conf_rev / buf_tm_ms / opt_flds: BROWSE (dari IED) dan SCL berformat sama
+        assert_eq!((got.conf_rev, got.buf_tm_ms, &got.opt_flds), (want.conf_rev, want.buf_tm_ms, &want.opt_flds));
     }
 
     #[test]

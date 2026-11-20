@@ -132,6 +132,27 @@ pub fn trg_ops_text(bits: i32) -> String {
     .join(",")
 }
 
+/// Segmentation (Ed2): bit MMS 9, `getOptFlds` sudah membuang bit 0 (reserved) -> 256. libIEC61850 v1.6 tidak punya konstantanya.
+const RPT_OPT_SEGMENTATION: u32 = 256;
+
+/// Bit OptFlds (`ClientReportControlBlock_getOptFlds`) -> nama atribut SCL `OptFields`, urutan = urutan teks.
+pub const OPT_FLDS: [(u32, &str); 9] = [
+    (ffi::RPT_OPT_SEQ_NUM, "seqNum"),
+    (ffi::RPT_OPT_TIME_STAMP, "timeStamp"),
+    (ffi::RPT_OPT_DATA_SET, "dataSet"),
+    (ffi::RPT_OPT_REASON_FOR_INCLUSION, "reasonCode"),
+    (ffi::RPT_OPT_DATA_REFERENCE, "dataRef"),
+    (ffi::RPT_OPT_BUFFER_OVERFLOW, "bufOvfl"),
+    (ffi::RPT_OPT_ENTRY_ID, "entryID"),
+    (ffi::RPT_OPT_CONF_REV, "configRef"),
+    (RPT_OPT_SEGMENTATION, "segmentation"),
+];
+
+/// Bitmask OptFlds -> `seqNum,timeStamp,...` (format sama dengan SCL_IMPORT). Bit tidak dikenal diabaikan.
+pub fn opt_flds_text(bits: i32) -> String {
+    OPT_FLDS.iter().filter(|(b, _)| bits as u32 & b != 0).map(|(_, n)| *n).collect::<Vec<_>>().join(",")
+}
+
 pub fn float_value(v: f64) -> Value {
     serde_json::Number::from_f64(v).map_or(Value::Null, Value::Number)
 }
@@ -233,5 +254,18 @@ mod tests {
         assert_eq!(trg_ops_text(1 | 2 | 8 | 16), "dchg,qchg,integrity,gi");
         assert_eq!(trg_ops_text(0), "");
         assert_eq!(parse_trg_ops(&trg_ops_text(1 | 4 | 16)), Ok(Some(1 | 4 | 16)));
+    }
+
+    #[test]
+    fn opt_flds() {
+        use ffi::{RPT_OPT_CONF_REV, RPT_OPT_DATA_SET, RPT_OPT_ENTRY_ID, RPT_OPT_REASON_FOR_INCLUSION, RPT_OPT_SEQ_NUM, RPT_OPT_TIME_STAMP};
+        assert_eq!(opt_flds_text(0), "");
+        assert_eq!(opt_flds_text(RPT_OPT_TIME_STAMP as i32), "timeStamp");
+        // sama dengan string SCL di test scl.rs (katalog_cid_satu_ied)
+        let scl = RPT_OPT_SEQ_NUM | RPT_OPT_TIME_STAMP | RPT_OPT_DATA_SET | RPT_OPT_REASON_FOR_INCLUSION | RPT_OPT_ENTRY_ID | RPT_OPT_CONF_REV;
+        assert_eq!(opt_flds_text(scl as i32), "seqNum,timeStamp,dataSet,reasonCode,entryID,configRef");
+        // urutan tetap walau bit diurutkan lain; bit tak dikenal (512) diabaikan
+        assert_eq!(opt_flds_text(0x1FF | 512), "seqNum,timeStamp,dataSet,reasonCode,dataRef,bufOvfl,entryID,configRef,segmentation");
+        assert_eq!(opt_flds_text(-1).split(',').count(), OPT_FLDS.len());
     }
 }

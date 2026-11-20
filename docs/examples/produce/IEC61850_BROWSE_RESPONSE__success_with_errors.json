@@ -37,6 +37,9 @@
       "rpt_ena": false,
       "trg_ops": "dchg,qchg,gi",
       "intg_pd_ms": 0,
+      "conf_rev": 1,
+      "buf_tm_ms": 100,
+      "opt_flds": "seqNum,timeStamp,dataSet,reasonCode,entryID,configRef",
       "members": [
         {
           "object_reference": "BaselineLD0/XSWI1.Pos.stVal",

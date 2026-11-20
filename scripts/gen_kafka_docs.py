@@ -232,6 +232,7 @@ produce = {
         ],
         rcbs=[{"reference": "BaselineLD0/LLN0.BR.brcbST01", "buffered": True, "dataset": "BaselineLD0/LLN0.dsStatus",
                "rpt_id": "BaselineLD0/LLN0$BR$brcbST01", "rpt_ena": False, "trg_ops": "dchg,qchg,gi", "intg_pd_ms": 0,
+               "conf_rev": 1, "buf_tm_ms": 100, "opt_flds": "seqNum,timeStamp,dataSet,reasonCode,entryID,configRef",
                "members": [{"object_reference": "BaselineLD0/XSWI1.Pos.stVal", "fc": "ST"},
                            {"object_reference": "BaselineLD0/XSWI1.Pos.q", "fc": "ST"}]}],
         errors=[{"ref": "BaselineLD0/LLN0.BR.brcbMX01", "error": "timeout"}]),
