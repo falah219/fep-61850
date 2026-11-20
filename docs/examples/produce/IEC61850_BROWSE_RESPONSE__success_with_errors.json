@@ -3,7 +3,7 @@
   "id_rtu": 9302,
   "status": "SUCCESS",
   "source": "BROWSE",
-  "message": "3 objek, 1 RCB, 1 error",
+  "message": "3 objek, 2 RCB, 1 error",
   "objects": [
     {
       "object_reference": "BaselineLD0/XSWI1.OpCnt",
@@ -50,12 +50,23 @@
           "fc": "ST"
         }
       ]
+    },
+    {
+      "reference": "BaselineLD0/MainCSWI1.RP.brcbName01",
+      "buffered": false,
+      "dataset": null,
+      "rpt_id": null,
+      "rpt_ena": null,
+      "trg_ops": "",
+      "intg_pd_ms": 0,
+      "read_error": "temporary-unavailable",
+      "members": []
     }
   ],
   "errors": [
     {
-      "ref": "BaselineLD0/LLN0.BR.brcbMX01",
-      "error": "timeout"
+      "ref": "BaselineLD0/MainCSWI1.RP.brcbName01",
+      "error": "temporary-unavailable"
     }
   ],
   "part": 1,

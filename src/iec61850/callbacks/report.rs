@@ -32,6 +32,11 @@ impl ReportCtx {
     }
 }
 
+/// BRCB dari tag `.BR.` di referensi (LN apa saja), bukan dari nama RCB.
+fn is_brcb(rcb_ref: &str) -> bool {
+    rcb_ref.contains(".BR.")
+}
+
 pub(crate) unsafe extern "C" fn on_report(param: *mut c_void, report: ffi::ClientReport) {
     // Panic tidak boleh menyeberang ke C.
     let res = catch_unwind(AssertUnwindSafe(|| {
@@ -86,7 +91,7 @@ pub(crate) unsafe extern "C" fn on_report(param: *mut c_void, report: ffi::Clien
         let entry_id = unsafe { octet_bytes(ffi::ClientReport_getEntryId(report)) };
         // SAFETY: report valid selama callback
         let seq = unsafe { ffi::ClientReport_hasSeqNum(report) }.then(|| unsafe { ffi::ClientReport_getSeqNum(report) });
-        let brcb = ctx.rcb_ref.contains(".BR.");
+        let brcb = is_brcb(&ctx.rcb_ref);
         rtu.log_data(|| {
             let id = entry_id.as_deref().filter(|_| brcb);
             traffic::report_rx(&ctx.rcb_ref, &ctx.dataset, mask, entries, seq, id)
@@ -120,7 +125,13 @@ mod tests {
     /// (a) BRCB, (b) URCB, (e) format = rcb_reference DB; dua RCB dataset sama -> rcb masing-masing.
     #[tokio::test]
     async fn rcb_dari_rcb_penerima_format_db() {
-        let db = ["iec61850SC01_LD0/LLN0.BR.brcbST01", "iec61850SC01_LD0/LLN0.BR.brcbST02", "iec61850SC01_LD0/LLN0.RP.urcbMX01"];
+        // + RCB di LN selain LLN0 (IED 9302): rcb = rcb_reference apa adanya, tanpa asumsi LLN0
+        let db = [
+            "iec61850SC01_LD0/LLN0.BR.brcbST01",
+            "iec61850SC01_LD0/LLN0.BR.brcbST02",
+            "iec61850SC01_LD0/LLN0.RP.urcbMX01",
+            "iec61850SC01_LD0/MainCSWI1.RP.brcbName01",
+        ];
         let ctxs = report_ctxs(&db);
         for (c, want) in ctxs.iter().zip(db) {
             let o = c.origin();
@@ -128,5 +139,7 @@ mod tests {
             assert_eq!((o.source(), o.rcb()), ("REPORT", Some(want)));
         }
         assert!(ctxs[2].origin().rcb().is_some_and(|r| r.contains(".RP.")));
+        // nama "brcb..." di .RP. tetap URCB (EntryID hanya untuk .BR.)
+        assert!(!is_brcb(&ctxs[3].rcb_ref) && is_brcb(&ctxs[0].rcb_ref));
     }
 }

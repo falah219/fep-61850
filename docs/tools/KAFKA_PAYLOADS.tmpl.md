@@ -309,8 +309,9 @@ koneksi MMS yang sama. LD → LN → DO → FC (`ST`, `MX`, `CO`, `SP`):
    struktur FC itu dibangun dari **GetNameList** (`getLogicalDeviceVariables`, nama MMS `LN$FC$DO$DA`).
    Tipe `stVal` (untuk CDC) dibaca dari nilainya kalau `BROWSE_READ_VALUES=true` (default).
 3. Objek FC `CO`: `control` (SBOw/Oper/Cancel dari struktur, `ctlModel` & `sboTimeout` dari CF kalau `BROWSE_READ_VALUES`).
-4. RCB tiap LN (`.BR.` / `.RP.`): `RptEna`, `DatSet`, `RptID`, `TrgOps`, `IntgPd`, `ConfRev`, `BufTm`, `OptFlds`, dan anggota
-   dataset → `rcbs`.
+4. RCB tiap LN (`.BR.` / `.RP.`, LN apa saja, bukan hanya `LLN0`): `RptEna`, `DatSet`, `RptID`, `TrgOps`, `IntgPd`, `ConfRev`,
+   `BufTm`, `OptFlds`, dan anggota dataset → `rcbs`. RCB yang ada di daftar IED tapi nilainya gagal dibaca tetap masuk
+   `rcbs` dengan `read_error` (field lain kosong) dan juga dicatat di `errors`.
 
 Kegagalan nyata satu LN / DO / RCB **tidak** menggagalkan browse (dicatat di `errors`); LN+FC yang memang tidak ada
 (`malformed-message` + GetNameList tanpa FC itu) bukan error. Batas total `BROWSE_TIMEOUT_MS`
@@ -932,7 +933,8 @@ Dipakai dua event: `BROWSE` (model dibaca dari IED, `source: "BROWSE"`) dan `SCL
 | `rcbs[].trg_ops` | string | `TrgOps`, format kolom `trg_ops` (`dchg,qchg,dupd,integrity,gi`) |
 | `rcbs[].intg_pd_ms` | integer | `IntgPd` (ms) |
 | `rcbs[].conf_rev`, `rcbs[].buf_tm_ms`, `rcbs[].opt_flds` | integer / integer / string | `ConfRev`, `BufTm` (ms), `OptFlds` yang aktif. BROWSE: selalu ada (dari IED). SCL: `confRev`, `bufTime`, atribut `OptFields` yang true; tidak dikirim kalau tidak ada di file. Teks `opt_flds` sama untuk keduanya: nama atribut SCL dipisah koma, urutan tetap `seqNum,timeStamp,dataSet,reasonCode,dataRef,bufOvfl,entryID,configRef,segmentation` (`""` = tidak ada yang aktif) |
-| `rcbs[].members` | array | Anggota dataset `[{object_reference, fc}]`, bentuk sama dengan `objects[]` (`fc` = `""` kalau IED tidak menyertakannya) |
+| `rcbs[].read_error` | string | **Hanya ada** kalau RCB terdaftar di IED tapi `getRCBValues` gagal (mis. `temporary-unavailable`, `type-inconsistent`). Field lain kosong: `buffered` dari tag `.BR.`/`.RP.`, `dataset`/`rpt_id`/`rpt_ena` null, `trg_ops` `""`, `intg_pd_ms` 0, `members` `[]`, tanpa `conf_rev`/`buf_tm_ms`/`opt_flds`. Error yang sama ada di `errors` |
+| `rcbs[].members` | array | Anggota dataset `[{object_reference, fc}]`, bentuk sama dengan `objects[]` (`fc` = `""` kalau IED tidak menyertakannya). Dataset terbaca tapi daftar anggotanya gagal → `[]` + error `<dataset>` |
 | `errors` | array | Error **nyata** `[{ref, error}]`, **lengkap di bagian 1**, `[]` di bagian lain. FAILED: `[{ref: "browse", error: <penyebab>}]` |
 | `part` | integer | Nomor bagian, mulai 1 |
 | `total_parts` | integer | Jumlah bagian |
@@ -944,7 +946,7 @@ Isi `errors` (selain itu tidak dilaporkan):
 | `LD/LN[FC]` | `getVariableSpecification` gagal **dan** fallback GetNameList juga gagal (`getVariableSpecification: <err>; GetNameList: <err>`) |
 | `LD/LN.DO.stVal[ST]` | Variabel ada di GetNameList tapi nilainya tidak bisa dibaca (tipe / CDC tidak bisa ditentukan) |
 | `LD/LN.DO.ctlModel[CF]`, `LD/LN.DO.sboTimeout[CF]` | Atribut kontrol ada tapi tidak bisa dibaca (`sboTimeout` yang tidak ada bukan error) |
-| `LD/LN.BR.<rcb>`, `LD/LN.RP.<rcb>`, `LD/LN (BR)`, `<dataset>` | RCB / daftar RCB / anggota dataset gagal dibaca |
+| `LD/LN.BR.<rcb>`, `LD/LN.RP.<rcb>`, `LD/LN (BR)`, `<dataset>` | RCB / daftar RCB / anggota dataset gagal dibaca (RCB yang gagal tetap ada di `rcbs` dengan `read_error`) |
 | `<LD>` | Daftar LN satu LD gagal dibaca |
 | `browse` | `BROWSE_TIMEOUT_MS` tercapai (hasil sebagian), atau penyebab FAILED |
 
@@ -962,7 +964,7 @@ SUCCESS tanpa RCB / error:
 @@produce/IEC61850_BROWSE_RESPONSE__success@@
 
 SUCCESS dengan info kontrol, RCB, dan satu error nyata (**bentuk contoh**, nama objek ilustrasi untuk IED seperti Schneider
-Baseline):
+Baseline). RCB kedua (`MainCSWI1.RP.brcbName01`, di LN selain `LLN0`) terdaftar di IED tapi gagal dibaca:
 
 @@produce/IEC61850_BROWSE_RESPONSE__success_with_errors@@
 

@@ -223,6 +223,11 @@ mod tests {
     #[test]
     fn format_gi_poll_control() {
         assert_eq!(gi_tx("LD/LLN0.BR.brcbST01"), "GI TX - RCB: brcbST01");
+        // RCB & dataset di LN selain LLN0
+        assert_eq!(
+            report_rx("LD/MainCSWI1.RP.brcbName01", "LD/MainCSWI1$dsCtl", DCHG, 1, None, None),
+            "REPORT RX - RCB: brcbName01, Dataset: dsCtl, Reason: dchg, Entries: 1, SeqNum: -"
+        );
         assert_eq!(
             report_rx("LD/LLN0.BR.brcbST01", "DS", ffi::IEC61850_REASON_GI, 7, Some(1), None),
             "GI RX - RCB: brcbST01, Entries: 7"

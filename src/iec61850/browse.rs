@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::client::{cstring, fc_from_str, Ied, Rcb, SpecNode, SpecType};
 use super::mapper::{opt_flds_text, trg_ops_text};
@@ -80,7 +80,15 @@ pub struct RcbInfo {
     /// `OptFlds` yang aktif, nama atribut SCL `OptFields` dipisah koma (`mapper::opt_flds_text`, sama untuk BROWSE & SCL)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opt_flds: Option<String>,
+    /// RCB ada di IED tapi nilainya gagal dibaca (field lain kosong, error juga di `errors`); tidak dikirim kalau terbaca
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_error: Option<String>,
     pub members: Vec<DatasetMember>,
+}
+
+/// RCB yang terdaftar di IED (`.BR.` / `.RP.`) tapi `getRCBValues` gagal.
+pub fn unreadable_rcb(reference: String, tag: &str, e: &dyn std::fmt::Display) -> RcbInfo {
+    RcbInfo { reference, buffered: tag == "BR", read_error: Some(e.to_string()), ..Default::default() }
 }
 
 /// Anggota dataset, bentuk sama dengan `objects[]`: `LD/LN.DO.DA` + FC.
@@ -265,8 +273,12 @@ impl BrowseJob {
                 let rcb = match Rcb::read(ied, &reference) {
                     Ok(r) => r,
                     Err(e) if e.is_connection_lost() => return Err(e),
+                    // RCB ada di daftar IED tapi nilainya tidak terbaca (mis. temporarily-unavailable): tetap
+                    // dilaporkan supaya bisa dipilih, nilai lain kosong.
                     Err(e) => {
+                        warn!("[BROWSE] RCB {reference} tidak bisa dibaca: {e}");
                         self.error(&reference, &e);
+                        self.result.rcbs.push(unreadable_rcb(reference, tag, &e));
                         continue;
                     }
                 };
@@ -286,6 +298,7 @@ impl BrowseJob {
                     conf_rev: Some(rcb.conf_rev()),
                     buf_tm_ms: Some(cur.buf_tm_ms),
                     opt_flds: Some(opt_flds_text(cur.opt_flds)),
+                    read_error: None,
                     members,
                 });
             }
@@ -690,6 +703,23 @@ mod tests {
         assert_eq!(parse_member("BaselineLD0/XSWI1.Pos.stVal[ST]"), m("BaselineLD0/XSWI1.Pos.stVal", "ST"));
         assert_eq!(parse_member("LD/MMXU1.A[MX]"), m("LD/MMXU1.A", "MX"));
         assert_eq!(parse_member(" LD/GGIO1.Ind1 "), m("LD/GGIO1.Ind1", ""));
+    }
+
+    /// RCB terdaftar tapi getRCBValues gagal (IED 9302 `MainCSWI1.RP.brcbName01`): tetap ada di rcbs[] + read_error.
+    #[test]
+    fn rcb_gagal_dibaca_tetap_masuk() {
+        let r = unreadable_rcb("LD/MainCSWI1.RP.brcbName01".into(), "RP", &"temporarily-unavailable");
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"reference": "LD/MainCSWI1.RP.brcbName01", "buffered": false, "dataset": null, "rpt_id": null,
+                               "rpt_ena": null, "trg_ops": "", "intg_pd_ms": 0, "read_error": "temporarily-unavailable", "members": []})
+        );
+        assert!(unreadable_rcb("LD/X1.BR.b01".into(), "BR", &"e").buffered);
+        // terbaca: read_error tidak dikirim
+        let ok = serde_json::to_value(RcbInfo { reference: "LD/LLN0.BR.b".into(), ..Default::default() }).unwrap();
+        assert!(ok.get("read_error").is_none());
+        assert_eq!(serde_json::from_value::<RcbInfo>(v).unwrap(), r);
     }
 
     #[test]

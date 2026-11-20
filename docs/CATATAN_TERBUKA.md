@@ -25,6 +25,18 @@ Hal yang **belum diputuskan / belum dikonfirmasi tim**. Perbarui file ini setiap
 
 ## Temuan uji
 
+### BROWSE IED 9302: RCB `MainCSWI1.RP.brcbName01` tidak muncul (Studio 9 RCB, FEP 8)
+
+- **Penyebab (dari kode)**: browse sudah membaca RCB semua LN (bukan hanya LLN0), dan konversi referensi RCB ke MMS
+  (`LD/LN.RP.name` -> `LN$RP$name`) dilakukan libIEC61850 untuk LN apa saja. Satu-satunya jalur yang membuang RCB yang
+  terdaftar di IED adalah `getRCBValues` gagal (dulu: dicatat di `errors` lalu RCB dilewati). Studio juga gagal enable RCB
+  ini (`temporarily-unavailable`), jadi kemungkinan besar IED menjawab data-access-error yang sama saat dibaca
+  (`temporary-unavailable`) atau struktur RCB-nya tidak standar (`type-inconsistent`). Teks pastinya ada di `errors`
+  respons BROWSE 9302 dengan `ref` = `iec61850SC01_LD0/MainCSWI1.RP.brcbName01` (belum dilihat).
+- **Sekarang**: RCB itu tetap masuk `rcbs[]` dengan `read_error` (+ log WARN `[BROWSE] RCB ... tidak bisa dibaca`).
+- **Perlu dicek**: isi `read_error` di respons BROWSE 9302 berikutnya. Kalau `temporary-unavailable`, RCB ini memang tidak
+  bisa dipakai FEP (sama dengan Studio).
+
 ### Koneksi mati yang tetap terbaca CONNECTED
 
 - **Gejala**: banyak IED konek serentak (FEP start / reconnect massal). Sebagian IED tetap terlihat

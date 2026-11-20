@@ -222,7 +222,7 @@ produce = {
     # Bentuk CONTOH (nama objek ilustrasi). Error nyata saja: RCB yang tidak bisa dibaca. LN+FC yang tidak ada
     # (IED membalas malformed-message, GetNameList juga tidak punya FC itu) TIDAK masuk errors.
     "IEC61850_BROWSE_RESPONSE__success_with_errors": browse(
-        "browse-9302-01", 9302, "3 objek, 1 RCB, 1 error",
+        "browse-9302-01", 9302, "3 objek, 2 RCB, 1 error",
         [
             bo("BaselineLD0/XSWI1.OpCnt", "ST", "INS"),
             bo("BaselineLD0/XSWI1.Pos", "ST", "DPC"),
@@ -234,8 +234,11 @@ produce = {
                "rpt_id": "BaselineLD0/LLN0$BR$brcbST01", "rpt_ena": False, "trg_ops": "dchg,qchg,gi", "intg_pd_ms": 0,
                "conf_rev": 1, "buf_tm_ms": 100, "opt_flds": "seqNum,timeStamp,dataSet,reasonCode,entryID,configRef",
                "members": [{"object_reference": "BaselineLD0/XSWI1.Pos.stVal", "fc": "ST"},
-                           {"object_reference": "BaselineLD0/XSWI1.Pos.q", "fc": "ST"}]}],
-        errors=[{"ref": "BaselineLD0/LLN0.BR.brcbMX01", "error": "timeout"}]),
+                           {"object_reference": "BaselineLD0/XSWI1.Pos.q", "fc": "ST"}]},
+              # RCB di LN selain LLN0 yang ada di daftar IED tapi getRCBValues gagal: tetap dilaporkan + read_error
+              {"reference": "BaselineLD0/MainCSWI1.RP.brcbName01", "buffered": False, "dataset": None, "rpt_id": None,
+               "rpt_ena": None, "trg_ops": "", "intg_pd_ms": 0, "read_error": "temporary-unavailable", "members": []}],
+        errors=[{"ref": "BaselineLD0/MainCSWI1.RP.brcbName01", "error": "temporary-unavailable"}]),
     "IEC61850_BROWSE_RESPONSE__failed": {"key": "browse-9002-01", "id_rtu": 9002, "status": "FAILED", "source": "BROWSE",
                                          "message": "IED tidak terkoneksi", "objects": [], "rcbs": [],
                                          "errors": [{"ref": "browse", "error": "IED tidak terkoneksi"}],

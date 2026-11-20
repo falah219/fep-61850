@@ -19,6 +19,17 @@ pub fn check(err: ffi::IedClientError) -> Result<()> {
     Err(Iec61850Error::mms(err))
 }
 
+/// Dataset ACSI `LD/LN.ds` -> MMS `LD/LN$ds` (LN apa saja, bukan hanya LLN0). Referensi RCB (`LD/LN.RP.name`)
+/// dikonversi libIEC61850 sendiri (`.` -> `$` sesudah LD) di getRCBValues / setRCBValues / installReportHandler.
+pub fn dataset_to_mms(acsi: &str) -> String {
+    acsi.replacen('.', "$", 1)
+}
+
+/// Kebalikan `dataset_to_mms`: `LD/LN$ds` -> `LD/LN.ds`.
+pub fn dataset_from_mms(mms: &str) -> String {
+    mms.replace('$', ".")
+}
+
 pub fn cstring(s: &str) -> Result<CString> {
     CString::new(s).map_err(|_| Iec61850Error::InvalidConfiguration(format!("string mengandung NUL: {s:?}")))
 }
@@ -722,7 +733,7 @@ impl Rcb {
         if p.is_null() {
             return None;
         }
-        let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().replace('$', ".");
+        let s = dataset_from_mms(&unsafe { CStr::from_ptr(p) }.to_string_lossy());
         (!s.is_empty()).then_some(s)
     }
 
@@ -775,7 +786,7 @@ impl Rcb {
         let plan = plan_enable(&self.current(), s, resv_tms_secs);
         let mut mask = ffi::RCB_ELEMENT_RPT_ENA;
         // MMS memakai `$` antara LN dan nama dataset: LD/LLN0$Events
-        let ds = plan.dataset.as_deref().map(|d| cstring(&d.replacen('.', "$", 1))).transpose()?;
+        let ds = plan.dataset.as_deref().map(|d| cstring(&dataset_to_mms(d))).transpose()?;
         // SAFETY: rcb valid; setter hanya mengubah objek lokal sebelum ditulis
         unsafe {
             if let Some(ds) = &ds {
@@ -1234,6 +1245,15 @@ mod tests {
         assert_eq!(unsafe { octet_bytes(v.as_ptr()) }, Some(id.to_vec()));
         let b = OwnedValue::boolean(true);
         assert_eq!(unsafe { octet_bytes(b.as_ptr()) }, None);
+    }
+
+    /// Dataset di LN selain LLN0 (RCB `LD/MainCSWI1.RP.brcbName01` IED 9302) dikonversi sama dengan LLN0.
+    #[test]
+    fn dataset_acsi_mms_ln_apa_saja() {
+        for (acsi, mms) in [("LD/LLN0.dsStatus", "LD/LLN0$dsStatus"), ("LD/MainCSWI1.dsCtl", "LD/MainCSWI1$dsCtl")] {
+            assert_eq!(dataset_to_mms(acsi), mms);
+            assert_eq!(dataset_from_mms(mms), acsi);
+        }
     }
 
     fn opt_wajib(buffered: bool) -> i32 {

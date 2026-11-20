@@ -493,6 +493,7 @@ fn reports(ln: Node, ln_ref: &str, ied: &str, lds: &HashMap<&str, String>, out: 
                 conf_rev: num(rc, "confRev"),
                 buf_tm_ms: num(rc, "bufTime"),
                 opt_flds: opt_flds.clone(),
+                read_error: None,
                 members: members.clone(),
             });
         }
@@ -761,6 +762,23 @@ mod tests {
         );
         // conf_rev / buf_tm_ms / opt_flds: BROWSE (dari IED) dan SCL berformat sama
         assert_eq!((got.conf_rev, got.buf_tm_ms, &got.opt_flds), (want.conf_rev, want.buf_tm_ms, &want.opt_flds));
+    }
+
+    /// ReportControl di LN biasa (bukan LLN0), seperti `MainCSWI1.RP.brcbName01` IED 9302: ikut ke katalog & parse.
+    #[test]
+    fn rcb_di_ln_selain_lln0() {
+        let ln = r#"<LN lnClass="CSWI" inst="1" prefix="Main" lnType="CSWI_T">
+            <DataSet name="dsCtl"><FCDA ldInst="LD0" prefix="Main" lnClass="CSWI" lnInst="1" doName="Pos" fc="ST"/></DataSet>
+            <ReportControl name="brcbName" datSet="dsCtl" confRev="1" buffered="false"><TrgOps dchg="true"/></ReportControl>
+          </LN>"#;
+        let xml = CID.replace(r#"<LN lnClass="CSWI" inst="1" prefix="Main" lnType="CSWI_T"/>"#, ln);
+        assert_ne!(xml, CID);
+        let c = catalog(&xml, None).unwrap();
+        let r = c.result.rcbs.iter().find(|r| r.reference == "BaselineLD0/MainCSWI1.RP.brcbName01").expect("RCB di MainCSWI1");
+        assert_eq!((r.buffered, r.dataset.as_deref(), r.trg_ops.as_str()), (false, Some("BaselineLD0/MainCSWI1.dsCtl"), "dchg"));
+        assert_eq!(r.members, vec![member("BaselineLD0/MainCSWI1.Pos", "ST")]);
+        assert!(c.result.errors.is_empty(), "{:?}", c.result.errors);
+        assert!(parse(&xml, None).unwrap().rcbs.contains(&"BaselineLD0/MainCSWI1.RP.brcbName01".to_string()));
     }
 
     #[test]
